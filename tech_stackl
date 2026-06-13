@@ -1,0 +1,43 @@
+Concern Choice
+API FastAPI, Pydantic v2
+ORM/model
+declarations
+SQLModel with SQLAlchemy 2 async sessions
+Database PostgreSQL 16+
+Cache/coordination Redis
+Database migrations Alembic
+Authentication Firebase Authentication ID tokens
+Push FCM HTTP v1
+File storage S3-compatible storage or Google Cloud Storage
+Durable jobs Celery with Redis initially; move broker if durability demands grow
+Search PostgreSQL full-text + pg_trgm initially
+Chat Stream Chat mobile SDKs + Python server SDK
+Observability JSON logs + OpenTelemetry
+Deployment Kubernetes + Kustomize or Helm
+
+{
+  "firstName": "string",
+  "lastName": "string",
+  "username": "str76ing",
+  "email": "user99@example.com",
+  "password": "stringww1st",
+  "role": "user",
+  "invitationCode": "string"
+}
+
+{
+  "firstName": "admin",
+  "lastName": "test",
+  "username": "admin_test",
+  "email": "admin_test@example.com",
+  "password": "string1",
+  "role": "superadmin"
+}
+
+{
+  "email": "super_admin@example.com",
+  "password": "stri!1ngst"
+}
+
+  "email": "test@example.com",
+  "password": "Test@123456"
