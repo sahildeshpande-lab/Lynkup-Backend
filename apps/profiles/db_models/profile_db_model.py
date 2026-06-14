@@ -38,3 +38,24 @@ class Profile(SQLModel, table=True):
     welcome_message: str | None = Field(default=None, sa_column=Column(String(255)))
     updated_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
 
+
+class CompletenessWeight(SQLModel, table=True):
+    __tablename__ = "completeness_weights"
+
+    id: int = Field(default=1, primary_key=True)
+    bio: float = Field(default=10.0)
+    university: float = Field(default=10.0)
+    major: float = Field(default=10.0)
+    edu_level: float = Field(default=10.0)
+    first_name: float = Field(default=10.0)
+    last_name: float = Field(default=10.0)
+    email: float = Field(default=10.0)
+    profile_photo_url: float = Field(default=10.0)
+    interests: float = Field(default=10.0)
+    graduation_date: float = Field(default=10.0)
+    location: float = Field(default=10.0)
+
+
+Profile.model_rebuild()
+CompletenessWeight.model_rebuild()
+

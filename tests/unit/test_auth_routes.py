@@ -247,40 +247,82 @@ def test_reset_password_route(monkeypatch) -> None:
     assert body["message"] == "Password reset successful"
 
 
-def test_social_auth_route(monkeypatch) -> None:
-    async def _mock_social_auth_form(provider, idToken, email, firstName, lastName, fullName, profilePhoto, db):
+def test_social_auth_route_login_success(monkeypatch) -> None:
+    async def _mock_social_auth_bearer(id_token, db):
         return {
-            "accessToken": "access_token_123",
-            "refreshToken": "refresh_token_123",
+            "access_token": "access_token_123",
+            "refresh_token": "refresh_token_123",
             "user": {
                 "id": "user-id-123",
-                "firstName": firstName or "Jane",
-                "lastName": lastName or "Doe",
-                    "email": email or "jane@example.com",
+                "firstName": "Jane",
+                "lastName": "Doe",
+                "email": "jane@example.com",
                 "role": "user",
                 "createdAt": datetime.now().isoformat(),
                 "updatedAt": datetime.now().isoformat(),
             },
-        }
+        }, False
 
-    monkeypatch.setattr(auth_routes.services, "social_auth_form", _mock_social_auth_form)
+    monkeypatch.setattr(auth_routes, "social_auth_bearer", _mock_social_auth_bearer)
 
     response = client.post(
         "/api/v1/auth/social",
-        data={
-            "provider": "google",
-            "idToken": "google_test_token",
-            "email": "jane@example.com",
-            "firstName": "Jane",
-            "lastName": "Doe",
-            "fullName": "Jane Doe",
-        },
+        headers={"Authorization": "Bearer google_test_token"},
     )
-
     assert response.status_code == 200
     body = response.json()
     assert body["status"] is True
-    assert body["message"] == "social auth processed"
-    assert body["data"]["accessToken"] == "access_token_123"
+    assert body["message"] == "Login successful"
+    assert body["data"]["access_token"] == "access_token_123"
     assert body["data"]["user"]["email"] == "jane@example.com"
+
+
+def test_social_auth_route_signup_success(monkeypatch) -> None:
+    async def _mock_social_auth_bearer(id_token, db):
+        return {
+            "access_token": "access_token_123",
+            "refresh_token": "refresh_token_123",
+            "user": {
+                "id": "user-id-123",
+                "firstName": "Jane",
+                "lastName": "Doe",
+                "email": "jane@example.com",
+                "role": "user",
+                "createdAt": datetime.now().isoformat(),
+                "updatedAt": datetime.now().isoformat(),
+            },
+        }, True
+
+    monkeypatch.setattr(auth_routes, "social_auth_bearer", _mock_social_auth_bearer)
+
+    response = client.post(
+        "/api/v1/auth/social",
+        headers={"Authorization": "Bearer google_test_token"},
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] is True
+    assert body["message"] == "Signup successful"
+    assert body["data"]["access_token"] == "access_token_123"
+    assert body["data"]["user"]["email"] == "jane@example.com"
+
+
+def test_social_auth_route_conflict(monkeypatch) -> None:
+    from apps.accounts.services import AccountExistsException
+    async def _mock_social_auth_bearer(id_token, db):
+        raise AccountExistsException(registration_type="email")
+
+    monkeypatch.setattr(auth_routes, "social_auth_bearer", _mock_social_auth_bearer)
+
+    response = client.post(
+        "/api/v1/auth/social",
+        headers={"Authorization": "Bearer google_test_token"},
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["success"] is False
+    assert body["error_code"] == "ACCOUNT_EXISTS"
+    assert body["registration_type"] == "email"
 

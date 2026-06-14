@@ -46,3 +46,17 @@ class ProfileVisibilityRequest(BaseModel):
 class ReportUserRequest(BaseModel):
     reason: str
     description: Optional[str] = None
+
+
+class CompletenessWeightsUpdateRequest(BaseModel):
+    bio: Optional[float] = None
+    university: Optional[float] = None
+    major: Optional[float] = None
+    edu_level: Optional[float] = None
+    first_name: Optional[float] = None
+    last_name: Optional[float] = None
+    email: Optional[float] = None
+    profile_photo_url: Optional[float] = None
+    interests: Optional[float] = None
+    graduation_date: Optional[float] = None
+    location: Optional[float] = None

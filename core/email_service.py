@@ -53,16 +53,40 @@ async def _log_transactional_email(to_email: str, subject: str, html_body: str, 
             session.add(log_entry)
             await session.commit()
 
-            # Limit to 50 records
-            stmt = select(TransactionalEmailLog).order_by(desc(TransactionalEmailLog.created_at))
-            logs = (await session.execute(stmt)).scalars().all()
-            if len(logs) > 50:
-                logs_to_delete = logs[50:]
-                for old_log in logs_to_delete:
-                    await session.delete(old_log)
-                await session.commit()
+
     except Exception as e:
         logger.exception("Failed to log transactional email: %s", e)
+
+
+async def _actually_send_email_via_sendgrid(to_email: str, subject: str, html_body: str, from_email: str) -> bool:
+    api_key = os.getenv("SENDGRID_API_KEY")
+    if not api_key or not from_email or _sender_is_placeholder(from_email or ""):
+        logger.warning("Email send simulated: SendGrid is not fully configured for %s", to_email)
+        return True
+
+    try:
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import Mail
+    except Exception:
+        logger.exception("Email send skipped: SendGrid client could not be imported")
+        return False
+
+    try:
+        message = Mail(
+            from_email=from_email,
+            to_emails=to_email,
+            subject=subject,
+            html_content=html_body,
+        )
+        client = SendGridAPIClient(api_key)
+        response = client.send(message)
+        success = 200 <= response.status_code < 300
+        if not success:
+            logger.error("SendGrid rejected email to %s with status %s", to_email, getattr(response, "status_code", None))
+        return success
+    except Exception:
+        logger.exception("Email send failed while delivering to %s", to_email)
+        return False
 
 
 async def _send_email(to_email: str, subject: str, html_body: str, purpose: str, attachment: str | None = None) -> bool:
@@ -70,41 +94,48 @@ async def _send_email(to_email: str, subject: str, html_body: str, purpose: str,
         logger.info("Email send skipped: is_send flag is false for %s", to_email)
         return False
 
-    api_key = os.getenv("SENDGRID_API_KEY")
-    from_email = os.getenv("SENDGRID_FROM_EMAIL")
+    # Queue the email by inserting with is_sent=False
+    await _log_transactional_email(to_email, subject, html_body, purpose, attachment, is_sent=False)
+    logger.info("Email queued for %s", to_email)
+    return True
 
-    if not api_key or not from_email or _sender_is_placeholder(from_email or ""):
-        logger.warning("Email send simulated: SendGrid is not fully configured for %s", to_email)
-        success = True
-    else:
-        success = False
-        try:
-            from sendgrid import SendGridAPIClient
-            from sendgrid.helpers.mail import Mail
-        except Exception:
-            logger.exception("Email send skipped: SendGrid client could not be imported")
-            return False
 
-        try:
-            message = Mail(
-                from_email=from_email,
-                to_emails=to_email,
-                subject=subject,
-                html_content=html_body,
-            )
-            client = SendGridAPIClient(api_key)
-            response = client.send(message)
-            success = 200 <= response.status_code < 300
-            if not success:
-                logger.error("SendGrid rejected email to %s with status %s", to_email, getattr(response, "status_code", None))
-        except Exception:
-            logger.exception("Email send failed while delivering to %s", to_email)
-            success = False
+async def cron_send_emails() -> None:
+    """Cron task to process and send unsent emails in the transactional email log (limit 20)."""
+    import asyncio
+    from apps.accounts.db_models import TransactionalEmailLog
+    from core.db.session import async_session_factory
+    from sqlmodel import select
+    from datetime import datetime, timezone
 
-    await _log_transactional_email(to_email, subject, html_body, purpose, attachment, is_sent=success)
-    if success:
-        logger.info("Email sent and logged for %s", to_email)
-    return success
+    logger.info("Starting email cron task...")
+    try:
+        while True:
+            async with async_session_factory() as session:
+                # Query unsent emails with a limit of 20
+                stmt = select(TransactionalEmailLog).where(TransactionalEmailLog.is_sent == False).limit(20)
+                unsent_emails = (await session.execute(stmt)).scalars().all()
+                
+                for email_log in unsent_emails:
+                    logger.info("Processing queued email ID %s to %s", email_log.id, email_log.to)
+                    success = await _actually_send_email_via_sendgrid(
+                        to_email=email_log.to,
+                        subject=email_log.subject,
+                        html_body=email_log.body,
+                        from_email=email_log.from_email,
+                    )
+                    if success:
+                        email_log.is_sent = True
+                        email_log.updated_at = datetime.now(timezone.utc)
+                        session.add(email_log)
+                        logger.info("Email ID %s successfully sent.", email_log.id)
+                
+                await session.commit()
+            await asyncio.sleep(60)
+    except asyncio.CancelledError:
+        logger.info("Email cron task cancelled.")
+    except Exception as e:
+        logger.exception("Failed running email cron task: %s", e)
 
 
 def _load_template(template_name: str) -> str:
@@ -146,9 +177,18 @@ def _otp_template_details(otp_purpose: str) -> tuple[str, str, str]:
 
 def build_otp_email_html(otp: str, otp_purpose: str = "email_verification") -> str:
     title, header, body_text = _otp_template_details(otp_purpose)
+    
+    raw_keys = set()
+    if otp_purpose == "email_verification":
+        base_url = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
+        verification_link = f"{base_url}/api/v1/auth/verify-email?token={otp}"
+        body_text += f"<br/><br/>Or click this link to verify your email:<br/><a href='{verification_link}'>{verification_link}</a>"
+        raw_keys.add("body_text")
+
     body_html = _render_template(
         "auth/otp_email.html",
         {"otp": otp, "header": header, "body_text": body_text},
+        raw_keys=raw_keys,
     )
     return _render_email_layout(title, body_html)
 

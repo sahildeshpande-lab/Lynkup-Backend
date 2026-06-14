@@ -115,6 +115,27 @@ def test_admin_signup_returns_success_payload(monkeypatch) -> None:
     assert body["data"]["user"]["email"] == "ada@example.com"
 
 
+def test_admin_login_route(monkeypatch) -> None:
+    async def _mock_admin_signin(payload, db):
+        from apps.accounts.schemas import ApiResponse
+        return ApiResponse(
+            status=True,
+            message="Login successful",
+            data={"access_token": "admin_token_123"}
+        )
+
+    monkeypatch.setattr(admin_routes.services, "admin_signin", _mock_admin_signin)
+
+    # Test /auth/admin/login
+    response_login = client.post(
+        "/api/v1/auth/admin/login",
+        json={"email": "admin@example.com", "password": "Password123"},
+    )
+    assert response_login.status_code == 200
+    assert response_login.json()["status"] is True
+    assert response_login.json()["data"]["access_token"] == "admin_token_123"
+
+
 def test_admin_education_returns_success_payload(monkeypatch) -> None:
     async def _mock_admin_education(payload, db):
         return {"education": payload.model_dump(), "saved": True}
@@ -189,3 +210,37 @@ def test_admin_suspend_and_ban_routes_exist(monkeypatch) -> None:
     assert suspend_response.json()["data"]["status"] == "suspended"
     assert ban_response.status_code == 200
     assert ban_response.json()["data"]["status"] == "banned"
+
+
+def test_update_completeness_weights(monkeypatch) -> None:
+    from apps.profiles import services as profiles_services
+
+    async def _mock_update_completeness_weights(payload, db):
+        return {
+            "message": "Completeness weights updated and all profiles recalculated.",
+            "weights": {
+                "bio": 15.0,
+                "university": 10.0,
+                "major": 10.0,
+                "edu_level": 10.0,
+                "first_name": 10.0,
+                "last_name": 10.0,
+                "email": 10.0,
+                "profile_photo_url": 10.0,
+                "interests": 10.0,
+                "graduation_date": 10.0,
+                "location": 10.0
+            }
+        }
+
+    monkeypatch.setattr(profiles_services, "update_completeness_weights", _mock_update_completeness_weights)
+
+    response = client.patch(
+        "/api/v1/update/completeness",
+        json={"bio": 15.0},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is True
+    assert body["data"]["weights"]["bio"] == 15.0

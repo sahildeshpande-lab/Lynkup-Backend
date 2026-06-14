@@ -230,6 +230,10 @@ async def admin_update_user(user_id: str, payload: AdminUserUpdateRequest, db: A
     user.updated_at = datetime.now(timezone.utc)
     db.add(user)
     db.add(profile)
+    await db.flush()
+    from apps.profiles.services import calculate_completeness_score
+    profile.completeness_score = await calculate_completeness_score(user.id, db)
+    db.add(profile)
     await db.commit()
     await db.refresh(user)
     await db.refresh(profile)

@@ -1,6 +1,6 @@
 from __future__ import annotations
-
-from fastapi import APIRouter, status, Depends, UploadFile, File, Form
+from typing import Any
+from fastapi import APIRouter, status, Depends, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,28 +30,50 @@ from . import services
 router = APIRouter(prefix="/auth", tags=["1] User Registration, Authentication & Onboarding"])
 
 
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.responses import JSONResponse
+from apps.accounts.services import AccountExistsException, social_auth_bearer
+
+bearer_scheme = HTTPBearer(
+    scheme_name="BearerAuth",
+    bearerFormat="JWT",
+    description="Send the Firebase ID token as: Bearer <token>",
+    auto_error=False,
+)
+
 @router.post("/social", response_model=ApiResponse, status_code=status.HTTP_200_OK)
 async def social_auth(
-    provider: SocialProvider = Form(...),
-    idToken: str = Form(...),
-    email: str | None = Form(None),
-    firstName: str | None = Form(None),
-    lastName: str | None = Form(None),
-    fullName: str | None = Form(None),
-    profilePhoto: UploadFile | None = File(None),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_session),
-) -> ApiResponse:
-    data = await services.social_auth_form(
-        provider=provider,
-        idToken=idToken,
-        email=email,
-        firstName=firstName,
-        lastName=lastName,
-        fullName=fullName,
-        profilePhoto=profilePhoto,
-        db=db,
-    )
-    return ApiResponse(message="social auth processed", data=data)
+) -> Any:
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Firebase ID token",
+        )
+    try:
+        data, created = await social_auth_bearer(credentials.credentials, db)
+        msg = "Signup successful" if created else "Login successful"
+        status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        # Wrap response matching existing schema structure
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "status": True,
+                "message": msg,
+                "data": data
+            }
+        )
+    except AccountExistsException as exc:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "success": False,
+                "error_code": "ACCOUNT_EXISTS",
+                "message": "Account already exists. Please login using your registered method.",
+                "registration_type": exc.registration_type
+            }
+        )
 
 
 from core.auth.firebase import get_current_firebase_user
@@ -90,6 +112,11 @@ async def login(
 @router.post("/verify-otp")
 async def verify_otp(payload: OtpVerifyRequest, db: AsyncSession = Depends(get_session), firebase_user: dict = Depends(get_current_firebase_user)):
     return await services.verify_otp(payload, firebase_user, db)
+
+
+@router.get("/verify-email")
+async def verify_email(token: str, db: AsyncSession = Depends(get_session)):
+    return await services.verify_email(token, db)
 
 
 @router.post("/resend-otp", response_model=ApiResponse)

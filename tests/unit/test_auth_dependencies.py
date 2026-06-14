@@ -137,12 +137,11 @@ async def test_deleted_account_raises_403(db_session: AsyncSession):
     assert "Account deleted" in exc.value.detail
 
 @pytest.mark.asyncio
-async def test_inactive_account_does_not_raise_403(db_session: AsyncSession):
+async def test_inactive_account_raises_403(db_session: AsyncSession):
     uid = str(uuid.uuid4())
     email = f"inactive_{uid[:8]}@example.com"
     user = User(
         firebase_uid=uid,
-        
         email=email,
         status="suspended",
         onboarding_status="not_started",
@@ -153,8 +152,10 @@ async def test_inactive_account_does_not_raise_403(db_session: AsyncSession):
     await db_session.flush()
     await db_session.commit()
     firebase_claims = {"uid": uid, "email": email, "name": f"Inactive {uid[:8]}"}
-    res_user = await get_current_user(firebase_user=firebase_claims, db=db_session)
-    assert res_user.id == user.id
+    with pytest.raises(HTTPException) as exc:
+        await get_current_user(firebase_user=firebase_claims, db=db_session)
+    assert exc.value.status_code == 403
+    assert "Account is suspended" in exc.value.detail
 
 @pytest.mark.asyncio
 async def test_login_throttle_prevents_unnecessary_update(db_session: AsyncSession):

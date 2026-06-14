@@ -107,7 +107,14 @@ def test_get_me_returns_user_payload(monkeypatch) -> None:
     assert body["data"]["user"]["is_onboarding"] is True
 
 
-def test_get_me_completeness_returns_score() -> None:
+def test_get_me_completeness_returns_score(monkeypatch) -> None:
+    from apps.profiles import services as profiles_services
+
+    async def _mock_get_me_completeness(token, db):
+        return {"completeness_score": 33}
+
+    monkeypatch.setattr(profiles_services, "get_me_completeness", _mock_get_me_completeness)
+
     response = client.get(
         "/api/v1/users/me/completeness",
         headers={"Authorization": "Bearer access_jane@example.com"},
@@ -140,4 +147,5 @@ def test_delete_user_me_returns_success(monkeypatch) -> None:
     assert body["data"]["deleted"] is True
     assert body["data"]["status"] == "deleting"
     assert "deleted_at" in body["data"]
+
 

@@ -35,9 +35,10 @@ Deployment Kubernetes + Kustomize or Helm
 }
 
 {
-  "email": "super_admin@example.com",
-  "password": "stri!1ngst"
+388a5610-4432-4b0a-ad88-5351dde3f90d
 }
+
+test@123
 
   "email": "test@example.com",
   "password": "Test@123456"

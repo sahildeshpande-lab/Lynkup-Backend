@@ -34,8 +34,11 @@ async def get_me(
 
 
 @router.get("/users/me/completeness", response_model=ApiResponse)
-def get_me_completeness(token: str = Depends(_require_bearer_token)) -> ApiResponse:
-    return ApiResponse(message="profile completeness fetched", data=services.get_me_completeness(token))
+async def get_me_completeness(
+    token: str = Depends(_require_bearer_token),
+    db: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    return ApiResponse(message="profile completeness fetched", data=await services.get_me_completeness(token, db))
 
 
 @router.patch("/users/me", response_model=ApiResponse)
@@ -121,5 +124,8 @@ def accept_lynkup(userId: str) -> ApiResponse:
 @router.delete("/users/{userId}/lynkup", response_model=ApiResponse)
 def remove_lynkup(userId: str) -> ApiResponse:
     return ApiResponse(message="lynkup removed", data=services.remove_lynkup(userId))
+
+
+
 
 

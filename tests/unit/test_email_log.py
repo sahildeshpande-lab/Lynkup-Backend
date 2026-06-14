@@ -11,7 +11,7 @@ from core.email_service import send_otp_email
 
 
 @pytest.mark.asyncio
-async def test_email_service_is_send_and_logging() -> None:
+async def test_email_service_is_send_and_logging(monkeypatch) -> None:
     try:
         await init_db()
         # 1. Create a dummy user in DB
@@ -41,6 +41,14 @@ async def test_email_service_is_send_and_logging() -> None:
         # 2. Send email
         success = await send_otp_email("test_send@example.com", "123456", "email_verification")
         assert success is True
+
+        # Run cron worker to process the queued email
+        import asyncio
+        from core.email_service import cron_send_emails
+        async def mock_sleep(delay):
+            raise asyncio.CancelledError()
+        monkeypatch.setattr(asyncio, "sleep", mock_sleep)
+        await cron_send_emails()
         
         async with async_session_factory() as session:
             stmt = select(TransactionalEmailLog).where(TransactionalEmailLog.to == "test_send@example.com")
@@ -54,9 +62,9 @@ async def test_email_service_is_send_and_logging() -> None:
 
 
 @pytest.mark.asyncio
-async def test_email_log_limit_50() -> None:
+async def test_email_log_no_limit() -> None:
     try:
-        # Test capping at 50 logs
+        # Test that logs are not capped
         async with async_session_factory() as session:
             # Clear existing logs first
             for log in (await session.execute(select(TransactionalEmailLog))).scalars().all():
@@ -76,11 +84,11 @@ async def test_email_log_limit_50() -> None:
                 session.add(log_entry)
             await session.commit()
 
-        # Trigger sending one more email (should trigger cleanup and cap it at 50 records)
+        # Trigger sending one more email (should not trigger cleanup, count should be 56)
         await send_otp_email("test_send@example.com", "123456", "email_verification")
 
         async with async_session_factory() as session:
             count = (await session.execute(select(func.count()).select_from(TransactionalEmailLog))).scalar_one()
-            assert count == 50
+            assert count == 56
     finally:
         await engine.dispose()

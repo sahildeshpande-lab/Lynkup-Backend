@@ -14,7 +14,7 @@ from .schemas import (
     ApiResponse,
 )
 from apps.accounts.schemas import EmailSignupRequest, LoginRequest, RefreshTokenRequest
-from apps.profiles.schemas import EducationUpdateRequest
+from apps.profiles.schemas import EducationUpdateRequest, CompletenessWeightsUpdateRequest
 
 router = APIRouter(tags=["4] Admin Management"])
 
@@ -107,3 +107,14 @@ async def ban_user_by_admin(
 ) -> ApiResponse:
     _ = userId
     return ApiResponse(message="user banned by admin", data=await services.admin_ban_user(payload, db))
+
+
+@router.patch("/update/completeness", response_model=ApiResponse)
+async def update_completeness_weights(
+    payload: CompletenessWeightsUpdateRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+) -> ApiResponse:
+    from apps.profiles import services as profiles_services
+    data = await profiles_services.update_completeness_weights(payload, db)
+    return ApiResponse(message="Completeness weights updated", data=data)

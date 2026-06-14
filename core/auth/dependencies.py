@@ -30,20 +30,43 @@ def _credentials_or_401(
     return credentials
 
 
+# async def get_current_firebase_user(
+#     credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+# ) -> dict:
+#     """Verify a Firebase ID token without a revocation network call."""
+#     credentials = _credentials_or_401(credentials)
+#     try:
+#         return verify_firebase_token(credentials.credentials, check_revoked=False)
+#     except Exception as exc:
+#         raise HTTPException(
+#             status_code=status.HTTP_401_UNAUTHORIZED,
+#             detail="Invalid Firebase ID token",
+#         ) from exc
+
 async def get_current_firebase_user(
     credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
 ) -> dict:
-    """Verify a Firebase ID token without a revocation network call."""
     credentials = _credentials_or_401(credentials)
+
+    print("Auth header received")
+    print("Token length:", len(credentials.credentials))
+
     try:
-        return verify_firebase_token(credentials.credentials, check_revoked=False)
+        decoded = verify_firebase_token(
+            credentials.credentials,
+            check_revoked=False,
+        )
+        print("Decoded UID:", decoded.get("uid"))
+        return decoded
+
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Firebase ID token",
+            detail=str(exc),
         ) from exc
-
-
+    
 async def get_current_revoked_checked_firebase_user(
     credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
 ) -> dict:
@@ -87,14 +110,23 @@ async def get_current_user(
     from sqlmodel import select
     from apps.accounts.services import complete_firebase_registration
 
+    from common.enums import UserStatus
+
     firebase_uid = firebase_user["uid"]
     stmt = select(User).where(User.firebase_uid == firebase_uid)
     existing_user = (await db.execute(stmt)).scalar_one_or_none()
-    if existing_user and existing_user.deleted_at:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account deleted",
-        )
+    if existing_user:
+        if existing_user.deleted_at:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account deleted",
+            )
+        if existing_user.status in (UserStatus.suspended, UserStatus.banned):
+            status_str = existing_user.status.value if hasattr(existing_user.status, "value") else str(existing_user.status)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Account is {status_str}",
+            )
 
     return await complete_firebase_registration(firebase_user, db)
 

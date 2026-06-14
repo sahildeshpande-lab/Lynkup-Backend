@@ -2,7 +2,7 @@ import pytest
 import pytest_asyncio
 import uuid
 from datetime import datetime, timezone
-from sqlmodel import select
+from sqlmodel import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from core.db.session import async_session_factory
 from core.db.init import init_db
@@ -149,3 +149,116 @@ async def test_logout_all_sets_pending(db_session: AsyncSession):
     # Verify status changed to pending
     refreshed = await db_session.get(User, user.id)
     assert refreshed.status == UserStatus.pending
+
+@pytest.mark.asyncio
+async def test_email_queue_and_cron_worker(db_session: AsyncSession, monkeypatch):
+    from core.email_service import cron_send_emails, _send_email
+    from apps.accounts.db_models import TransactionalEmailLog
+    import asyncio
+
+    # Clean up any existing logs
+    await db_session.execute(delete(TransactionalEmailLog))
+    await db_session.commit()
+
+    # Mock SendGrid call
+    sent_grid_calls = []
+    async def mock_actually_send(to_email, subject, html_body, from_email):
+        sent_grid_calls.append((to_email, subject, html_body, from_email))
+        return True
+    monkeypatch.setattr("core.email_service._actually_send_email_via_sendgrid", mock_actually_send)
+
+    # Mock asyncio.sleep to raise CancelledError so loop runs only once
+    async def mock_sleep(delay):
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(asyncio, "sleep", mock_sleep)
+
+    # Queue an email
+    success = await _send_email(
+        to_email="test_queue@example.com",
+        subject="Test Queue Email",
+        html_body="Hello queue",
+        purpose="testing",
+    )
+    assert success is True
+
+    # Verify queued in DB
+    stmt = select(TransactionalEmailLog).where(TransactionalEmailLog.to == "test_queue@example.com")
+    email_log = (await db_session.execute(stmt)).scalar_one()
+    assert email_log.is_sent is False
+
+    # Run cron
+    await cron_send_emails()
+
+    # Verify marked as sent
+    await db_session.refresh(email_log)
+    assert email_log.is_sent is True
+    assert len(sent_grid_calls) == 1
+    assert sent_grid_calls[0][0] == "test_queue@example.com"
+    assert sent_grid_calls[0][1] == "Test Queue Email"
+    assert sent_grid_calls[0][2] == "Hello queue"
+
+@pytest.mark.asyncio
+async def test_verify_email_endpoint(db_session: AsyncSession):
+    from apps.accounts.services import verify_email
+    
+    # Create pending user
+    uid = str(uuid.uuid4())
+    email = f"pending_link_{uid[:8]}@example.com"
+    otp = "verify_link_123"
+    user = User(
+        firebase_uid=uid,
+        email=email,
+        status=UserStatus.pending,
+        email_otp=otp,
+        email_otp_created_at=datetime.now(timezone.utc),
+        onboarding_status="not_started",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    db_session.add(user)
+    await db_session.flush()
+    await db_session.commit()
+
+    # Verify
+    response = await verify_email(token=otp, db=db_session)
+    
+    # Assert html response
+    assert response.status_code == 200
+    assert "Email Verified Successfully" in response.body.decode()
+
+    # Verify DB updates
+    refreshed = await db_session.get(User, user.id)
+    assert refreshed.status == UserStatus.active
+    assert refreshed.email_verified_at is not None
+    assert refreshed.email_otp == "true"
+
+@pytest.mark.asyncio
+async def test_refresh_token_never_expires(db_session: AsyncSession):
+    from apps.accounts.services import _generate_tokens
+    from sqlalchemy.orm import selectinload
+    
+    uid = str(uuid.uuid4())
+    email = f"token_{uid[:8]}@example.com"
+    user = User(
+        firebase_uid=uid,
+        email=email,
+        status=UserStatus.active,
+        onboarding_status="not_started",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    db_session.add(user)
+    await db_session.flush()
+    await db_session.commit()
+
+    # Load roles eagerly to avoid MissingGreenlet
+    stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
+    user = (await db_session.execute(stmt_user)).scalar_one()
+
+    access_token, refresh_token = _generate_tokens(user)
+    
+    import jwt
+    from apps.accounts.services import JWT_SECRET, JWT_ALGORITHM
+    
+    decoded = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    assert "exp" not in decoded

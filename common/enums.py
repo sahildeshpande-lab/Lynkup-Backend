@@ -13,6 +13,7 @@ class UserStatus(str, Enum):
 
 
 class OnboardingStatus(str, Enum):
+    pending = "pending"
     not_started = "not_started"
     in_progress = "in_progress"
     completed = "completed"
@@ -33,6 +34,6 @@ EducationLevel = Literal["Bachelors", "Masters", "Doctorate", "Postdoctoral", "J
 
 class RegistrationType(str, Enum):
     email = "email"
-    Google = "Google"
-    Apple = "Apple"
+    google = "google"
+    apple = "apple"
 
