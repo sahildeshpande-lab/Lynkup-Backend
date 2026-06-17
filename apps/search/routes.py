@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.pagination import PaginationParams
-from core.db.session import get_session
+from core.database.session import get_session
 from .schemas import ApiResponse, UniversitySearchParams
 from . import services
+from typing import Optional
+
+
 
 router = APIRouter(tags=["3] Search & Discovery"])
 
@@ -27,3 +30,20 @@ async def universities(
         db,
     )
     return ApiResponse(message="Universities fetched successfully", data=data)
+
+
+
+@router.get("/interests", response_model=ApiResponse)
+async def list_interests(
+    query: Optional[str] = Query(None, description="Search academic interests by name"),
+    pagination: PaginationParams = Depends(),
+    db: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    data = await services.get_academic_interests(
+        query=query,
+        page=pagination.page,
+        page_size=pagination.pageSize,
+        db=db,
+    )
+    return ApiResponse(message="Academic interests fetched successfully", data=data)
+

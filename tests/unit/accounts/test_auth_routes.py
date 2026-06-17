@@ -4,7 +4,7 @@ from datetime import datetime
 from fastapi.testclient import TestClient
 
 from entrypoints.api import app
-from core.db.session import get_session
+from core.database.session import get_session
 from apps.accounts import routes as auth_routes
 from apps.accounts.schemas import ApiResponse, AuthSessionResponse, AuthUserResponse
 
@@ -24,21 +24,25 @@ async def _mock_firebase_user():
 
 
 def setup_module() -> None:
-    from core.auth.firebase import get_current_firebase_user
+    from core.auth.firebase import get_current_firebase_user, get_firebase_user_from_payload
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_firebase_user] = _mock_firebase_user
+    app.dependency_overrides[get_firebase_user_from_payload] = _mock_firebase_user
 
 
 def teardown_module() -> None:
-    from core.auth.firebase import get_current_firebase_user
+    from core.auth.firebase import get_current_firebase_user, get_firebase_user_from_payload
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_firebase_user, None)
+    app.dependency_overrides.pop(get_firebase_user_from_payload, None)
 
 
 async def _mock_signup(payload, firebase_user, db) -> ApiResponse:
-    user = AuthUserResponse(
+    from apps.accounts.schemas import UserBaseResponse
+    user = UserBaseResponse(
         id="jane-doe-id",
         firebase_uid="test-firebase-uid",
+        firebaseuid="test-firebase-uid",
         firstName=payload.firstName,
         lastName=payload.lastName,
         email=payload.email,
@@ -51,17 +55,23 @@ async def _mock_signup(payload, firebase_user, db) -> ApiResponse:
         email_verified_at=None,
         is_onboarding=True,
     )
-    auth_session = AuthSessionResponse(
-        user=user,
-        emailSent=True,
+    return ApiResponse(
+        status=True,
+        message="Signup successful",
+        data={
+            "user": user.model_dump(),
+            "emailSent": True,
+            "firebaseuid": "test-firebase-uid",
+        }
     )
-    return ApiResponse(status=True, message="Signup successful", data=auth_session.model_dump())
 
 
-async def _mock_login(firebase_user, db) -> ApiResponse:
-    user = AuthUserResponse(
+async def _mock_login(payload, firebase_user, db) -> ApiResponse:
+    from apps.accounts.schemas import UserBaseResponse
+    user = UserBaseResponse(
         id="jane-doe-id",
         firebase_uid="test-firebase-uid",
+        firebaseuid="test-firebase-uid",
         firstName="",
         lastName="",
         email=firebase_user["email"].lower(),
@@ -69,11 +79,15 @@ async def _mock_login(firebase_user, db) -> ApiResponse:
         createdAt=datetime.now(),
         updatedAt=datetime.now(),
     )
-    auth_session = AuthSessionResponse(
-        user=user,
-        emailSent=False,
+    return ApiResponse(
+        status=True,
+        message="Login successful",
+        data={
+            "user": user.model_dump(),
+            "emailSent": False,
+            "firebaseuid": "test-firebase-uid",
+        }
     )
-    return ApiResponse(status=True, message="Login successful", data=auth_session.model_dump())
 
 
 def test_signup_route_exists(monkeypatch) -> None:
@@ -87,6 +101,7 @@ def test_signup_route_exists(monkeypatch) -> None:
             "email": "jane@example.com",
             "password": "Secret123",
             "role": "user",
+            "firebaseId": "valid-firebase-id-token",
         },
     )
 
@@ -110,8 +125,9 @@ def test_login_route_uses_login_request_schema(monkeypatch) -> None:
     async def _mock_firebase_login_user():
         return {"uid": "test-firebase-uid", "email": "USER@Example.com"}
 
-    from core.auth.firebase import get_current_firebase_user
+    from core.auth.firebase import get_current_firebase_user, get_firebase_user_from_payload
     app.dependency_overrides[get_current_firebase_user] = _mock_firebase_login_user
+    app.dependency_overrides[get_firebase_user_from_payload] = _mock_firebase_login_user
 
     try:
         response = client.post(
@@ -119,6 +135,7 @@ def test_login_route_uses_login_request_schema(monkeypatch) -> None:
             json={
                 "email": "USER@Example.com",
                 "password": "stringsqq111AA@2t",
+                "firebaseId": "valid-firebase-id-token",
             },
         )
 
@@ -129,6 +146,7 @@ def test_login_route_uses_login_request_schema(monkeypatch) -> None:
         assert body["data"]["user"]["email"] == "user@example.com"
     finally:
         app.dependency_overrides[get_current_firebase_user] = _mock_firebase_user
+        app.dependency_overrides[get_firebase_user_from_payload] = _mock_firebase_user
 
 
 def test_signup_route_rejects_blank_fields(monkeypatch) -> None:
@@ -143,6 +161,7 @@ def test_signup_route_rejects_blank_fields(monkeypatch) -> None:
             "email": "jane@example.com",
             "password": "Secret123",
             "role": "user",
+            "firebaseId": "valid-firebase-id-token",
         },
     )
     assert response.status_code == 422
@@ -156,6 +175,7 @@ def test_signup_route_rejects_blank_fields(monkeypatch) -> None:
             "email": "jane@example.com",
             "password": "Secret123",
             "role": "user",
+            "firebaseId": "valid-firebase-id-token",
         },
     )
     assert response.status_code == 422
@@ -170,42 +190,10 @@ def test_login_route_rejects_blank_fields(monkeypatch) -> None:
         json={
             "email": "user@example.com",
             "password": "       ",
+            "firebaseId": "valid-firebase-id-token",
         },
     )
     assert response.status_code == 422
-
-
-def test_refresh_route_returns_user_base_payload(monkeypatch) -> None:
-    async def _mock_refresh_token(payload, db):
-        return {
-            "refreshToken": payload.refreshToken,
-            "user": {
-                "id": "jane-doe-id",
-                "firebase_uid": "test-firebase-uid",
-                "firstName": "",
-                "lastName": "",
-                "email": "user@example.com",
-                "role": "user",
-                "createdAt": datetime.now(),
-                "updatedAt": datetime.now(),
-            }
-        }
-
-    monkeypatch.setattr(auth_routes.services, "refresh_token", _mock_refresh_token)
-
-    response = client.post(
-        "/api/v1/auth/refresh",
-        json={
-            "refreshToken": "refresh_user@example.com",
-        },
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] is True
-    assert body["message"] == "token refreshed"
-    assert body["data"]["refreshToken"] == "refresh_user@example.com"
-    assert body["data"]["user"]["email"] == "user@example.com"
 
 
 async def _mock_forgot_password(payload, db) -> ApiResponse:
@@ -221,7 +209,7 @@ def test_forgot_password_route(monkeypatch) -> None:
 
     response = client.post(
         "/api/v1/auth/forgot-password",
-        json={"email": "user@example.com"},
+        json={"email": "jane@example.com", "firebaseId": "valid-firebase-id-token"},
     )
 
     assert response.status_code == 200
@@ -238,6 +226,7 @@ def test_reset_password_route(monkeypatch) -> None:
         json={
             "token": "token-123",
             "new_password": "NewPassword@123",
+            "firebaseId": "valid-firebase-id-token",
         },
     )
 
@@ -248,10 +237,10 @@ def test_reset_password_route(monkeypatch) -> None:
 
 
 def test_social_auth_route_login_success(monkeypatch) -> None:
-    async def _mock_social_auth_bearer(id_token, db):
+    async def _mock_social_auth(payload, db):
         return {
-            "access_token": "access_token_123",
-            "refresh_token": "refresh_token_123",
+            "accessToken": "access_token_123",
+            "refreshToken": "refresh_token_123",
             "user": {
                 "id": "user-id-123",
                 "firstName": "Jane",
@@ -263,25 +252,25 @@ def test_social_auth_route_login_success(monkeypatch) -> None:
             },
         }, False
 
-    monkeypatch.setattr(auth_routes, "social_auth_bearer", _mock_social_auth_bearer)
+    monkeypatch.setattr(auth_routes, "social_auth_service", _mock_social_auth)
 
     response = client.post(
         "/api/v1/auth/social",
-        headers={"Authorization": "Bearer google_test_token"},
+        data={"provider": "google", "idToken": "google_test_token"},
     )
     assert response.status_code == 200
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Login successful"
-    assert body["data"]["access_token"] == "access_token_123"
+    assert body["data"]["accessToken"] == "access_token_123"
     assert body["data"]["user"]["email"] == "jane@example.com"
 
 
 def test_social_auth_route_signup_success(monkeypatch) -> None:
-    async def _mock_social_auth_bearer(id_token, db):
+    async def _mock_social_auth(payload, db):
         return {
-            "access_token": "access_token_123",
-            "refresh_token": "refresh_token_123",
+            "accessToken": "access_token_123",
+            "refreshToken": "refresh_token_123",
             "user": {
                 "id": "user-id-123",
                 "firstName": "Jane",
@@ -293,31 +282,31 @@ def test_social_auth_route_signup_success(monkeypatch) -> None:
             },
         }, True
 
-    monkeypatch.setattr(auth_routes, "social_auth_bearer", _mock_social_auth_bearer)
+    monkeypatch.setattr(auth_routes, "social_auth_service", _mock_social_auth)
 
     response = client.post(
         "/api/v1/auth/social",
-        headers={"Authorization": "Bearer google_test_token"},
+        data={"provider": "google", "idToken": "google_test_token"},
     )
 
     assert response.status_code == 201
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Signup successful"
-    assert body["data"]["access_token"] == "access_token_123"
+    assert body["data"]["accessToken"] == "access_token_123"
     assert body["data"]["user"]["email"] == "jane@example.com"
 
 
 def test_social_auth_route_conflict(monkeypatch) -> None:
     from apps.accounts.services import AccountExistsException
-    async def _mock_social_auth_bearer(id_token, db):
+    async def _mock_social_auth(payload, db):
         raise AccountExistsException(registration_type="email")
 
-    monkeypatch.setattr(auth_routes, "social_auth_bearer", _mock_social_auth_bearer)
+    monkeypatch.setattr(auth_routes, "social_auth_service", _mock_social_auth)
 
     response = client.post(
         "/api/v1/auth/social",
-        headers={"Authorization": "Bearer google_test_token"},
+        data={"provider": "google", "idToken": "google_test_token"},
     )
 
     assert response.status_code == 409
@@ -326,3 +315,42 @@ def test_social_auth_route_conflict(monkeypatch) -> None:
     assert body["error_code"] == "ACCOUNT_EXISTS"
     assert body["registration_type"] == "email"
 
+
+def test_social_auth_route_file_upload(monkeypatch) -> None:
+    class MockS3Client:
+        def put_object(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr("core.images.settings.aws_s3_bucket", "test-bucket")
+    monkeypatch.setattr("core.images.config.s3_client", MockS3Client())
+
+    async def _mock_social_auth(payload, db):
+        assert payload.profilePhotoUrl is not None
+        assert "profiles/" in payload.profilePhotoUrl
+        return {
+            "accessToken": "access_token_123",
+            "refreshToken": "refresh_token_123",
+            "user": {
+                "id": "user-id-123",
+                "firstName": "Jane",
+                "lastName": "Doe",
+                "email": "jane@example.com",
+                "role": "user",
+                "createdAt": datetime.now().isoformat(),
+                "updatedAt": datetime.now().isoformat(),
+            },
+        }, True
+
+    monkeypatch.setattr(auth_routes, "social_auth_service", _mock_social_auth)
+
+    from io import BytesIO
+    response = client.post(
+        "/api/v1/auth/social",
+        data={"provider": "google", "idToken": "google_test_token"},
+        files={"profilePhotoUrl": ("photo.jpg", BytesIO(b"dummy photo content"), "image/jpeg")}
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] is True
+    assert body["message"] == "Signup successful"

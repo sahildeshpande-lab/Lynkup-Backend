@@ -10,7 +10,7 @@ from apps.accounts.db_models import (
     RolePermission,
 )
 from core.security.auth import get_current_user
-from core.db.session import get_session
+from core.database.session import get_session
 
 
 async def require_role(

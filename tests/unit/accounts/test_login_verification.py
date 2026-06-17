@@ -4,8 +4,8 @@ import uuid
 from datetime import datetime, timezone
 from sqlmodel import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from core.db.session import async_session_factory
-from core.db.init import init_db
+from core.database.session import async_session_factory
+from core.database.init import init_db
 
 from apps.accounts.services import login, logout, logout_all
 from apps.accounts.db_models import User, Role
@@ -33,11 +33,14 @@ async def db_session():
 @pytest.mark.asyncio
 async def test_login_active_user(db_session: AsyncSession):
     # Create an active user
+    from apps.accounts.services import _hash_password
+    from apps.accounts.schemas import LoginRequest
     uid = str(uuid.uuid4())
     email = f"active_{uid[:8]}@example.com"
     user = User(
         firebase_uid=uid,
         email=email,
+        password_hash=_hash_password("ValidPassword123"),
         status=UserStatus.active,
         onboarding_status="not_started",
         created_at=datetime.now(timezone.utc),
@@ -47,8 +50,13 @@ async def test_login_active_user(db_session: AsyncSession):
     await db_session.flush()
     await db_session.commit()
 
+    payload = LoginRequest(
+        email=email,
+        password="ValidPassword123",
+        firebaseId="valid-id-token",
+    )
     firebase_claims = {"uid": uid, "email": email}
-    response = await login(firebase_user=firebase_claims, db=db_session)
+    response = await login(payload=payload, firebase_user=firebase_claims, db=db_session)
 
     assert response.status is True
     assert response.message == "Login successful"
@@ -59,6 +67,8 @@ async def test_login_active_user(db_session: AsyncSession):
 @pytest.mark.asyncio
 async def test_login_pending_user_sends_otp(db_session: AsyncSession, monkeypatch):
     # Mock email sending
+    from apps.accounts.services import _hash_password
+    from apps.accounts.schemas import LoginRequest
     sent_emails = []
     async def mock_send_otp_email(to_email, otp, otp_purpose):
         sent_emails.append((to_email, otp, otp_purpose))
@@ -71,6 +81,7 @@ async def test_login_pending_user_sends_otp(db_session: AsyncSession, monkeypatc
     user = User(
         firebase_uid=uid,
         email=email,
+        password_hash=_hash_password("ValidPassword123"),
         status=UserStatus.pending,
         onboarding_status="not_started",
         created_at=datetime.now(timezone.utc),
@@ -80,8 +91,13 @@ async def test_login_pending_user_sends_otp(db_session: AsyncSession, monkeypatc
     await db_session.flush()
     await db_session.commit()
 
+    payload = LoginRequest(
+        email=email,
+        password="ValidPassword123",
+        firebaseId="valid-id-token",
+    )
     firebase_claims = {"uid": uid, "email": email}
-    response = await login(firebase_user=firebase_claims, db=db_session)
+    response = await login(payload=payload, firebase_user=firebase_claims, db=db_session)
 
     assert response.status is True
     assert response.message == "Verification email sent. Please verify your OTP."

@@ -9,15 +9,12 @@ logger = logging.getLogger(__name__)
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "templates"
 BRAND_COLORS = {
-    "crimson": "#E13C4B",
-    "deep_navy": "#001E2D",
-    "dark_navy": "#000F1E",
-    "navy_blue": "#001E3C",
-    "medium_blue": "#002D4B",
-    "steel_blue": "#1C4587",
-    "light_gray": "#E1E1E1",
-    "dark_gray": "#4B4B4B",
-    "black": "#000000",
+    "brand_green" : "#46B12F",
+    "brand_blue" : "#0B5FA5",
+    "light_bg" : "#F4F7FB",
+    "text_primary" : "#071A35",
+    "text_secondary" : "#64748B",
+    "footer_bg" : "#071A35",
 }
 
 
@@ -32,7 +29,7 @@ async def _should_send_to_user(to_email: str) -> bool:
 async def _log_transactional_email(to_email: str, subject: str, html_body: str, purpose: str, attachment: str | None = None, is_sent: bool = False) -> None:
     try:
         from apps.accounts.db_models import TransactionalEmailLog
-        from core.db.session import async_session_factory
+        from core.database.session import async_session_factory
         from sqlmodel import select
         from sqlalchemy import desc
         from datetime import datetime, timezone
@@ -100,11 +97,36 @@ async def _send_email(to_email: str, subject: str, html_body: str, purpose: str,
     return True
 
 
+async def _send_email_immediately(to_email: str, subject: str, html_body: str, purpose: str, attachment: str | None = None) -> bool:
+    """Send the email synchronously via SendGrid first, then log the result to the DB.
+
+    Use this for time-sensitive transactional emails (OTP, password reset, verification)
+    where the user is actively waiting. Logging happens AFTER delivery so `is_sent`
+    always reflects the actual send outcome.
+    """
+    if not await _should_send_to_user(to_email):
+        logger.info("Email send skipped: is_send flag is false for %s", to_email)
+        return False
+
+    from_email = os.getenv("SENDGRID_FROM_EMAIL", "no-reply@yourdomain.com")
+    success = await _actually_send_email_via_sendgrid(to_email, subject, html_body, from_email)
+
+    # Log the attempt to DB with the actual send outcome
+    await _log_transactional_email(to_email, subject, html_body, purpose, attachment, is_sent=success)
+
+    if success:
+        logger.info("Email sent and logged for %s (purpose: %s)", to_email, purpose)
+    else:
+        logger.error("Email failed to send for %s (purpose: %s) — logged with is_sent=False", to_email, purpose)
+
+    return success
+
+
 async def cron_send_emails() -> None:
     """Cron task to process and send unsent emails in the transactional email log (limit 20)."""
     import asyncio
     from apps.accounts.db_models import TransactionalEmailLog
-    from core.db.session import async_session_factory
+    from core.database.session import async_session_factory
     from sqlmodel import select
     from datetime import datetime, timezone
 
@@ -175,19 +197,32 @@ def _otp_template_details(otp_purpose: str) -> tuple[str, str, str]:
             return ("Email Verification", "Email Verification", "To verify your email use this one time OTP")
 
 
+def _build_otp_display_html(otp: str, brand_blue: str) -> str:
+    """Build the OTP display as a full-width dashed card with large spaced digits.
+    Works for any OTP length; digits are space-separated for clarity.
+    """
+    spaced = " ".join(escape(ch) for ch in otp)
+    return (
+        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 8px 0 4px;">'
+        "<tr>"
+        '<td align="center" style="padding: 28px 20px; background-color: #F8FAFC; border: 1.5px dashed #CBD5E1;">'
+        f'<span class="otp-font" style="font-size: 32px; font-weight: 700; color: #071A35; letter-spacing: 10px; font-family: \'Courier New\', Courier, monospace; display: inline-block; padding-left: 10px;">{spaced}</span>'
+        "</td>"
+        "</tr>"
+        "</table>"
+    )
+
+
 def build_otp_email_html(otp: str, otp_purpose: str = "email_verification") -> str:
     title, header, body_text = _otp_template_details(otp_purpose)
     
-    raw_keys = set()
-    if otp_purpose == "email_verification":
-        base_url = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
-        verification_link = f"{base_url}/api/v1/auth/verify-email?token={otp}"
-        body_text += f"<br/><br/>Or click this link to verify your email:<br/><a href='{verification_link}'>{verification_link}</a>"
-        raw_keys.add("body_text")
+    brand_blue = str(BRAND_COLORS.get("brand_blue", "#0B5FA5"))
+    otp_display_html = _build_otp_display_html(otp, brand_blue)
 
+    raw_keys = {"otp_display"}
     body_html = _render_template(
         "auth/otp_email.html",
-        {"otp": otp, "header": header, "body_text": body_text},
+        {"otp": otp, "header": header, "body_text": body_text, "otp_display": otp_display_html},
         raw_keys=raw_keys,
     )
     return _render_email_layout(title, body_html)
@@ -228,21 +263,24 @@ def build_notification_email_html(
 
 def build_account_created_email_html(full_name: str | None = None) -> str:
     greeting = f"Hi {full_name}," if full_name else "Hi,"
-    body_html = _render_template("auth/account_created_email.html", {"greeting": greeting})
+    base_url = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
+    body_html = _render_template("auth/account_created_email.html", {"greeting": greeting, "base_url": base_url})
     return _render_email_layout("Account Created Successfully", body_html)
 
 
 def build_password_changed_email_html(full_name: str | None = None) -> str:
     greeting = f"Hi {full_name}," if full_name else "Hi,"
-    body_html = _render_template("auth/password_changed_email.html", {"greeting": greeting})
+    base_url = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
+    body_html = _render_template("auth/password_changed_email.html", {"greeting": greeting, "base_url": base_url})
     return _render_email_layout("Password Changed Successfully", body_html)
 
 
 async def send_otp_email(to_email: str, otp: str, otp_purpose: str = "password_reset") -> bool:
+    """Send OTP immediately (send first, then log). Users are actively waiting for this."""
     title, _, _ = _otp_template_details(otp_purpose)
     purpose = f"OTP: {otp_purpose}"
     subject = f"KampuLynk {title}"
-    return await _send_email(
+    return await _send_email_immediately(
         to_email,
         subject,
         build_otp_email_html(otp, otp_purpose),
@@ -257,6 +295,16 @@ async def send_account_created_email(to_email: str, full_name: str | None = None
 
 async def send_password_changed_email(to_email: str, full_name: str | None = None) -> bool:
     return await _send_email(to_email, "KampuLynk Password Changed", build_password_changed_email_html(full_name), purpose="Password Changed")
+
+
+# New function to send email verification success notification
+async def send_verification_success_email(to_email: str, full_name: str | None = None) -> bool:
+    """Send email-verified confirmation immediately (send first, then log).
+    Uses the HTML template built by `build_email_verified_success_html`.
+    """
+    subject = "KampuLynk Email Verified"
+    html_content = build_email_verified_success_html(full_name)
+    return await _send_email_immediately(to_email, subject, html_content, purpose="Email Verified")
 
 
 def build_email_verified_success_html(full_name: str | None = None) -> str:
@@ -289,14 +337,12 @@ async def send_notification_email(
 
 
 async def send_reset_password_email(to_email: str, reset_link: str) -> bool:
-    subject = "forget password"
-    body_html = f"""
-    <div style="font-size:16px;font-weight:700;margin-bottom:16px;">Forget Password</div>
-    <p style="margin:0 0 14px;">To reset your password use this link:</p>
-    <p style="text-align: center; margin: 30px 0;">
-        <a href="{reset_link}" style="background-color: #000000; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold; display: inline-block;">Reset Password</a>
-    </p>
-    <p style="margin:0 0 14px;"><a href="{reset_link}">{reset_link}</a></p>
-    """
+    """Send password reset link immediately (send first, then log). Users are actively waiting for this."""
+    subject = "Reset Your Password"
+    body_html = _render_template(
+        "auth/password_reset_email.html",
+        {"reset_link": reset_link, "subject": subject},
+        raw_keys={"reset_link"},
+    )
     html_content = _render_email_layout(subject, body_html)
-    return await _send_email(to_email, subject, html_content, "forget password", attachment=reset_link)
+    return await _send_email_immediately(to_email, subject, html_content, "forget password", attachment=reset_link)

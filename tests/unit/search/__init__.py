@@ -1,0 +1,1 @@
+# search module tests package

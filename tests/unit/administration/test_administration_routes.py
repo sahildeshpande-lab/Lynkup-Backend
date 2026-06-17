@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from apps.administration import routes as admin_routes
-from core.security.auth import get_session, get_current_user, get_current_superadmin
+from core.security.auth import get_session, get_current_user, get_current_superadmin, get_current_admin
 from entrypoints.api import app
 
 
@@ -27,31 +27,48 @@ class _NoopSession:
         return None
 
 
+from fastapi import Request
+
 async def _override_session():
     yield _NoopSession()
 
 
 async def _override_current_user():
     from apps.accounts.db_models import User
+    from uuid import UUID
     return User(
+        id=UUID("11111111-1111-1111-1111-111111111111"),
         email="admin@example.com",
         role="superadmin",
         firebase_uid="admin-test-uid",
     )
 
 
+async def _mock_firebase_user(request: Request) -> dict:
+    try:
+        body = await request.json()
+        email = body.get("email", "admin@example.com")
+        return {"uid": "admin-test-uid", "email": email}
+    except Exception:
+        return {"uid": "admin-test-uid", "email": "admin@example.com"}
+
+
 def setup_module() -> None:
+    from core.auth.firebase import get_current_firebase_user, get_firebase_user_from_payload
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_superadmin] = _override_current_user
+    app.dependency_overrides[get_current_admin] = _override_current_user
+    app.dependency_overrides[get_current_firebase_user] = _mock_firebase_user
+    app.dependency_overrides[get_firebase_user_from_payload] = _mock_firebase_user
 
 
 def teardown_module() -> None:
+    from core.auth.firebase import get_current_firebase_user, get_firebase_user_from_payload
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_superadmin, None)
-
-
-
-
+    app.dependency_overrides.pop(get_current_admin, None)
+    app.dependency_overrides.pop(get_current_firebase_user, None)
+    app.dependency_overrides.pop(get_firebase_user_from_payload, None)
 async def _list_users(_page: int, _page_size: int, _db) -> dict:
     return {"items": [], "page": 1, "pageSize": 10, "totalItems": 1, "totalPages": 1}
 
@@ -64,12 +81,15 @@ async def _get_user(_user_id: str, _db) -> dict:
     return {"user": {"id": _user_id}, "found": True}
 
 
-async def _update_user(_user_id: str, _payload, _db) -> dict:
-    return {"user": {"id": _user_id}, "updated": {"firstName": "Ada"}, "found": True}
-
-
 async def _delete_user(_user_id: str, _db) -> dict:
     return {"userId": _user_id, "deleted": True}
+
+
+async def _export_users(_page: int | None, _page_size: int | None, _db) -> dict:
+    page = _page or 1
+    page_size = _page_size or 5
+    return {"items": [], "page": page, "pageSize": page_size, "totalItems": 0, "totalPages": 0}
+
 
 
 async def _suspend_user(_payload, _db) -> dict:
@@ -86,11 +106,8 @@ async def _mock_admin_signup(payload, db) -> dict:
         "message": "success",
         "data": {
             "user": {"email": payload.email, "role": payload.role},
-            "tokens": {
-                "access_token": "mock-access-token",
-                "refresh_token": "mock-refresh-token",
-                "token_type": "bearer",
-            }
+            "accessToken": "mock-access-token",
+            "refreshToken": "mock-refresh-token",
         }
     }
 
@@ -121,7 +138,11 @@ def test_admin_login_route(monkeypatch) -> None:
         return ApiResponse(
             status=True,
             message="Login successful",
-            data={"access_token": "admin_token_123"}
+            data={
+                "accessToken": "admin_token_123",
+                "refreshToken": "admin_refresh_token_123",
+                "user": {"email": payload.email, "role": "superadmin"}
+            }
         )
 
     monkeypatch.setattr(admin_routes.services, "admin_signin", _mock_admin_signin)
@@ -133,29 +154,38 @@ def test_admin_login_route(monkeypatch) -> None:
     )
     assert response_login.status_code == 200
     assert response_login.json()["status"] is True
-    assert response_login.json()["data"]["access_token"] == "admin_token_123"
+    assert response_login.json()["data"]["accessToken"] == "admin_token_123"
 
 
-def test_admin_education_returns_success_payload(monkeypatch) -> None:
-    async def _mock_admin_education(payload, db):
-        return {"education": payload.model_dump(), "saved": True}
+def test_admin_onboarding_returns_success_payload(monkeypatch) -> None:
+    async def _mock_admin_complete_onboarding(user_id, bio, major, minor, university_id, education_level, academic_interests, profile_photo, db):
+        return {"user_id": str(user_id), "onboarded": True}
 
-    monkeypatch.setattr(admin_routes.services, "admin_education", _mock_admin_education)
+    monkeypatch.setattr(admin_routes.services, "admin_complete_onboarding", _mock_admin_complete_onboarding)
 
+    user_id = "11111111-1111-1111-1111-111111111111"
+    import io
+    dummy_file = io.BytesIO(b"dummy image data")
     response = client.post(
-        "/api/v1/auth/admin/education",
-        json={
-            "universityId": "univ-123",
+        "/api/v1/admin/onboarding",
+        data={
+            "university_id": "11111111-1111-1111-1111-111111111111",
             "major": "Computer Science",
             "minor": "Math",
-            "educationLevel": "Masters",
+            "education_level": "Masters",
+            "Bio": "Test Bio",
+            "academic_interests": "['Math', 'CS']"
         },
+        files={
+            "profile_photo": ("test.png", dummy_file, "image/png")
+        }
     )
 
     assert response.status_code == 201
     body = response.json()
     assert body["status"] is True
-    assert body["data"]["education"]["universityId"] == "univ-123"
+    assert body["data"]["user_id"] == user_id
+    assert body["data"]["onboarded"] is True
 
 
 def test_admin_list_users_returns_paginated_payload(monkeypatch) -> None:
@@ -173,23 +203,34 @@ def test_admin_list_users_returns_paginated_payload(monkeypatch) -> None:
 
 def test_admin_user_routes_use_users_path(monkeypatch) -> None:
     monkeypatch.setattr(admin_routes.services, "admin_get_user", _get_user)
-    monkeypatch.setattr(admin_routes.services, "admin_update_user", _update_user)
     monkeypatch.setattr(admin_routes.services, "admin_delete_user", _delete_user)
 
     user_id = "11111111-1111-1111-1111-111111111111"
     get_response = client.get(f"/api/v1/users/{user_id}")
-    patch_response = client.patch(
-        f"/api/v1/users/{user_id}",
-        json={"firstName": "Ada"},
-    )
     delete_response = client.delete(f"/api/v1/users/{user_id}")
 
     assert get_response.status_code == 200
     assert get_response.json()["data"]["found"] is True
-    assert patch_response.status_code == 200
-    assert patch_response.json()["data"]["found"] is True
     assert delete_response.status_code == 200
     assert delete_response.json()["data"]["deleted"] is True
+
+
+def test_admin_export_users(monkeypatch) -> None:
+    monkeypatch.setattr(admin_routes.services, "export_users", _export_users)
+
+    # 1. Test without pagination parameters (default case)
+    response_default = client.get("/api/v1/export")
+    assert response_default.status_code == 200
+    assert response_default.json()["status"] is True
+    assert response_default.json()["data"]["page"] == 1
+    assert response_default.json()["data"]["pageSize"] == 5
+
+    # 2. Test with pagination parameters
+    response_paginated = client.get("/api/v1/export", params={"page": 2, "pageSize": 10})
+    assert response_paginated.status_code == 200
+    assert response_paginated.json()["status"] is True
+    assert response_paginated.json()["data"]["page"] == 2
+    assert response_paginated.json()["data"]["pageSize"] == 10
 
 
 def test_admin_suspend_and_ban_routes_exist(monkeypatch) -> None:

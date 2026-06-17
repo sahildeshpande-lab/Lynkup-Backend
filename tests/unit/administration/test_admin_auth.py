@@ -12,7 +12,7 @@ from core.security.admin import (
     get_current_admin_user,
     _csrf_store,
 )
-from core.db.session import get_session
+from core.database.session import get_session
 from apps.accounts.db_models import User
 
 # Create a test app to isolate testing the admin router and dependencies

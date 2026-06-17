@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, Column, DateTime, Index, String
+from sqlalchemy import Boolean, Column, DateTime, Index, String, Integer, text
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel, Relationship
 
@@ -48,7 +48,7 @@ class User(SQLModel, table=True):
     __tablename__ = "users"
 
     id: UUID = Field(default_factory=uuid4, primary_key=True, index=True)
-    firebase_uid: str = Field(sa_column=Column(String(128), nullable=False, unique=True, index=True))
+    firebase_uid: Optional[str] = Field(default=None, sa_column=Column(String(128), nullable=True, unique=True, index=True))
     email: str = Field(sa_column=Column(String(320), nullable=False, unique=True, index=True))
     password_hash: Optional[str] = Field(default=None, sa_column=Column(String(255), nullable=True))
     email_otp: Optional[str] = Field(default=None, sa_column=Column(String(16), nullable=True))
@@ -61,6 +61,7 @@ class User(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
     deleted_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     purge_after: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
+    is_deleted: bool = Field(default=False, sa_column=Column(Boolean, server_default=text("false"), nullable=False))
     last_login_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
 
     roles: List[UserRole] = Relationship(

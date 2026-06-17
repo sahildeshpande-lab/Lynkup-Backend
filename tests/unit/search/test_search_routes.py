@@ -30,11 +30,13 @@ async def _search_universities(_params, _db) -> dict:
         "query": "kampu",
         "items": [
             {
-                "id": "uni-1",
-                "name": "Kampu University",
-                "country": "United States",
-                "slug": "kampu-university",
-                "minor": [{"name": "Psychology"}],
+                 "id": "uni-1",
+                 "name": "Kampu University",
+                 "country": "United States",
+                 "slug": "kampu-university",
+                 "major": [{"name": "Computer Science"}],
+                 "minor": [{"name": "Psychology"}],
+                 "academic_program": [{"name": "Undergraduate"}],
             }
         ],
         "page": 1,

@@ -4,8 +4,8 @@ import pytest
 from sqlmodel import select
 from sqlalchemy import func
 
-from core.db.session import async_session_factory, engine
-from core.db.init import init_db
+from core.database.session import async_session_factory, engine
+from core.database.init import init_db
 from apps.accounts.db_models import User, TransactionalEmailLog
 from core.email_service import send_otp_email
 

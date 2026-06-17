@@ -16,7 +16,7 @@ class DatabaseSettings(BaseSettings):
     database_url: str = Field(default="postgresql://postgres:root@localhost:5432/ksolves")
     echo_sql: bool = False
     auto_init_db: bool = False
-    seed_dummy_data: bool = False
+
 
     @property
     def async_database_url(self) -> str:

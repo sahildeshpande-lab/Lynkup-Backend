@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import Depends, HTTPException, Security, status
+from fastapi import Depends, HTTPException, Security, status, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
-from core.db.session import get_session
+from core.database.session import get_session
 
 from .config import settings as auth_settings
 from core.auth.services import verify_firebase_token
@@ -14,7 +14,7 @@ from core.auth.services import verify_firebase_token
 bearer_scheme = HTTPBearer(
     scheme_name="BearerAuth",
     bearerFormat="JWT",
-    description="Send the Firebase ID token as: Bearer <token>",
+    description="Send the Access  token as: Bearer <token>",
     auto_error=False,
 )
 
@@ -62,6 +62,48 @@ async def get_current_firebase_user(
     except Exception as exc:
         import traceback
         traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+        ) from exc
+
+
+async def get_firebase_user_from_payload(
+    request: Request,
+) -> dict:
+    token = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            token = (
+                body.get("token_id")
+                or body.get("tokenId")
+                or body.get("idToken")
+                or body.get("firebaseId")
+                or body.get("firebase_id")
+            )
+    except Exception:
+        pass
+
+    if not token:
+        # Fallback to header manually to avoid lock icon in Swagger
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1]
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Firebase ID token",
+        )
+
+    try:
+        decoded = verify_firebase_token(
+            token,
+            check_revoked=False,
+        )
+        return decoded
+    except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(exc),

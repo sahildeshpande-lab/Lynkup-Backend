@@ -16,15 +16,15 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 from sqlmodel import SQLModel, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from core.db.session import async_session_factory, engine
-from core.db.init import init_db
+from core.database.session import async_session_factory, engine
+from core.database.init import init_db
 
 from core.auth.dependencies import (
     get_current_user,
     provision_user_from_firebase,
     log_security_event,
 )
-from apps.accounts.db_models import User, Role, UserRole, UserIdentity, SecurityEvent, SecurityEventType
+from apps.accounts.db_models import User, Role, UserRole, SecurityEvent, SecurityEventType
 from apps.accounts.services import assign_user_role
 
 # ---------------------------------------------------------------------------
@@ -103,11 +103,6 @@ async def test_auto_provision_new_user(db_session: AsyncSession):
     # Verify the linked role is the default "user"
     linked_role = await db_session.get(Role, role_links[0].role_id)
     assert linked_role.name == "user"
-    # Identity record should exist
-    stmt_identity = select(UserIdentity).where(UserIdentity.user_id == new_user.id)
-    identity = (await db_session.execute(stmt_identity)).scalar_one_or_none()
-    assert identity is not None
-    assert identity.provider == "firebase"
     # Security event of type LOGIN_SUCCESS must be present
     stmt = select(SecurityEvent).where(SecurityEvent.user_id == new_user.id)
     events = (await db_session.execute(stmt)).scalars().all()
@@ -212,15 +207,115 @@ async def test_forgot_password_rate_limit(db_session: AsyncSession, monkeypatch)
     await db_session.flush()
     await db_session.commit()
 
-    payload = ForgotPasswordRequest(email=email)
+    payload = ForgotPasswordRequest(email=email, firebaseId="test-firebase-id")
     
     # First request
     res = await forgot_password(payload, db_session)
     assert res.status is True
-    assert res.message == "Password reset link sent successfully"
+    assert res.message == "Password reset link sent successfully to your mail "
 
     # Second request immediately (should trigger rate limit validation)
     res2 = await forgot_password(payload, db_session)
     assert res2.status is False
     assert res2.message == "Recently email for resest password as been send please try after 15 mins  "
+
+
+@pytest.mark.asyncio
+async def test_credentials_or_401() -> None:
+    from core.auth.dependencies import _credentials_or_401
+    with pytest.raises(HTTPException) as exc:
+        _credentials_or_401(None)
+    assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_get_current_firebase_user_dep(monkeypatch) -> None:
+    from core.auth.dependencies import get_current_firebase_user
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    # 1. Invalid token raises 401
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="bad-token")
+    def mock_verify(*args, **kwargs):
+        raise ValueError("invalid")
+    monkeypatch.setattr("core.auth.dependencies.verify_firebase_token", mock_verify)
+    with pytest.raises(HTTPException) as exc:
+        await get_current_firebase_user(creds)
+    assert exc.value.status_code == 401
+
+    # 2. Valid token returns decoded user
+    monkeypatch.setattr("core.auth.dependencies.verify_firebase_token", lambda *args, **kwargs: {"uid": "123"})
+    res = await get_current_firebase_user(creds)
+    assert res["uid"] == "123"
+
+
+@pytest.mark.asyncio
+async def test_get_current_revoked_checked_firebase_user(monkeypatch) -> None:
+    from core.auth.dependencies import get_current_revoked_checked_firebase_user
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="token")
+    monkeypatch.setattr("core.auth.dependencies.verify_firebase_token", lambda *args, **kwargs: {"uid": "123"})
+    res = await get_current_revoked_checked_firebase_user(creds)
+    assert res["uid"] == "123"
+
+
+@pytest.mark.asyncio
+async def test_require_recent_auth() -> None:
+    from core.auth.dependencies import require_recent_auth
+    
+    # 1. Missing auth_time
+    with pytest.raises(HTTPException) as exc:
+        await require_recent_auth({"uid": "123"})
+    assert exc.value.status_code == 401
+    assert "Recent Firebase authentication required" in exc.value.detail
+
+    # 2. Expired auth_time
+    old_time = int(datetime.now(timezone.utc).timestamp()) - 100000
+    with pytest.raises(HTTPException) as exc:
+        await require_recent_auth({"uid": "123", "auth_time": old_time})
+    assert exc.value.status_code == 401
+
+    # 3. Valid recent auth_time
+    recent_time = int(datetime.now(timezone.utc).timestamp()) - 10
+    res = await require_recent_auth({"uid": "123", "auth_time": recent_time})
+    assert res["uid"] == "123"
+
+
+@pytest.mark.asyncio
+async def test_get_firebase_user_from_payload(monkeypatch) -> None:
+    from core.auth.dependencies import get_firebase_user_from_payload
+    from fastapi import Request
+
+    class MockRequest:
+        def __init__(self, json_data=None, headers=None):
+            self.json_data = json_data
+            self.headers = headers or {}
+
+        async def json(self):
+            if self.json_data is None:
+                raise ValueError("No json data")
+            return self.json_data
+
+    # 1. token in token_id payload
+    req = MockRequest(json_data={"token_id": "test-token-123"})
+    monkeypatch.setattr("core.auth.dependencies.verify_firebase_token", lambda token, **kwargs: {"uid": "user123", "token": token})
+    res = await get_firebase_user_from_payload(req)
+    assert res["token"] == "test-token-123"
+
+    # 2. token in tokenId payload
+    req = MockRequest(json_data={"tokenId": "test-token-456"})
+    res = await get_firebase_user_from_payload(req)
+    assert res["token"] == "test-token-456"
+
+    # 3. token in headers fallback
+    req = MockRequest(json_data=None, headers={"Authorization": "Bearer test-token-789"})
+    res = await get_firebase_user_from_payload(req)
+    assert res["token"] == "test-token-789"
+
+    # 4. missing token raises 401
+    req = MockRequest(json_data={})
+    with pytest.raises(HTTPException) as exc:
+        await get_firebase_user_from_payload(req)
+    assert exc.value.status_code == 401
+
 

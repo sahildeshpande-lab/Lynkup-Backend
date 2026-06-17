@@ -12,7 +12,8 @@ opentelemetry-instrumentation-fastapi
 opentelemetry-instrumentation-sqlalchemy
 opentelemetry-instrumentation-redis
 datetime
-pwdlib[argon2]
+pwdlib[bcrypt]
+bcrypt
 python-multipart
 jinja2
 pytest

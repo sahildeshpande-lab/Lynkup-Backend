@@ -4,8 +4,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from core.db.config import settings as db_settings
-from core.db.init import init_db, seed_dummy_data
+from core.database.config import settings as db_settings
+from core.database.init import init_db
 
 
 @asynccontextmanager
@@ -13,8 +13,6 @@ async def lifespan(app: FastAPI):
     import asyncio
     if db_settings.auto_init_db:
         await init_db()
-        if db_settings.seed_dummy_data:
-            await seed_dummy_data()
             
     # Start the email sender background cron task
     from core.email_service import cron_send_emails

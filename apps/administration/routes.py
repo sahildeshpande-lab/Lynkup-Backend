@@ -1,36 +1,68 @@
 from __future__ import annotations
 
 from uuid import UUID
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, status, Form, UploadFile, File
+from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from core.db.session import get_session
-from core.security.auth import get_current_superadmin
+from pydantic import EmailStr
+from common.enums import EducationLevel
+from core.database.session import get_session
+from core.security.auth import get_current_superadmin, get_current_admin
+from apps.accounts.db_models import User
 
 from . import services
 from .schemas import (
     AdminUserActionRequest,
-    AdminUserUpdateRequest,
     ApiResponse,
+    AdminSignupRequest,
+    AdminLoginRequest,
 )
-from apps.accounts.schemas import EmailSignupRequest, LoginRequest, RefreshTokenRequest
-from apps.profiles.schemas import EducationUpdateRequest, CompletenessWeightsUpdateRequest
+from apps.accounts.schemas import EmailSignupRequest, RefreshTokenRequest, AdminAuthResponse
+from apps.profiles.schemas import CompletenessWeightsUpdateRequest
+
 
 router = APIRouter(tags=["4] Admin Management"])
 
 
-@router.post("/auth/admin/signup", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
-async def admin_signup(payload: EmailSignupRequest, db: AsyncSession = Depends(get_session)) -> ApiResponse:
+@router.post("/auth/admin/signup", response_model=AdminAuthResponse, status_code=status.HTTP_201_CREATED)
+async def admin_signup(
+    payload: AdminSignupRequest,
+    db: AsyncSession = Depends(get_session),
+) -> AdminAuthResponse:
     return await services.admin_signup(payload, db)
 
 
-@router.post("/auth/admin/education", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
-async def admin_education(payload: EducationUpdateRequest, db: AsyncSession = Depends(get_session)) -> ApiResponse:
-    return ApiResponse(message="education saved", data=await services.admin_education(payload, db))
+@router.post("/admin/onboarding", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
+async def admin_onboarding(
+    profile_photo: UploadFile = File(...),
+    university_id: str = Form(...),
+    major: str = Form(...),
+    minor: str | None = Form(None),
+    education_level: str = Form(...),
+    Bio: str = Form(...),
+    academic_interests: str = Form(...),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
+) -> ApiResponse:
+    data = await services.admin_complete_onboarding(
+        user_id=current_user.id,
+        profile_photo=profile_photo,
+        university_id=university_id,
+        major=major,
+        minor=minor,
+        education_level=education_level,
+        bio=Bio,
+        academic_interests=academic_interests,
+        db=db,
+    )
+    return ApiResponse(message="onboarding completed", data=data)
 
 
-@router.post("/auth/admin/login", response_model=ApiResponse)
-async def admin_signin(payload: LoginRequest, db: AsyncSession = Depends(get_session)) -> ApiResponse:
+@router.post("/auth/admin/login", response_model=AdminAuthResponse)
+async def admin_signin(
+    payload: AdminLoginRequest,
+    db: AsyncSession = Depends(get_session),
+) -> AdminAuthResponse:
     return await services.admin_signin(payload, db)
 
 
@@ -47,6 +79,16 @@ async def list_users(
     current_user=Depends(get_current_superadmin),
 ) -> ApiResponse:
     return ApiResponse(message="users listed", data=await services.list_users(page, pageSize, db))
+
+
+@router.get("/export", response_model=ApiResponse)
+async def export_users(
+    page: int | None = Query(default=None, ge=1),
+    pageSize: int | None = Query(default=None, ge=1, le=200),
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+) -> ApiResponse:
+    return ApiResponse(message="users exported", data=await services.export_users(page, pageSize, db))
 
 
 @router.post("/users", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
@@ -68,16 +110,6 @@ async def get_user_by_admin(
     return ApiResponse(message="user fetched", data=await services.admin_get_user(userId, db))
 
 
-@router.patch("/users/{userId:uuid}", response_model=ApiResponse)
-async def update_user_by_admin(
-    userId: UUID,
-    payload: AdminUserUpdateRequest,
-    db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
-) -> ApiResponse:
-    return ApiResponse(message="profile updated", data=await services.admin_update_user(userId, payload, db))
-
-
 @router.delete("/users/{userId:uuid}", response_model=ApiResponse)
 async def delete_user_by_admin(
     userId: UUID,
@@ -87,26 +119,28 @@ async def delete_user_by_admin(
     return ApiResponse(message="user deletion scheduled", data=await services.admin_delete_user(userId, db))
 
 
-@router.post("/users/{userId:uuid}/suspend", response_model=ApiResponse)
-async def suspend_user_by_admin(
-    userId: UUID,
-    payload: AdminUserActionRequest,
-    db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
-) -> ApiResponse:
-    _ = userId
-    return ApiResponse(message="user suspended by admin", data=await services.admin_suspend_user(payload, db))
+# @router.post("/users/{userId:uuid}/suspend", response_model=ApiResponse)
+# async def suspend_user_by_admin(
+#     userId: UUID,
+#     payload: AdminUserActionRequest,
+#     db: AsyncSession = Depends(get_session),
+#     current_user=Depends(get_current_superadmin),
+# ) -> ApiResponse:
+#     _ = userId
+#     return ApiResponse(message="user suspended by admin", data=await services.admin_suspend_user(payload, db))
 
 
-@router.post("/users/{userId:uuid}/ban", response_model=ApiResponse)
-async def ban_user_by_admin(
-    userId: UUID,
-    payload: AdminUserActionRequest,
-    db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
-) -> ApiResponse:
-    _ = userId
-    return ApiResponse(message="user banned by admin", data=await services.admin_ban_user(payload, db))
+# @router.post("/users/{userId:uuid}/ban", response_model=ApiResponse)
+# async def ban_user_by_admin(
+#     userId: UUID,
+#     payload: AdminUserActionRequest,
+
+#     db: AsyncSession = Depends(get_session),
+#     current_user=Depends(get_current_superadmin),
+# ) -> ApiResponse:
+#     _ = userId
+#     return ApiResponse(message="user banned by admin", data=await services.admin_ban_user(payload, db))
+
 
 
 @router.patch("/update/completeness", response_model=ApiResponse)

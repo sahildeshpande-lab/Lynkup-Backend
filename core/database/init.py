@@ -4,13 +4,19 @@ from sqlmodel import SQLModel, select
 from sqlalchemy import text
 
 from .session import async_session_factory, engine
-from .seed_data import SEED_COUNTRIES, SEED_PROFILES, SEED_UNIVERSITIES, SEED_USERS
+
+
 
 
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await conn.run_sync(SQLModel.metadata.create_all)
+        try:
+            await conn.execute(text("ALTER TYPE onboardingstatus ADD VALUE IF NOT EXISTS 'pending'"))
+        except Exception:
+            pass
+        await conn.execute(text("ALTER TABLE refresh_tokens ALTER COLUMN expires_at DROP NOT NULL"))
         await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS subject VARCHAR(256) NOT NULL DEFAULT ''"))
         await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS is_sent BOOLEAN NOT NULL DEFAULT FALSE"))
         await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS profile_photo_url VARCHAR(2048)"))
@@ -20,6 +26,15 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS welcome_message VARCHAR(255)"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS registration_type VARCHAR(20) NOT NULL DEFAULT 'email'"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN firebase_uid DROP NOT NULL"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE"))
+        
+        # Academic program table removal and field additions/removals
+        await conn.execute(text("DROP TABLE IF EXISTS academic_programs CASCADE"))
+        await conn.execute(text("DROP TABLE IF EXISTS user_identities CASCADE"))
+        await conn.execute(text("ALTER TABLE profiles DROP COLUMN IF EXISTS academic_program_id"))
+        await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS profile_interests_id UUID"))
+        await conn.execute(text("ALTER TABLE universities ADD COLUMN IF NOT EXISTS academic_program JSON"))
 
         # Schema migrations for users table
         res_email = await conn.execute(text(
@@ -74,35 +89,3 @@ async def init_db() -> None:
             ON CONFLICT (name) DO NOTHING
         """))
 
-
-
-async def seed_dummy_data() -> None:
-    from apps.profiles.db_models import Country, University, Profile
-    from apps.accounts.db_models import User
-
-    async with async_session_factory() as session:
-        existing_countries = (await session.execute(select(Country))).scalars().all()
-        existing_iso_codes = {c.iso_code for c in existing_countries}
-        for country in SEED_COUNTRIES:
-            if country.iso_code not in existing_iso_codes:
-                session.add(country)
-
-        existing_universities = (await session.execute(select(University))).scalars().all()
-        existing_slugs = {u.slug for u in existing_universities}
-        for uni in SEED_UNIVERSITIES:
-            if uni.slug not in existing_slugs:
-                session.add(uni)
-
-        existing_users = (await session.execute(select(User))).scalars().all()
-        existing_uids = {u.firebase_uid for u in existing_users}
-        for user in SEED_USERS:
-            if user.firebase_uid not in existing_uids:
-                session.add(user)
-
-        existing_profiles = (await session.execute(select(Profile))).scalars().all()
-        existing_user_ids = {p.user_id for p in existing_profiles}
-        for profile in SEED_PROFILES:
-            if profile.user_id not in existing_user_ids:
-                session.add(profile)
-
-        await session.commit()

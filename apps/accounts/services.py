@@ -15,12 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 from sqlalchemy.orm import selectinload
 from pwdlib import PasswordHash
+from pwdlib.hashers.bcrypt import BcryptHasher
 
-from apps.accounts.db_models import RefreshToken, SecurityEvent, SecurityEventType, TransactionalEmailLog, User, UserIdentity, PasswordResetToken
+from apps.accounts.db_models import RefreshToken, SecurityEvent, SecurityEventType, TransactionalEmailLog, User, PasswordResetToken
 from apps.profiles.db_models import Profile
 from common.enums import OnboardingStatus, RegistrationType, UserStatus
 from core.auth.config import settings as auth_settings
-from core.email_service import send_otp_email, build_email_verified_success_html
+from core.email_service import send_otp_email, send_verification_success_email, build_email_verified_success_html
 
 from .schemas import (
     # AdminSigninRequest,
@@ -32,6 +33,7 @@ from .schemas import (
     AuthSessionResponse,
     AuthUserResponse,
     EmailLoginRequest,
+    LoginRequest,
     EmailSignupRequest,
     LogoutRequest,
     RefreshTokenRequest,
@@ -53,14 +55,13 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 JWT_SECRET = auth_settings.jwt_secret
 JWT_ALGORITHM = auth_settings.jwt_algorithm
-ACCESS_TOKEN_EXPIRE_MINUTES = auth_settings.access_token_expire_minutes
-# REFRESH_TOKEN_EXPIRE_DAYS = 
+ACCESS_TOKEN_EXPIRE_MINUTES = auth_settings.access_token_expire_minutes 
 LOGIN_EVENT_THROTTLE_SECONDS = auth_settings.login_event_throttle_seconds
-ARGON2_HASHER = PasswordHash.recommended()
+PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 
 
 def _hash_password(password: str, username: str | None = None) -> str:
-    return ARGON2_HASHER.hash(password)
+    return PASSWORD_HASHER.hash(password)
 
 
 def _generate_otp() -> str:
@@ -135,7 +136,7 @@ async def _store_refresh_token(
         token_hash=_hash_token(refresh_token),
         device_id=device_id,
         device_name=device_name,
-        expires_at=datetime.max.replace(tzinfo=timezone.utc),
+        expires_at=None,
         created_at=now,
     )
     db.add(refresh_row)
@@ -168,9 +169,10 @@ def _build_auth_user_response(user: User, profile: Profile | None) -> AuthUserRe
         first_name = parts[0]
         last_name = parts[1] if len(parts) > 1 else ""
 
+    from core.images import generate_download_url
+
     return AuthUserResponse(
         id=str(user.id),
-        firebase_uid=user.firebase_uid,
         firstName=first_name,
         lastName=last_name,
         email=user.email,
@@ -184,6 +186,8 @@ def _build_auth_user_response(user: User, profile: Profile | None) -> AuthUserRe
         updatedAt=user.updated_at,
         referenceCode="",
         invitationCode=None,
+        profilePhoto_url=generate_download_url(profile.profile_photo_url) if (profile and profile.profile_photo_url) else None,
+        bannerPhotoUrl=generate_download_url(profile.banner_photo_url) if (profile and profile.banner_photo_url) else None,
     )
 
 
@@ -277,14 +281,6 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
 
     await assign_user_role(db, user, "user")
 
-    identity = UserIdentity(
-        user_id=user.id,
-        provider=provider,
-        provider_uid=firebase_uid[:128],
-        linked_at=now,
-    )
-    db.add(identity)
-
     profile = Profile(
         user_id=user.id,
         display_name=display_name,
@@ -312,23 +308,22 @@ async def _fetch_user_profile(db: AsyncSession, user: User) -> Profile | None:
 
 async def _issue_auth_session(user: User, db: AsyncSession) -> dict:
     profile = await _fetch_user_profile(db, user)
-    auth_user = _build_auth_user_response(user, profile)
-    access_token, refresh_token = _generate_tokens(user)
-    await _store_refresh_token(db, user, refresh_token)
+    from apps.profiles.services import build_user_base_response
+    user_data = await build_user_base_response(user, profile, db)
     await db.commit()
-    return AuthSessionResponse(
-        user=auth_user,
-        emailSent=False,
-        access_token=access_token,
-        refresh_token=refresh_token,
-    ).model_dump()
+    return {
+        "user": user_data,
+        "emailSent": False,
+    }
 
 
 async def build_firebase_session_response(user: User, db: AsyncSession) -> dict:
     profile = await _fetch_user_profile(db, user)
+    from apps.profiles.services import build_user_base_response
+    user_data = await build_user_base_response(user, profile, db)
     return {
-        "user": _build_auth_user_response(user, profile).model_dump(),
-        "token_type": "firebase",
+        "user": user_data,
+        "emailSent": False,
     }
 
 
@@ -342,7 +337,7 @@ async def social_auth_bearer(id_token: str, db: AsyncSession) -> tuple[dict, boo
     from sqlmodel import select
     from sqlalchemy.orm import selectinload
     from common.enums import UserStatus, OnboardingStatus, RegistrationType
-    from apps.accounts.db_models import User, UserIdentity
+    from apps.accounts.db_models import User
     from apps.profiles.db_models import Profile
     from apps.accounts.services import assign_user_role, _now, _issue_auth_session
     from fastapi import HTTPException, status
@@ -429,14 +424,6 @@ async def social_auth_bearer(id_token: str, db: AsyncSession) -> tuple[dict, boo
 
     await assign_user_role(db, user, "user")
 
-    identity = UserIdentity(
-        user_id=user.id,
-        provider=provider,
-        provider_uid=uid,
-        linked_at=now
-    )
-    db.add(identity)
-
     profile = Profile(
         user_id=user.id,
         display_name=firebase_user.get("name") or email.split("@")[0],
@@ -459,78 +446,149 @@ async def social_auth_bearer(id_token: str, db: AsyncSession) -> tuple[dict, boo
     return session_data, True
 
 
-async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> dict:
+async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dict, bool]:
     from core.images import upload_image_to_s3, normalize_image_name
     from core.auth.services import verify_firebase_token
     from sqlmodel import select
+    from sqlalchemy.orm import selectinload
+    from common.enums import UserStatus, OnboardingStatus, RegistrationType
+    from apps.accounts.db_models import User
+    from apps.profiles.db_models import Profile
+    from apps.accounts.services import assign_user_role, _now, _issue_auth_session, AccountExistsException
+    from fastapi import HTTPException, status
 
     try:
         firebase_user = verify_firebase_token(payload.idToken, check_revoked=False)
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Firebase ID token") from exc
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Firebase ID token"
+        ) from exc
 
-    firebase_uid = firebase_user["uid"]
-    email = (firebase_user.get("email") or payload.email or f"{firebase_uid}@firebase.local").lower()
-    stmt = select(User).options(selectinload(User.roles)).where(User.email == email)
-    user = (await db.execute(stmt)).scalar_one_or_none()
-    
-    now = _now()
-    if not user:
-        user = User(
-            firebase_uid=firebase_uid,
-            email=email,
-            status=UserStatus.active,
-            onboarding_status=OnboardingStatus.not_started,
-            created_at=now,
-            updated_at=now,
-            email_verified_at=now if firebase_user.get("email_verified") else None,
+    uid = firebase_user.get("uid")
+    if not uid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Firebase credentials"
         )
-        db.add(user)
-        await db.flush()
 
-        await assign_user_role(db, user, "user")
-        
-        identity = UserIdentity(
-            user_id=user.id,
-            provider=payload.provider.value if hasattr(payload.provider, 'value') else str(payload.provider),
-            provider_uid=firebase_uid,
-            linked_at=now
-        )
-        db.add(identity)
-        
-        profile = Profile(
-            user_id=user.id,
-            display_name=payload.fullName or f"{payload.firstName or ''} {payload.lastName or ''}".strip() or email.split("@")[0],
-            completeness_score=0,
-            updated_at=now
-        )
-        db.add(profile)
+    # Email resolution: payload.email overrides firebase email if provided, otherwise firebase email
+    email = (payload.email or firebase_user.get("email") or f"{uid}@firebase.local").lower()
+
+    provider = (payload.provider.value if hasattr(payload.provider, 'value') else str(payload.provider)).lower()
+    if provider == "google.com" or provider == "google":
+        provider_name = "google"
+    elif provider == "apple.com" or provider == "apple":
+        provider_name = "apple"
     else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported provider"
+        )
+
+    stmt = select(User).options(selectinload(User.roles)).where(User.firebase_uid == uid)
+    user = (await db.execute(stmt)).scalar_one_or_none()
+
+    now = _now()
+
+    if user:
+        if user.deleted_at:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account deleted"
+            )
+        if user.status in (UserStatus.suspended, UserStatus.banned):
+            status_str = user.status.value if hasattr(user.status, "value") else str(user.status)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Account is {status_str}"
+            )
+
+        user.last_login_at = now
+        user.updated_at = now
+        db.add(user)
+
+        # Update profile photo if provided
         stmt_profile = select(Profile).where(Profile.user_id == user.id)
         profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-        if not profile:
-            profile = Profile(
-                user_id=user.id,
-                display_name=f"{payload.firstName or ''} {payload.lastName or ''}".strip() or user.email.split("@")[0],
-                completeness_score=0,
-                updated_at=now
-            )
+        if profile and payload.profilePhotoUrl:
+            uploaded_url = await upload_image_to_s3(payload.profilePhotoUrl, prefix="profiles")
+            profile.profile_photo_url = normalize_image_name(uploaded_url)
             db.add(profile)
-            
+            await db.flush()
+            from apps.profiles.services import calculate_completeness_score
+            profile.completeness_score = await calculate_completeness_score(user.id, db)
+            db.add(profile)
+
+        await db.commit()
+        await db.refresh(user)
+
+        stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
+        user = (await db.execute(stmt_user)).scalar_one()
+
+        session_data = await _issue_auth_session(user, db)
+        return session_data, False
+
+    # User does not exist, check email conflicts
+    stmt_email = select(User).where(User.email == email)
+    existing_by_email = (await db.execute(stmt_email)).scalar_one_or_none()
+    if existing_by_email:
+        reg_type_str = (
+            existing_by_email.registration_type.value
+            if hasattr(existing_by_email.registration_type, "value")
+            else str(existing_by_email.registration_type)
+        )
+        raise AccountExistsException(registration_type=reg_type_str)
+
+    user = User(
+        firebase_uid=uid,
+        email=email,
+        registration_type=RegistrationType(provider_name),
+        status=UserStatus.active,
+        onboarding_status=OnboardingStatus.pending,
+        created_at=now,
+        updated_at=now,
+        last_login_at=now,
+        email_verified_at=now if firebase_user.get("email_verified") else None,
+    )
+    db.add(user)
+    await db.flush()
+
+    await assign_user_role(db, user, "user")
+
+    # Determine display name
+    if payload.fullName:
+        display_name = payload.fullName
+    elif payload.firstName or payload.lastName:
+        display_name = f"{payload.firstName or ''} {payload.lastName or ''}".strip()
+    else:
+        display_name = firebase_user.get("name") or email.split("@")[0]
+
+    profile = Profile(
+        user_id=user.id,
+        display_name=display_name,
+        completeness_score=0,
+        updated_at=now
+    )
     if payload.profilePhotoUrl:
         uploaded_url = await upload_image_to_s3(payload.profilePhotoUrl, prefix="profiles")
         profile.profile_photo_url = normalize_image_name(uploaded_url)
-        db.add(profile)
-        
+
+    db.add(profile)
     await db.flush()
+
     from apps.profiles.services import calculate_completeness_score
     profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
+
     await db.commit()
     await db.refresh(user)
-    await db.refresh(profile)
-    
-    return await _issue_auth_session(user, db)
+
+    stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
+    user = (await db.execute(stmt_user)).scalar_one()
+
+    session_data = await _issue_auth_session(user, db)
+    return session_data, True
 
 
 async def social_auth_form(
@@ -573,14 +631,6 @@ async def social_auth_form(
         await db.flush()
 
         await assign_user_role(db, user, "user")
-        
-        identity = UserIdentity(
-            user_id=user.id,
-            provider=provider.value if hasattr(provider, 'value') else str(provider),
-            provider_uid=firebase_uid,
-            linked_at=now
-        )
-        db.add(identity)
         
         profile = Profile(
             user_id=user.id,
@@ -695,7 +745,7 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     return ApiResponse(status=True, message="Signup successful", data=data)
 
 
-async def login(firebase_user: dict, db: AsyncSession) -> ApiResponse:
+async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) -> ApiResponse:
     firebase_uid = firebase_user.get("uid")
     if not firebase_uid:
         return ApiResponse(status=False, message="Invalid Firebase credentials", data=None)
@@ -704,6 +754,9 @@ async def login(firebase_user: dict, db: AsyncSession) -> ApiResponse:
     user = (await db.execute(stmt)).scalar_one_or_none()
     if not user:
         return ApiResponse(status=False, message="User not found in local DB. Please sign up.", data=None)
+
+    if not user.password_hash or not PASSWORD_HASHER.verify(payload.password, user.password_hash):
+        return ApiResponse(status=False, message="Invalid credentials", data=None)
 
     if user.deleted_at:
         return ApiResponse(status=False, message="Account is not active", data=None)
@@ -740,10 +793,13 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
     if not user:
         return ApiResponse(status=False, message="User not found", data=None)
 
+    if user.email.lower() != payload.email.lower():
+        return ApiResponse(status=False, message="Email does not match user", data=None)
+
     if user.email_otp != payload.otp:
         return ApiResponse(status=False, message="Invalid OTP", data=None)
 
-    if user.email_otp_created_at and (_now() - user.email_otp_created_at) > timedelta(minutes=10):
+    if user.email_otp_created_at and (_now() - user.email_otp_created_at) > timedelta(minutes=auth_settings.otp_expire_minutes):
         return ApiResponse(status=False, message="OTP expired", data=None)
 
     if user.email_otp == payload.otp:
@@ -759,7 +815,10 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
         full_name = profile.display_name if profile else None
 
         html_content = build_email_verified_success_html(full_name)
-        return HTMLResponse(content=html_content, status_code=200)
+        # Send a verification success email using existing account_created_email template
+        from core.email_service import send_verification_success_email
+        await send_verification_success_email(user.email, full_name)
+        return ApiResponse(status=True, message="Email verified successfully", data=None)
 
     return ApiResponse(status=False, message="Email not verified in Firebase yet", data=None)
 
@@ -770,7 +829,7 @@ async def verify_email(token: str, db: AsyncSession) -> HTMLResponse | ApiRespon
     if not user:
         return HTMLResponse(content="<h1>Invalid or expired token</h1>", status_code=400)
 
-    if user.email_otp_created_at and (_now() - user.email_otp_created_at) > timedelta(minutes=10):
+    if user.email_otp_created_at and (_now() - user.email_otp_created_at) > timedelta(minutes=auth_settings.otp_expire_minutes):
         return HTMLResponse(content="<h1>Token expired</h1>", status_code=400)
 
     user.email_verified_at = _now()
@@ -794,6 +853,13 @@ async def resend_otp(payload: ResendOtpRequest, firebase_user: dict, db: AsyncSe
     if not user:
         return ApiResponse(status=False, message="User not found", data=None)
 
+    if user.firebase_uid != firebase_user["uid"]:
+        return ApiResponse(status=False, message="Unauthorized action for this user account", data=None)
+
+    # Enforce cooldown based on configuration (default 2 minutes)
+    cooldown = timedelta(minutes=auth_settings.resend_otp_cooldown_minutes)
+    if user.email_otp_created_at and (_now() - user.email_otp_created_at) < cooldown:
+          return ApiResponse(status=False, message="Please wait before resending OTP", data=None)
     otp = _generate_otp()
     user.email_otp = otp
     user.email_otp_created_at = _now()
@@ -810,7 +876,6 @@ def _build_user_base(refresh_token: str) -> UserBaseResponse:
     primary_email = normalized_seed if "@" in normalized_seed else f"{normalized_seed}@example.com"
     return UserBaseResponse(
         id=str(uuid4()),
-        firebase_uid=f"firebase_{primary_email.split('@')[0]}",
         email=primary_email,
         createdAt=now,
         updatedAt=now,
@@ -840,7 +905,7 @@ async def refresh_token(payload: RefreshTokenRequest, db: AsyncSession) -> dict:
     if not token_row or token_row.revoked_at is not None:
         from fastapi import HTTPException, status
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token revoked or not found")
-    if token_row.expires_at <= _now():
+    if token_row.expires_at and token_row.expires_at <= _now():
         from fastapi import HTTPException, status
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired")
 
@@ -939,14 +1004,14 @@ async def forgot_password(payload: ForgotPasswordRequest, db: AsyncSession) -> A
     if existing_token:
         return ApiResponse(
             status=False,
-            message="Recently email for resest password as been send please try after 15 mins  ",
+            message=f"Recently email for resest password as been send please try after {auth_settings.password_reset_token_expire_minutes} mins  ",
             data=None
         )
 
     # Generate token
     token_val = str(uuid.uuid4())
-    now = _now()
-    expires_at = now + timedelta(minutes=15)
+    now = _now() 
+    expires_at = now + timedelta(minutes=auth_settings.password_reset_token_expire_minutes)
 
     reset_token = PasswordResetToken(
         user_id=user.id,
@@ -963,7 +1028,7 @@ async def forgot_password(payload: ForgotPasswordRequest, db: AsyncSession) -> A
     # Send email
     await send_reset_password_email(email, reset_link)
 
-    return ApiResponse(status=True, message="Password reset link sent successfully", data=None)
+    return ApiResponse(status=True, message="Password reset link sent successfully to your mail ", data=None)
 
 
 async def reset_password(payload: ResetPasswordRequest, db: AsyncSession) -> ApiResponse:

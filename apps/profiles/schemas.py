@@ -26,17 +26,7 @@ class ProfileUpdateRequest(BaseModel):
     welcomeMessage: Optional[str] = None
 
 
-class EducationUpdateRequest(BaseModel):
-    universityId: str | int | None = None
-    major: str
-    minor: Optional[str] = None
-    educationLevel: EducationLevel
-    graduationDate: Optional[date] = None
 
-
-class EducationResponseData(BaseModel):
-    user_id: str
-    education: dict[str, Any]
 
 
 class ProfileVisibilityRequest(BaseModel):

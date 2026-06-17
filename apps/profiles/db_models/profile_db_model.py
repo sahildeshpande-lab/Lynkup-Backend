@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, String
+from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, String, JSON
 from sqlmodel import Field, SQLModel
 
 from common.enums import ProfileVisibility
@@ -22,7 +22,7 @@ class Profile(SQLModel, table=True):
     display_name: str | None = Field(default=None, sa_column=Column(String(128)))
     bio: str | None = Field(default=None, sa_column=Column(String(500)))
     university_id: UUID | None = Field(default=None, foreign_key="universities.id", index=True)
-    academic_program_id: UUID | None = Field(default=None, foreign_key="academic_programs.id", index=True)
+    profile_interests_id: list[str] | None = Field(default=None, sa_column=Column(JSON, nullable=True, server_default='[]'))
     major: str | None = Field(default=None, sa_column=Column(String(255)))
     minor: str | None = Field(default=None, sa_column=Column(String(255)))
     edu_level: str | None = Field(default=None, sa_column=Column(String(32), nullable=True, index=True))

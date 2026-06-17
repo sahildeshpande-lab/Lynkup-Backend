@@ -48,7 +48,7 @@ def test_patch_me_turns_off_onboarding(monkeypatch) -> None:
     from apps.profiles import services as profiles_services
 
     async def _mock_update_profile_me_form(current_user, bio, academic_interests, profile_photo, banner_photo, db):
-        return {"updated": True, "profile": {"bio": bio}, "onboarding_status": "completed", "is_onboarding": False}
+        return {"user": {"bio": bio, "is_onboarding": False}}
 
     monkeypatch.setattr(profiles_services, "update_profile_me_form", _mock_update_profile_me_form)
 
@@ -61,7 +61,7 @@ def test_patch_me_turns_off_onboarding(monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] is True
-    assert body["data"]["is_onboarding"] is False
+    assert body["data"]["user"]["is_onboarding"] is False
 
 
 def test_get_public_profile_returns_success() -> None:
@@ -147,5 +147,39 @@ def test_delete_user_me_returns_success(monkeypatch) -> None:
     assert body["data"]["deleted"] is True
     assert body["data"]["status"] == "deleting"
     assert "deleted_at" in body["data"]
+
+
+def test_complete_onboarding_returns_success_payload(monkeypatch) -> None:
+    from apps.profiles import services as profiles_services
+    import io
+
+    async def _mock_complete_onboarding(user, bio, major, minor, university_id, education_level, academic_interests, profile_photo, db):
+        return {"user": {"email": user.email}, "onboarded": True}
+
+    monkeypatch.setattr(profiles_services, "complete_onboarding", _mock_complete_onboarding)
+
+    dummy_file = io.BytesIO(b"dummy image data")
+    response = client.post(
+        "/api/v1/users/onboarding",
+        data={
+            "university_id": "11111111-1111-1111-1111-111111111111",
+            "major": "Computer Science",
+            "minor": "Math",
+            "education_level": "Masters",
+            "Bio": "Test Bio",
+            "academic_interests": "['Math', 'CS']"
+        },
+        files={
+            "profile_photo": ("test.png", dummy_file, "image/png")
+        },
+        headers={"Authorization": "Bearer access_jane@example.com"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is True
+    assert body["message"] == "onboarding completed"
+    assert body["data"]["onboarded"] is True
+
 
 
