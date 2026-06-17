@@ -33,17 +33,17 @@ async def universities(
 
 
 
-@router.get("/interests", response_model=ApiResponse)
-async def list_interests(
+@router.get("/academicsinfo", response_model=ApiResponse)
+async def list_academics_info(
     query: Optional[str] = Query(None, description="Search academic interests by name"),
     pagination: PaginationParams = Depends(),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    data = await services.get_academic_interests(
+    data = await services.get_academics_info(
         query=query,
         page=pagination.page,
         page_size=pagination.pageSize,
         db=db,
     )
-    return ApiResponse(message="Academic interests fetched successfully", data=data)
+    return ApiResponse(message="Academics info fetched successfully", data=data)
 

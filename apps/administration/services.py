@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from apps.accounts.db_models import User , UserRole , Role
-from common.enums import OnboardingStatus, UserStatus, EducationLevel, RegistrationType
+from common.enums import EducationLevel, OnboardingStatus, UserStatus, RegistrationType
 from common.pagination import build_paginated_response
 
 from .schemas import (
@@ -121,132 +121,220 @@ async def admin_signup(payload: AdminSignupRequest, db: AsyncSession):
     )
 
 
+# async def admin_complete_onboarding(
+#     user_id: UUID,
+#     bio: str,
+#     major: str,
+#     minor: str | None,
+#     university_id: str,
+#     education_level: str,
+#     academic_interests: str,
+#     profile_photo: UploadFile,
+#     db: AsyncSession,
+# ) -> dict:
+#     if db is not None:
+#         from apps.profiles.db_models import Profile
+#         from core.images import save_image, settings, generate_download_url, normalize_image_name
+#         from uuid import UUID as pyUUID
+#         import uuid
+#         import json
+#         from common.enums import OnboardingStatus
+#         from apps.profiles.services import calculate_completeness_score, build_user_base_response
+        
+#         # Verify user exists
+#         stmt = select(User).where(User.id == user_id)
+#         user = (await db.execute(stmt)).scalar_one_or_none()
+#         if not user:
+#             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        
+#         # Fetch or create profile
+#         profile_stmt = select(Profile).where(Profile.user_id == user_id)
+#         profile = (await db.execute(profile_stmt)).scalar_one_or_none()
+#         if not profile:
+#             profile = Profile(user_id=user_id, display_name="", completeness_score=0)
+#             db.add(profile)
+#             await db.flush()
+            
+#         profile_data = {}
+
+#         if profile_photo and profile_photo.filename:
+#             content = await profile_photo.read()
+#             if content:
+#                 ext = profile_photo.filename.split(".")[-1] if "." in profile_photo.filename else "png"
+#                 file_name = f"profiles/{uuid.uuid4()}.{ext}"
+#                 save_image(
+#                     file_name=file_name,
+#                     content=content,
+#                     content_type=profile_photo.content_type or "image/png"
+#                 )
+#                 profile.profile_photo_url = normalize_image_name(file_name)
+#                 profile_data["profilePhotoUrl"] = generate_download_url(profile.profile_photo_url)
+
+#         profile.bio = bio
+#         profile_data["bio"] = bio
+
+#         if university_id:
+#             try:
+#                 profile.university_id = pyUUID(str(university_id))
+#             except ValueError:
+#                 pass
+#         profile_data["universityId"] = str(profile.university_id) if profile.university_id else None
+                    
+#         profile.major = major
+#         profile.minor = minor
+#         profile.edu_level = education_level
+#         profile_data["educationLevel"] = education_level
+        
+#         if academic_interests is not None:
+#             interests_list = []
+#             val = academic_interests.strip()
+#             if val.startswith("[") and val.endswith("]"):
+#                 try:
+#                     interests_list = json.loads(val)
+#                 except Exception:
+#                     interests_list = [x.strip().strip("'\"") for x in val[1:-1].split(",") if x.strip()]
+#             else:
+#                 interests_list = [x.strip() for x in val.split(",") if x.strip()]
+
+#             from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
+#             from uuid import UUID
+
+#             resolved_uuids = []
+#             for tag in interests_list:
+#                 tag_clean = tag.strip()
+#                 if not tag_clean:
+#                     continue
+#                 is_uuid = False
+#                 try:
+#                     uuid_val = UUID(tag_clean)
+#                     is_uuid = True
+#                 except ValueError:
+#                     pass
+                
+#                 if is_uuid:
+#                     stmt_interest = select(AcademicInterest).where(AcademicInterest.id == uuid_val)
+#                     interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
+#                     if interest_rec:
+#                         resolved_uuids.append(str(interest_rec.id))
+#                 else:
+#                     stmt_interest = select(AcademicInterest).where(AcademicInterest.name.ilike(tag_clean))
+#                     interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
+#                     if not interest_rec:
+#                         interest_rec = AcademicInterest(name=tag_clean, is_active=True)
+#                         db.add(interest_rec)
+#                         await db.flush()
+#                     resolved_uuids.append(str(interest_rec.id))
+
+#             profile.profile_interests_id = resolved_uuids
+            
+#             profile_data["academicInterests"] = interests_list
+
+#         user.onboarding_status = OnboardingStatus.completed
+#         db.add(user)
+#         db.add(profile)
+#         await db.flush()
+        
+#         try:
+#             profile.completeness_score = await calculate_completeness_score(user_id, db)
+#             db.add(profile)
+#         except Exception:
+#             pass
+            
+#         await db.commit()
+#         await db.refresh(user)
+#         await db.refresh(profile)
+
+#         user_data = await build_user_base_response(user, profile, db)
+#         return {"user": user_data}
+#     return {}
+
+
 async def admin_complete_onboarding(
     user_id: UUID,
     bio: str,
     major: str,
     minor: str | None,
     university_id: str,
-    education_level: str,
+    education_level_id: int,
     academic_interests: str,
-    profile_photo: UploadFile,
+    profile_photo,
     db: AsyncSession,
 ) -> dict:
-    if db is not None:
-        from apps.profiles.db_models import Profile
-        from core.images import save_image, settings, generate_download_url, normalize_image_name
-        from uuid import UUID as pyUUID
-        import uuid
-        import json
-        from common.enums import OnboardingStatus
-        from apps.profiles.services import calculate_completeness_score, build_user_base_response
-        
-        # Verify user exists
-        stmt = select(User).where(User.id == user_id)
-        user = (await db.execute(stmt)).scalar_one_or_none()
-        if not user:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-        
-        # Fetch or create profile
-        profile_stmt = select(Profile).where(Profile.user_id == user_id)
-        profile = (await db.execute(profile_stmt)).scalar_one_or_none()
-        if not profile:
-            profile = Profile(user_id=user_id, display_name="", completeness_score=0)
-            db.add(profile)
-            await db.flush()
-            
-        profile_data = {}
+    import json
+    import uuid
 
-        if profile_photo and profile_photo.filename:
-            content = await profile_photo.read()
-            if content:
-                ext = profile_photo.filename.split(".")[-1] if "." in profile_photo.filename else "png"
-                file_name = f"profiles/{uuid.uuid4()}.{ext}"
-                save_image(
-                    file_name=file_name,
-                    content=content,
-                    content_type=profile_photo.content_type or "image/png"
-                )
-                profile.profile_photo_url = normalize_image_name(file_name)
-                profile_data["profilePhotoUrl"] = generate_download_url(profile.profile_photo_url)
+    from core.images import generate_download_url, normalize_image_name, save_image
+    from apps.profiles.services import (
+        _resolve_academic_interest_ids,
+        build_user_base_response,
+        calculate_completeness_score,
+    )
 
-        profile.bio = bio
-        profile_data["bio"] = bio
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-        if university_id:
-            try:
-                profile.university_id = pyUUID(str(university_id))
-            except ValueError:
-                pass
-        profile_data["universityId"] = str(profile.university_id) if profile.university_id else None
-                    
-        profile.major = major
-        profile.minor = minor
-        profile.edu_level = education_level
-        profile_data["educationLevel"] = education_level
-        
-        if academic_interests is not None:
-            interests_list = []
-            val = academic_interests.strip()
-            if val.startswith("[") and val.endswith("]"):
-                try:
-                    interests_list = json.loads(val)
-                except Exception:
-                    interests_list = [x.strip().strip("'\"") for x in val[1:-1].split(",") if x.strip()]
-            else:
-                interests_list = [x.strip() for x in val.split(",") if x.strip()]
-
-            from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
-            from uuid import UUID
-
-            resolved_uuids = []
-            for tag in interests_list:
-                tag_clean = tag.strip()
-                if not tag_clean:
-                    continue
-                is_uuid = False
-                try:
-                    uuid_val = UUID(tag_clean)
-                    is_uuid = True
-                except ValueError:
-                    pass
-                
-                if is_uuid:
-                    stmt_interest = select(AcademicInterest).where(AcademicInterest.id == uuid_val)
-                    interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
-                    if interest_rec:
-                        resolved_uuids.append(str(interest_rec.id))
-                else:
-                    stmt_interest = select(AcademicInterest).where(AcademicInterest.name.ilike(tag_clean))
-                    interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
-                    if not interest_rec:
-                        interest_rec = AcademicInterest(name=tag_clean, is_active=True)
-                        db.add(interest_rec)
-                        await db.flush()
-                    resolved_uuids.append(str(interest_rec.id))
-
-            profile.profile_interests_id = resolved_uuids
-            
-            profile_data["academicInterests"] = interests_list
-
-        user.onboarding_status = OnboardingStatus.completed
-        db.add(user)
+    profile = (await db.execute(select(Profile).where(Profile.user_id == user_id))).scalar_one_or_none()
+    if not profile:
+        profile = Profile(user_id=user_id, display_name="", completeness_score=0)
         db.add(profile)
         await db.flush()
-        
-        try:
-            profile.completeness_score = await calculate_completeness_score(user_id, db)
-            db.add(profile)
-        except Exception:
-            pass
-            
-        await db.commit()
-        await db.refresh(user)
-        await db.refresh(profile)
 
-        user_data = await build_user_base_response(user, profile, db)
-        return {"user": user_data}
-    return {}
+    if profile_photo and profile_photo.filename:
+        content = await profile_photo.read()
+        if content:
+            ext = profile_photo.filename.split(".")[-1] if "." in profile_photo.filename else "png"
+            file_name = f"profiles/{uuid.uuid4()}.{ext}"
+            save_image(
+                file_name=file_name,
+                content=content,
+                content_type=profile_photo.content_type or "image/png",
+            )
+            profile.profile_photo_url = normalize_image_name(file_name)
+
+    profile.bio = bio
+    if university_id:
+        try:
+            profile.university_id = UUID(str(university_id))
+        except ValueError:
+            pass
+    profile.major = major
+    profile.minor = minor
+    try:
+        education_level = EducationLevel.from_id(education_level_id)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid education_level_id"
+        ) from exc
+    profile.edu_level = education_level.value
+
+    if academic_interests is not None:
+        val = academic_interests.strip()
+        if val.startswith("[") and val.endswith("]"):
+            try:
+                interests_list = json.loads(val)
+            except Exception:
+                interests_list = [x.strip().strip("'\"") for x in val[1:-1].split(",") if x.strip()]
+        else:
+            interests_list = [x.strip() for x in val.split(",") if x.strip()]
+        profile.profile_interests_id = await _resolve_academic_interest_ids(interests_list, db)
+
+    user.onboarding_status = OnboardingStatus.completed
+    db.add(user)
+    db.add(profile)
+    await db.flush()
+
+    profile.completeness_score = await calculate_completeness_score(user_id, db)
+    db.add(profile)
+    await db.commit()
+    await db.refresh(user)
+    await db.refresh(profile)
+
+    user_data = await build_user_base_response(user, profile, db)
+    if profile.profile_photo_url:
+        user_data["profilePhoto_url"] = generate_download_url(profile.profile_photo_url)
+    return {"user": user_data}
 
 
 async def admin_token(payload: RefreshTokenRequest, db: AsyncSession) -> dict:
@@ -275,7 +363,7 @@ async def admin_signin(payload: AdminLoginRequest, db: AsyncSession) -> ApiRespo
     stmt = select(User).options(selectinload(User.roles)).where(User.email == payload.email.lower())
     user = (await db.execute(stmt)).scalar_one_or_none()
     if not user:
-        return ApiResponse(status=False, message="User not found in local DB. Please sign up.", data=None)
+        return ApiResponse(status=False, message="User not found . Please sign up.", data=None)
 
     if not user.password_hash or not PASSWORD_HASHER.verify(payload.password, user.password_hash):
         return ApiResponse(status=False, message="Invalid credentials", data=None)
@@ -310,7 +398,6 @@ async def _fetch_users_with_details(
     from apps.profiles.db_models.university_db_model import University
     from apps.profiles.db_models.country_db_model import Country
     from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
-    from uuid import UUID
 
     stmt = (
         select(User, Profile, University.name.label("university_name"), Country.name.label("country_name"))
@@ -329,21 +416,22 @@ async def _fetch_users_with_details(
     results = (await db.execute(stmt)).all()
 
     # Pre-fetch academic interests in bulk to avoid N+1 query
-    interest_uuids = set()
+    interest_ids = set()
     for row in results:
         profile = row.Profile
         if profile and profile.profile_interests_id:
-            for u in profile.profile_interests_id:
-                if u:
-                    try:
-                        interest_uuids.add(UUID(str(u)))
-                    except ValueError:
-                        pass
+            for value in profile.profile_interests_id:
+                if value is None:
+                    continue
+                try:
+                    interest_ids.add(int(value))
+                except (TypeError, ValueError):
+                    pass
 
     interest_name_map = {}
-    if interest_uuids:
+    if interest_ids:
         interest_stmt = select(AcademicInterest.id, AcademicInterest.name).where(
-            AcademicInterest.id.in_(list(interest_uuids))
+            AcademicInterest.id.in_(list(interest_ids))
         )
         interest_rows = (await db.execute(interest_stmt)).all()
         interest_name_map = {r.id: r.name for r in interest_rows}
@@ -358,14 +446,15 @@ async def _fetch_users_with_details(
         # Map interests for this profile
         profile_interests = []
         if profile and profile.profile_interests_id:
-            for u in profile.profile_interests_id:
-                if u:
-                    try:
-                        interest_id = UUID(str(u))
-                        if interest_id in interest_name_map:
-                            profile_interests.append(interest_name_map[interest_id])
-                    except ValueError:
-                        pass
+            for value in profile.profile_interests_id:
+                if value is None:
+                    continue
+                try:
+                    interest_id = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if interest_id in interest_name_map:
+                    profile_interests.append(interest_name_map[interest_id])
 
         user_data = await build_user_base_response(
             user,
@@ -413,34 +502,74 @@ async def admin_get_user(user_id: str, db: AsyncSession) -> dict:
     return {"user": await build_user_base_response(user, profile, db)}
 
 
-# async def admin_delete_user(user_id: str, db: AsyncSession) -> dict:
-#     from core.auth.services import revoke_firebase_tokens
-#     user_uuid = _coerce_uuid(user_id)
-#     user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
-#     if user is None:
-#         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-#     user.status = UserStatus.deleting
-#     user.is_deleted = True
-#     now = datetime.now(timezone.utc)
-#     user.deleted_at = now
-#     user.purge_after = now + timedelta(days=1)
-#     db.add(user)
-#     await db.commit()
-#     await db.refresh(user)
-#     if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
-#         try:
-#             revoke_firebase_tokens(user.firebase_uid)
-#         except Exception:
-#             pass
-#     profile = (await db.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one_or_none()
-#     user_data = await build_user_base_response(user, profile, db)
-#     return {
-#         "deleted": True,
-#         "status": user.status.value if hasattr(user.status, "value") else str(user.status),
-#         "deleted_at": user.deleted_at,
-#         "purge_after": user.purge_after,
-#         "user": user_data,
-#     }
+async def admin_delete_user(user_id: str, db: AsyncSession) -> dict:
+    from core.auth.services import revoke_firebase_tokens
+    user_uuid = _coerce_uuid(user_id)
+    user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    user.status = UserStatus.deleting
+    user.is_deleted = True
+    now = datetime.now(timezone.utc)
+    user.deleted_at = now
+    user.purge_after = now + timedelta(days=1)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
+        try:
+            revoke_firebase_tokens(user.firebase_uid)
+        except Exception:
+            pass
+    profile = (await db.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one_or_none()
+    user_data = await build_user_base_response(user, profile, db)
+    return {
+        "deleted": True,
+        "status": user.status.value if hasattr(user.status, "value") else str(user.status),
+        "deleted_at": user.deleted_at,
+        "purge_after": user.purge_after,
+        "user": user_data,
+    }
+
+
+async def admin_suspend_user(payload: AdminUserActionRequest, db: AsyncSession) -> dict:
+    from core.auth.services import revoke_firebase_tokens
+
+    user_uuid = _coerce_uuid(payload.id)
+    user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
+    if user is None:
+        return {"id": payload.id, "status": "not_found"}
+    user.status = UserStatus.suspended
+    user.updated_at = datetime.now(timezone.utc)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
+        try:
+            revoke_firebase_tokens(user.firebase_uid)
+        except Exception:
+            pass
+    return {"id": payload.id, "status": "suspended"}
+
+
+async def admin_ban_user(payload: AdminUserActionRequest, db: AsyncSession) -> dict:
+    from core.auth.services import revoke_firebase_tokens
+
+    user_uuid = _coerce_uuid(payload.id)
+    user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
+    if user is None:
+        return {"id": payload.id, "status": "not_found"}
+    user.status = UserStatus.banned
+    user.updated_at = datetime.now(timezone.utc)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
+        try:
+            revoke_firebase_tokens(user.firebase_uid)
+        except Exception:
+            pass
+    return {"id": payload.id, "status": "banned"}
 
 
 # async def admin_suspend_user(payload: AdminUserActionRequest, db: AsyncSession) -> dict:

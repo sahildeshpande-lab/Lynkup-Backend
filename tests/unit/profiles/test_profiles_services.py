@@ -163,12 +163,11 @@ async def test_profiles_complete_onboarding(monkeypatch) -> None:
             await session.commit()
             univ_id = univ.id
 
-        from core.images import save_image
+        from core.images import save_image, file_exists
         monkeypatch.setattr("core.images.save_image", lambda *args, **kwargs: None)
+        monkeypatch.setattr("core.images.file_exists", lambda *args, **kwargs: True)
 
-        from fastapi import UploadFile
-        import io
-        dummy_photo = UploadFile(filename="test.png", file=io.BytesIO(b"dummy image data"))
+        from common.enums import EducationLevel
 
         async with async_session_factory() as session:
             res = await complete_onboarding(
@@ -177,14 +176,14 @@ async def test_profiles_complete_onboarding(monkeypatch) -> None:
                 major="Physics",
                 minor="Math",
                 university_id=str(univ_id),
-                education_level="Masters",
-                academic_interests="['Math', 'Physics']",
-                profile_photo=dummy_photo,
+                education_level_id=2,
+                academic_interests=["Math", "Physics"],
+                profile_photo_key="profiles/test.png",
                 db=session,
             )
             assert res["user"]["id"] == str(user.id)
             assert res["user"]["major"] == "Physics"
-            assert res["user"]["educationLevel"] == "Masters"
+            assert res["user"]["educationLevel"] == EducationLevel.masters
     finally:
         await engine.dispose()
 

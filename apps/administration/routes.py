@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, Query, status, Form, UploadFile, File
 from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import EmailStr
-from common.enums import EducationLevel
 from core.database.session import get_session
 from core.security.auth import get_current_superadmin, get_current_admin
 from apps.accounts.db_models import User
@@ -38,7 +37,7 @@ async def admin_onboarding(
     university_id: str = Form(...),
     major: str = Form(...),
     minor: str | None = Form(None),
-    education_level: str = Form(...),
+    education_level_id: int = Form(...),
     Bio: str = Form(...),
     academic_interests: str = Form(...),
     db: AsyncSession = Depends(get_session),
@@ -50,7 +49,7 @@ async def admin_onboarding(
         university_id=university_id,
         major=major,
         minor=minor,
-        education_level=education_level,
+        education_level_id=education_level_id,
         bio=Bio,
         academic_interests=academic_interests,
         db=db,
@@ -119,27 +118,26 @@ async def delete_user_by_admin(
     return ApiResponse(message="user deletion scheduled", data=await services.admin_delete_user(userId, db))
 
 
-# @router.post("/users/{userId:uuid}/suspend", response_model=ApiResponse)
-# async def suspend_user_by_admin(
-#     userId: UUID,
-#     payload: AdminUserActionRequest,
-#     db: AsyncSession = Depends(get_session),
-#     current_user=Depends(get_current_superadmin),
-# ) -> ApiResponse:
-#     _ = userId
-#     return ApiResponse(message="user suspended by admin", data=await services.admin_suspend_user(payload, db))
+@router.post("/users/{userId:uuid}/suspend", response_model=ApiResponse)
+async def suspend_user_by_admin(
+    userId: UUID,
+    payload: AdminUserActionRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+) -> ApiResponse:
+    _ = userId
+    return ApiResponse(message="user suspended by admin", data=await services.admin_suspend_user(payload, db))
 
 
-# @router.post("/users/{userId:uuid}/ban", response_model=ApiResponse)
-# async def ban_user_by_admin(
-#     userId: UUID,
-#     payload: AdminUserActionRequest,
-
-#     db: AsyncSession = Depends(get_session),
-#     current_user=Depends(get_current_superadmin),
-# ) -> ApiResponse:
-#     _ = userId
-#     return ApiResponse(message="user banned by admin", data=await services.admin_ban_user(payload, db))
+@router.post("/users/{userId:uuid}/ban", response_model=ApiResponse)
+async def ban_user_by_admin(
+    userId: UUID,
+    payload: AdminUserActionRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+) -> ApiResponse:
+    _ = userId
+    return ApiResponse(message="user banned by admin", data=await services.admin_ban_user(payload, db))
 
 
 

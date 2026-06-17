@@ -53,7 +53,7 @@ async def _mock_signup(payload, firebase_user, db) -> ApiResponse:
         status="pending",
         profileVisibility="public",
         email_verified_at=None,
-        is_onboarding=True,
+        is_onboarding_completed=False,
     )
     return ApiResponse(
         status=True,
@@ -102,6 +102,7 @@ def test_signup_route_exists(monkeypatch) -> None:
             "password": "Secret123",
             "role": "user",
             "firebaseId": "valid-firebase-id-token",
+            "device_id": "test-device-id",
         },
     )
 
@@ -116,7 +117,7 @@ def test_signup_route_exists(monkeypatch) -> None:
     assert body["data"]["user"]["status"] == "pending"
     assert body["data"]["user"]["profileVisibility"] == "public"
     assert body["data"]["user"]["email_verified_at"] is None
-    assert body["data"]["user"]["is_onboarding"] is True
+    assert body["data"]["user"]["is_onboarding_completed"] is False
 
 
 def test_login_route_uses_login_request_schema(monkeypatch) -> None:
@@ -136,6 +137,7 @@ def test_login_route_uses_login_request_schema(monkeypatch) -> None:
                 "email": "USER@Example.com",
                 "password": "stringsqq111AA@2t",
                 "firebaseId": "valid-firebase-id-token",
+                "device_id": "test-device-id",
             },
         )
 
@@ -162,6 +164,7 @@ def test_signup_route_rejects_blank_fields(monkeypatch) -> None:
             "password": "Secret123",
             "role": "user",
             "firebaseId": "valid-firebase-id-token",
+            "device_id": "test-device-id",
         },
     )
     assert response.status_code == 422
@@ -176,6 +179,7 @@ def test_signup_route_rejects_blank_fields(monkeypatch) -> None:
             "password": "Secret123",
             "role": "user",
             "firebaseId": "valid-firebase-id-token",
+            "device_id": "test-device-id",
         },
     )
     assert response.status_code == 422
@@ -191,6 +195,7 @@ def test_login_route_rejects_blank_fields(monkeypatch) -> None:
             "email": "user@example.com",
             "password": "       ",
             "firebaseId": "valid-firebase-id-token",
+            "device_id": "test-device-id",
         },
     )
     assert response.status_code == 422

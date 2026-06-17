@@ -67,3 +67,32 @@ def test_university_search_returns_matches(monkeypatch) -> None:
     assert body["data"]["items"][0]["name"] == "Kampu University"
     assert body["data"]["items"][0]["country"] == "United States"
     assert body["data"]["items"][0]["minor"] == [{"name": "Psychology"}]
+
+
+async def _get_academics_info(query, page, page_size, db) -> dict:
+    return {
+        "interests": {
+            "items": [{"id": "int-1", "name": "Math"}],
+            "page": page,
+            "pageSize": page_size,
+            "totalItems": 1,
+            "totalPages": 1,
+        },
+        "educationLevels": [{"id": "1", "name": "Bachelors"}, {"id": "2", "name": "Masters"}],
+    }
+
+
+def test_get_academics_info_returns_success(monkeypatch) -> None:
+    monkeypatch.setattr(search_routes.services, "get_academics_info", _get_academics_info)
+
+    response = client.get("/api/v1/academicsinfo", params={"query": "Math", "page": 1, "pageSize": 20})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is True
+    assert body["message"] == "Academics info fetched successfully"
+    assert "interests" in body["data"]
+    assert "educationLevels" in body["data"]
+    assert body["data"]["interests"]["items"][0]["name"] == "Math"
+    assert {"id": "1", "name": "Bachelors"} in body["data"]["educationLevels"]
+

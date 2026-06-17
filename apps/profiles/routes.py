@@ -9,6 +9,7 @@ from core.auth.dependencies import require_recent_auth
 from apps.accounts.db_models import User
 from .schemas import (
     ApiResponse,
+    OnboardingRequest,
     ProfileUpdateRequest,
     ProfileVisibilityRequest,
     ReportUserRequest,
@@ -72,25 +73,19 @@ async def delete_me(
 
 @router.post("/users/onboarding", response_model=ApiResponse)
 async def complete_onboarding(
-    profile_photo: UploadFile = File(...),
-    university_id: str = Form(...),
-    major: str = Form(...),
-    minor: str | None = Form(None),
-    education_level: str = Form(...),
-    Bio: str = Form(...),
-    academic_interests: str = Form(...),
+    payload: OnboardingRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     data = await services.complete_onboarding(
         user=current_user,
-        profile_photo=profile_photo,
-        university_id=university_id,
-        major=major,
-        minor=minor,
-        education_level=education_level,
-        bio=Bio,
-        academic_interests=academic_interests,
+        profile_photo_key=payload.profile_photo_key,
+        university_id=payload.university_id,
+        major=payload.major,
+        minor=payload.minor,
+        education_level_id=payload.education_level_id,
+        bio=payload.bio,
+        academic_interests=payload.academic_interests,
         db=db,
     )
     return ApiResponse(message="onboarding completed", data=data)
@@ -144,7 +139,6 @@ def get_public_profile(email: str) -> ApiResponse:
 # @router.delete("/users/{userId}/lynkup", response_model=ApiResponse)
 # def remove_lynkup(userId: str) -> ApiResponse:
 #     return ApiResponse(message="lynkup removed", data=services.remove_lynkup(userId))
-
 
 
 

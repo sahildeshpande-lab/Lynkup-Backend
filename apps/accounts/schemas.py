@@ -6,7 +6,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from common.enums import ProfileVisibility
-from common.enums import EducationLevel, Role, SocialProvider
+from common.enums import Role, SocialProvider
 
 
 class ApiResponse(BaseModel):
@@ -32,6 +32,7 @@ class EmailSignupRequest(BaseModel):
     password: str = Field(min_length=8)
     role: Role
     firebaseId: str
+    device_id: str
 
     @field_validator("firstName", "lastName")
     @classmethod
@@ -63,6 +64,7 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
     firebaseId: str
+    device_id: str
 
     @field_validator("email")
     @classmethod
@@ -163,7 +165,7 @@ class AuthUserResponse(BaseModel):
     connectionsCount: int = 0
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
-    is_onboarding: bool = True
+    is_onboarding_completed: bool = False
     is_deleted: bool = False
     connectedUserIds: list[str] = Field(default_factory=list)
     followingUserIds: list[str] = Field(default_factory=list)
@@ -207,7 +209,7 @@ class UserBaseResponse(BaseModel):
     connectionsCount: int = 0
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
-    is_onboarding: bool = True
+    is_onboarding_completed: bool = False
     is_deleted: bool = False
     connectedUserIds: list[str] = Field(default_factory=list)
     followingUserIds: list[str] = Field(default_factory=list)

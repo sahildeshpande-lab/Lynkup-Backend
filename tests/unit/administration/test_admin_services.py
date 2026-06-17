@@ -85,7 +85,7 @@ async def test_admin_complete_onboarding(monkeypatch) -> None:
                 major="Math",
                 minor="Physics",
                 university_id=str(univ_id),
-                education_level="Masters",
+                education_level_id=2,
                 academic_interests="['Math']",
                 profile_photo=dummy_photo,
                 db=session,

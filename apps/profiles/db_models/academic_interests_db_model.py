@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, String, Boolean, text
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, text
 from sqlmodel import Field, SQLModel
 
 def utc_now() -> datetime:
@@ -12,7 +11,7 @@ def utc_now() -> datetime:
 class AcademicInterest(SQLModel, table=True):
     __tablename__ = "academic_interests"
 
-    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    id: int | None = Field(default=None, sa_column=Column(Integer, primary_key=True, autoincrement=True))
     name: str = Field(sa_column=Column(String(100), nullable=False, unique=True))
     is_active: bool = Field(default=True, sa_column=Column(Boolean, server_default=text("true"), nullable=False))
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()")))

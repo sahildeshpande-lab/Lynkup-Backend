@@ -158,7 +158,7 @@ def test_admin_login_route(monkeypatch) -> None:
 
 
 def test_admin_onboarding_returns_success_payload(monkeypatch) -> None:
-    async def _mock_admin_complete_onboarding(user_id, bio, major, minor, university_id, education_level, academic_interests, profile_photo, db):
+    async def _mock_admin_complete_onboarding(user_id, bio, major, minor, university_id, education_level_id, academic_interests, profile_photo, db):
         return {"user_id": str(user_id), "onboarded": True}
 
     monkeypatch.setattr(admin_routes.services, "admin_complete_onboarding", _mock_admin_complete_onboarding)
@@ -172,7 +172,7 @@ def test_admin_onboarding_returns_success_payload(monkeypatch) -> None:
             "university_id": "11111111-1111-1111-1111-111111111111",
             "major": "Computer Science",
             "minor": "Math",
-            "education_level": "Masters",
+            "education_level_id": 2,
             "Bio": "Test Bio",
             "academic_interests": "['Math', 'CS']"
         },

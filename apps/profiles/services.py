@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import UploadFile
+
 from core.images import normalize_image_name, upload_image_to_s3, generate_download_url
 from apps.accounts.schemas import UserBaseResponse
 
@@ -17,6 +17,38 @@ from apps.accounts.db_models import User
 from common.enums import UserStatus, OnboardingStatus
 
 
+async def _resolve_academic_interest_ids(values: list[str | int], db: AsyncSession) -> list[int]:
+    from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
+    from sqlmodel import select
+
+    resolved_ids: list[int] = []
+    for value in values:
+        if value is None:
+            continue
+        tag_clean = str(value).strip()
+        if not tag_clean:
+            continue
+
+        if tag_clean.isdigit():
+            interest_id = int(tag_clean)
+            stmt_interest = select(AcademicInterest).where(AcademicInterest.id == interest_id)
+            interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
+            if interest_rec:
+                resolved_ids.append(interest_id)
+            continue
+
+        stmt_interest = select(AcademicInterest).where(AcademicInterest.name.ilike(tag_clean))
+        interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
+        if not interest_rec:
+            interest_rec = AcademicInterest(name=tag_clean, is_active=True)
+            db.add(interest_rec)
+            await db.flush()
+        if interest_rec.id is not None:
+            resolved_ids.append(int(interest_rec.id))
+
+    return resolved_ids
+
+
 async def build_user_base_response(
     user: User,
     profile: Profile | None,
@@ -28,15 +60,14 @@ async def build_user_base_response(
 ) -> dict:
     from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
     from sqlmodel import select
-    from uuid import UUID
 
     if interests is None:
         interests = []
         if profile and profile.profile_interests_id:
             try:
-                uuid_list = [UUID(str(u)) for u in profile.profile_interests_id if u]
-                if uuid_list:
-                    stmt = select(AcademicInterest.name).where(AcademicInterest.id.in_(uuid_list))
+                id_list = [int(u) for u in profile.profile_interests_id if u is not None]
+                if id_list:
+                    stmt = select(AcademicInterest.name).where(AcademicInterest.id.in_(id_list))
                     interests = list((await db.execute(stmt)).scalars().all())
             except Exception:
                 pass
@@ -109,7 +140,7 @@ async def build_user_base_response(
         "connectionsCount": 0,
         "createdAt": user.created_at.isoformat() if user.created_at else None,
         "updatedAt": user.updated_at.isoformat() if user.updated_at else None,
-        "is_onboarding": user.onboarding_status != OnboardingStatus.completed if hasattr(user, "onboarding_status") else True,
+        "is_onboarding_completed": user.onboarding_status == OnboardingStatus.completed if hasattr(user, "onboarding_status") else False,
         "is_deleted": user.is_deleted,
         "connectedUserIds": [],
         "followingUserIds": [],
@@ -166,36 +197,7 @@ async def update_profile_me(user: User, payload: ProfileUpdateRequest, db: Async
         profile_data["bannerPhotoUrl"] = profile.banner_photo_url
 
     if "academicInterests" in profile_data and profile_data["academicInterests"] is not None:
-        from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
-        from uuid import UUID
-
-        resolved_uuids = []
-        for tag in profile_data["academicInterests"]:
-            tag_clean = tag.strip()
-            if not tag_clean:
-                continue
-            is_uuid = False
-            try:
-                uuid_val = UUID(tag_clean)
-                is_uuid = True
-            except ValueError:
-                pass
-            
-            if is_uuid:
-                stmt_interest = select(AcademicInterest).where(AcademicInterest.id == uuid_val)
-                interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
-                if interest_rec:
-                    resolved_uuids.append(str(interest_rec.id))
-            else:
-                stmt_interest = select(AcademicInterest).where(AcademicInterest.name.ilike(tag_clean))
-                interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
-                if not interest_rec:
-                    interest_rec = AcademicInterest(name=tag_clean, is_active=True)
-                    db.add(interest_rec)
-                    await db.flush()
-                resolved_uuids.append(str(interest_rec.id))
-
-        profile.profile_interests_id = resolved_uuids
+        profile.profile_interests_id = await _resolve_academic_interest_ids(profile_data["academicInterests"], db)
 
     db.add(user)
     db.add(profile)
@@ -246,7 +248,7 @@ def update_profile(payload: ProfileUpdateRequest) -> dict:
         profile_data["profilePhotoUrl"] = normalize_image_name(profile_data["profilePhotoUrl"])
     if "bannerPhotoUrl" in profile_data:
         profile_data["bannerPhotoUrl"] = normalize_image_name(profile_data["bannerPhotoUrl"])
-    return {"updated": True, "profile": profile_data, "onboarding_status": "completed", "is_onboarding": False}
+    return {"updated": True, "profile": profile_data, "onboarding_status": "completed", "is_onboarding_completed": True}
 
 
 async def complete_onboarding(
@@ -255,18 +257,24 @@ async def complete_onboarding(
     major: str,
     minor: str | None,
     university_id: str,
-    education_level: str,
-    academic_interests: str,
-    profile_photo: UploadFile,
+    education_level_id: int,
+    academic_interests: list[str],
+    profile_photo_key: str,
     db: AsyncSession,
 ) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
     from sqlmodel import select
-    from core.images import save_image, settings, generate_download_url, normalize_image_name
+    from core.images import generate_download_url, normalize_image_name, file_exists
     from uuid import UUID
-    import uuid
-    import json
-    from common.enums import OnboardingStatus
+    from common.enums import EducationLevel, OnboardingStatus
+
+    # Validate that the uploaded image key exists in storage
+    if not file_exists(profile_photo_key):
+        from fastapi import HTTPException, status
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="profile_photo_key does not reference an uploaded file"
+        )
 
     stmt = select(Profile).where(Profile.user_id == user.id)
     profile = (await db.execute(stmt)).scalar_one_or_none()
@@ -277,18 +285,8 @@ async def complete_onboarding(
 
     profile_data = {}
 
-    if profile_photo and profile_photo.filename:
-        content = await profile_photo.read()
-        if content:
-            ext = profile_photo.filename.split(".")[-1] if "." in profile_photo.filename else "png"
-            file_name = f"profiles/{uuid.uuid4()}.{ext}"
-            save_image(
-                file_name=file_name,
-                content=content,
-                content_type=profile_photo.content_type or "image/png"
-            )
-            profile.profile_photo_url = normalize_image_name(file_name)
-            profile_data["profilePhotoUrl"] = generate_download_url(profile.profile_photo_url)
+    profile.profile_photo_url = normalize_image_name(profile_photo_key)
+    profile_data["profilePhotoUrl"] = generate_download_url(profile.profile_photo_url)
 
     profile.bio = bio
     profile_data["bio"] = bio
@@ -306,51 +304,21 @@ async def complete_onboarding(
     profile.minor = minor
     profile_data["minor"] = minor
 
-    profile.edu_level = education_level
-    profile_data["educationLevel"] = education_level
+    try:
+        education_level = EducationLevel.from_id(education_level_id)
+    except (TypeError, ValueError) as exc:
+        from fastapi import HTTPException, status
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid education_level_id"
+        ) from exc
+
+    profile.edu_level = education_level.value
+    profile_data["educationLevel"] = education_level.value
 
     if academic_interests is not None:
-        interests_list = []
-        val = academic_interests.strip()
-        if val.startswith("[") and val.endswith("]"):
-            try:
-                interests_list = json.loads(val)
-            except Exception:
-                interests_list = [x.strip().strip("'\"") for x in val[1:-1].split(",") if x.strip()]
-        else:
-            interests_list = [x.strip() for x in val.split(",") if x.strip()]
-
-        from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
-        from uuid import UUID
-
-        resolved_uuids = []
-        for tag in interests_list:
-            tag_clean = tag.strip()
-            if not tag_clean:
-                continue
-            is_uuid = False
-            try:
-                uuid_val = UUID(tag_clean)
-                is_uuid = True
-            except ValueError:
-                pass
-            
-            if is_uuid:
-                stmt_interest = select(AcademicInterest).where(AcademicInterest.id == uuid_val)
-                interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
-                if interest_rec:
-                    resolved_uuids.append(str(interest_rec.id))
-            else:
-                stmt_interest = select(AcademicInterest).where(AcademicInterest.name.ilike(tag_clean))
-                interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
-                if not interest_rec:
-                    interest_rec = AcademicInterest(name=tag_clean, is_active=True)
-                    db.add(interest_rec)
-                    await db.flush()
-                resolved_uuids.append(str(interest_rec.id))
-
-        profile.profile_interests_id = resolved_uuids
-        profile_data["academicInterests"] = interests_list
+        profile.profile_interests_id = await _resolve_academic_interest_ids(academic_interests, db)
+        profile_data["academicInterests"] = academic_interests
 
     user.onboarding_status = OnboardingStatus.completed
     db.add(user)
@@ -517,36 +485,7 @@ async def update_profile_me_form(
         else:
             interests_list = [x.strip() for x in val.split(",") if x.strip()]
 
-        from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
-        from uuid import UUID
-
-        resolved_uuids = []
-        for tag in interests_list:
-            tag_clean = tag.strip()
-            if not tag_clean:
-                continue
-            is_uuid = False
-            try:
-                uuid_val = UUID(tag_clean)
-                is_uuid = True
-            except ValueError:
-                pass
-            
-            if is_uuid:
-                stmt_interest = select(AcademicInterest).where(AcademicInterest.id == uuid_val)
-                interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
-                if interest_rec:
-                    resolved_uuids.append(str(interest_rec.id))
-            else:
-                stmt_interest = select(AcademicInterest).where(AcademicInterest.name.ilike(tag_clean))
-                interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
-                if not interest_rec:
-                    interest_rec = AcademicInterest(name=tag_clean, is_active=True)
-                    db.add(interest_rec)
-                    await db.flush()
-                resolved_uuids.append(str(interest_rec.id))
-
-        profile.profile_interests_id = resolved_uuids
+        profile.profile_interests_id = await _resolve_academic_interest_ids(interests_list, db)
         profile_data["academicInterests"] = interests_list
 
     current_user.onboarding_status = OnboardingStatus.completed
@@ -673,4 +612,3 @@ async def update_completeness_weights(payload, db: AsyncSession) -> dict:
             for k in ["bio", "university", "major", "edu_level", "first_name", "last_name", "email", "profile_photo_url", "interests", "graduation_date", "location"]
         }
     }
-

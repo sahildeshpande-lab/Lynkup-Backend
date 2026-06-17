@@ -725,6 +725,18 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
 
+    # 4. Create UserInstallation record
+    from apps.accounts.db_models import UserInstallation
+    installation = UserInstallation(
+        user_id=user.id,
+        device_id=payload.device_id,
+        platform=None,  
+        app_version=None,
+        installed_at=now,
+        last_active_at=now,
+    )
+    db.add(installation)
+
     await db.commit()
     otp = user.email_otp or _generate_otp()
     user.email_otp = otp
@@ -735,7 +747,6 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     await send_otp_email(email, otp, "email_verification")
     await db.refresh(user)
     await db.refresh(profile)
-    # Load roles eagerly to avoid MissingGreenlet when accessing user.role
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
 
@@ -753,7 +764,7 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     stmt = select(User).options(selectinload(User.roles)).where(User.firebase_uid == firebase_uid)
     user = (await db.execute(stmt)).scalar_one_or_none()
     if not user:
-        return ApiResponse(status=False, message="User not found in local DB. Please sign up.", data=None)
+        return ApiResponse(status=False, message="User not found . Please sign up.", data=None)
 
     if not user.password_hash or not PASSWORD_HASHER.verify(payload.password, user.password_hash):
         return ApiResponse(status=False, message="Invalid credentials", data=None)
@@ -761,16 +772,42 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     if user.deleted_at:
         return ApiResponse(status=False, message="Account is not active", data=None)
 
-    if user.status == UserStatus.pending:
+    if user.status in (UserStatus.suspended, UserStatus.banned):
+        return ApiResponse(status=False, message="Account is not active", data=None)
+
+    from apps.accounts.db_models import UserInstallation
+    stmt_install = select(UserInstallation).where(
+        UserInstallation.user_id == user.id,
+        UserInstallation.device_id == payload.device_id
+    )
+    installation = (await db.execute(stmt_install)).scalar_one_or_none()
+
+    is_new_device = installation is None
+    needs_otp = (user.email_verified_at is None) or is_new_device
+
+    if needs_otp:
         now = _now()
         otp = _generate_otp()
         user.email_otp = otp
         user.email_otp_created_at = now
+        user.status = UserStatus.pending
         user.updated_at = now
         db.add(user)
+
+        if is_new_device:
+            new_install = UserInstallation(
+                user_id=user.id,
+                device_id=payload.device_id,
+                platform=None,  # let platform be null rather than unknown for now
+                app_version=None,
+                installed_at=now,
+                last_active_at=now,
+            )
+            db.add(new_install)
+
         await db.commit()
         await send_otp_email(user.email, otp, "email_verification")
-        
+
         # Load roles eagerly to avoid MissingGreenlet when accessing user.role
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()
@@ -780,10 +817,22 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
             data["emailSent"] = True
         return ApiResponse(status=True, message="Verification email sent. Please verify your OTP.", data=data)
 
-    if user.status != UserStatus.active:
-        return ApiResponse(status=False, message="Account is not active", data=None)
+    else:
+        user.status = UserStatus.active
+        user.updated_at = _now()
+        db.add(user)
 
-    return ApiResponse(status=True, message="Login successful", data=await _issue_auth_session(user, db))
+        if installation:
+            installation.last_active_at = _now()
+            db.add(installation)
+
+        await db.commit()
+
+        # Load roles eagerly to avoid MissingGreenlet when accessing user.role
+        stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
+        user = (await db.execute(stmt_user)).scalar_one()
+
+        return ApiResponse(status=True, message="Login successful", data=await _issue_auth_session(user, db))
 
 
 async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSession):

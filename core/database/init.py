@@ -17,6 +17,7 @@ async def init_db() -> None:
         except Exception:
             pass
         await conn.execute(text("ALTER TABLE refresh_tokens ALTER COLUMN expires_at DROP NOT NULL"))
+
         await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS subject VARCHAR(256) NOT NULL DEFAULT ''"))
         await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS is_sent BOOLEAN NOT NULL DEFAULT FALSE"))
         await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS profile_photo_url VARCHAR(2048)"))

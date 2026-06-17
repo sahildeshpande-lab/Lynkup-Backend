@@ -95,3 +95,22 @@ async def get_academic_interests(
     paginated = build_paginated_response(items, page, page_size, total_items)
     return paginated.model_dump()
 
+
+async def get_academics_info(
+    query: Optional[str],
+    page: int,
+    page_size: int,
+    db: AsyncSession,
+) -> dict:
+    from common.enums import EducationLevel
+    edu_levels = [{"id": str(level.id), "name": level.value} for level in EducationLevel]
+    interests_data = await get_academic_interests(
+        query=query,
+        page=page,
+        page_size=page_size,
+        db=db,
+    )
+    return {
+        "educationLevels": edu_levels,
+        "interests": interests_data,
+    }

@@ -16,7 +16,7 @@ class UserInstallation(SQLModel, table=True):
 
     id: UUID = Field(default_factory=uuid4, primary_key=True, index=True)
     user_id: UUID = Field(foreign_key="users.id", nullable=False, index=True)
-    platform: str = Field(sa_column=Column(String(32), nullable=False, index=True))
+    platform: str | None = Field(default=None, sa_column=Column(String(32), nullable=True, index=True))
     device_id: str = Field(sa_column=Column(String(255), nullable=False, index=True))
     app_version: str | None = Field(default=None, sa_column=Column(String(64)))
     installed_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))

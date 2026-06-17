@@ -215,9 +215,10 @@ async def test_forgot_password_rate_limit(db_session: AsyncSession, monkeypatch)
     assert res.message == "Password reset link sent successfully to your mail "
 
     # Second request immediately (should trigger rate limit validation)
+    from core.auth.config import settings as auth_settings
     res2 = await forgot_password(payload, db_session)
     assert res2.status is False
-    assert res2.message == "Recently email for resest password as been send please try after 15 mins  "
+    assert res2.message == f"Recently email for resest password as been send please try after {auth_settings.password_reset_token_expire_minutes} mins  "
 
 
 @pytest.mark.asyncio

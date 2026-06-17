@@ -5,7 +5,7 @@ from typing import Any, Optional, Literal
 
 from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
 
-from common.enums import EducationLevel, Role
+from common.enums import Role
 
 
 class ApiResponse(BaseModel):
@@ -82,3 +82,13 @@ class AdminLoginRequest(BaseModel):
         if not value or not value.strip():
             raise ValueError("email cannot be blank")
         return value.lower().strip()
+
+
+class AdminOnboardingRequest(BaseModel):
+    profile_photo_key: str = Field(..., description="S3 storage key returned by POST /uploads/image")
+    university_id: str
+    major: str
+    minor: Optional[str] = None
+    education_level_id: int
+    bio: str = Field(..., max_length=500)
+    academic_interests: list[str | int]

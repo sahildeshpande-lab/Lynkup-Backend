@@ -48,7 +48,7 @@ def test_patch_me_turns_off_onboarding(monkeypatch) -> None:
     from apps.profiles import services as profiles_services
 
     async def _mock_update_profile_me_form(current_user, bio, academic_interests, profile_photo, banner_photo, db):
-        return {"user": {"bio": bio, "is_onboarding": False}}
+        return {"user": {"bio": bio, "is_onboarding_completed": True}}
 
     monkeypatch.setattr(profiles_services, "update_profile_me_form", _mock_update_profile_me_form)
 
@@ -61,7 +61,7 @@ def test_patch_me_turns_off_onboarding(monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] is True
-    assert body["data"]["user"]["is_onboarding"] is False
+    assert body["data"]["user"]["is_onboarding_completed"] is True
 
 
 def test_get_public_profile_returns_success() -> None:
@@ -90,7 +90,7 @@ def test_get_me_returns_user_payload(monkeypatch) -> None:
     async def _mock_get_profile_me(user, db):
         return {"user": {
             "email": "jane@example.com",
-            "is_onboarding": True
+            "is_onboarding_completed": False
         }}
 
     monkeypatch.setattr(profiles_services, "get_profile_me", _mock_get_profile_me)
@@ -104,7 +104,7 @@ def test_get_me_returns_user_payload(monkeypatch) -> None:
     body = response.json()
     assert body["status"] is True
     assert body["data"]["user"]["email"] == "jane@example.com"
-    assert body["data"]["user"]["is_onboarding"] is True
+    assert body["data"]["user"]["is_onboarding_completed"] is False
 
 
 def test_get_me_completeness_returns_score(monkeypatch) -> None:
@@ -151,26 +151,23 @@ def test_delete_user_me_returns_success(monkeypatch) -> None:
 
 def test_complete_onboarding_returns_success_payload(monkeypatch) -> None:
     from apps.profiles import services as profiles_services
-    import io
 
-    async def _mock_complete_onboarding(user, bio, major, minor, university_id, education_level, academic_interests, profile_photo, db):
+    async def _mock_complete_onboarding(user, bio, major, minor, university_id, education_level_id, academic_interests, profile_photo_key, db):
+        assert education_level_id == 2
         return {"user": {"email": user.email}, "onboarded": True}
 
     monkeypatch.setattr(profiles_services, "complete_onboarding", _mock_complete_onboarding)
 
-    dummy_file = io.BytesIO(b"dummy image data")
     response = client.post(
         "/api/v1/users/onboarding",
-        data={
+        json={
+            "profile_photo_key": "profiles/test.png",
             "university_id": "11111111-1111-1111-1111-111111111111",
             "major": "Computer Science",
             "minor": "Math",
-            "education_level": "Masters",
-            "Bio": "Test Bio",
-            "academic_interests": "['Math', 'CS']"
-        },
-        files={
-            "profile_photo": ("test.png", dummy_file, "image/png")
+            "education_level_id": 2,
+            "bio": "Test Bio",
+            "academic_interests": ["Math", "CS"]
         },
         headers={"Authorization": "Bearer access_jane@example.com"},
     )
