@@ -33,7 +33,7 @@ router = APIRouter(prefix="/auth", tags=["1] User Registration, Authentication &
 
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import JSONResponse
-from apps.accounts.services import AccountExistsException, social_auth_bearer, social_auth as social_auth_service
+from apps.accounts.services import AccountExistsException, social_auth as social_auth_service
 
 bearer_scheme = HTTPBearer(
     scheme_name="BearerAuth",
@@ -42,64 +42,43 @@ bearer_scheme = HTTPBearer(
     auto_error=False,
 )
 
-@router.post("/social", response_model=UserAuthResponse, status_code=status.HTTP_200_OK)
+
+@router.post( "/social", response_model=UserAuthResponse, status_code=status.HTTP_200_OK,)
 async def social_auth(
-    provider: SocialProvider = Form(...),
-    idToken: str = Form(...),
-    email: Optional[str] = Form(None),
-    firstName: Optional[str] = Form(None),
-    lastName: Optional[str] = Form(None),
-    fullName: Optional[str] = Form(None),
-    profilePhotoUrl: Optional[UploadFile] = File(None),
+    payload: SocialAuthRequest,
     db: AsyncSession = Depends(get_session),
 ) -> Any:
     try:
-        uploaded_photo_url = None
-        if profilePhotoUrl is not None and profilePhotoUrl.filename:
-            from core.images import save_image, settings
-            import uuid
-            content = await profilePhotoUrl.read()
-            if content:
-                ext = profilePhotoUrl.filename.split(".")[-1] if "." in profilePhotoUrl.filename else "png"
-                file_name = f"profiles/{uuid.uuid4()}.{ext}"
-                save_image(
-                    file_name=file_name,
-                    content=content,
-                    content_type=profilePhotoUrl.content_type or "image/png"
-                )
-                uploaded_photo_url = file_name
+        data, created = await social_auth_service(payload, db)
 
-        payload = SocialAuthRequest(
-            provider=provider,
-            idToken=idToken,
-            email=email,
-            firstName=firstName,
-            lastName=lastName,
-            fullName=fullName,
-            profilePhotoUrl=uploaded_photo_url,
+        msg = "Signup successful" if created else "Login successful"
+        status_code = (
+            status.HTTP_201_CREATED
+            if created
+            else status.HTTP_200_OK
         )
 
-        data, created = await social_auth_service(payload, db)
-        msg = "Signup successful" if created else "Login successful"
-        status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
-        # Wrap response matching existing schema structure
         return JSONResponse(
             status_code=status_code,
             content={
                 "status": True,
                 "message": msg,
-                "data": data
-            }
+                "data": data,
+            },
         )
+
     except AccountExistsException as exc:
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content={
                 "success": False,
                 "error_code": "ACCOUNT_EXISTS",
-                "message": "Account already exists. Please login using your registered method.",
-                "registration_type": exc.registration_type
-            }
+                "message": (
+                    "Account already exists. Please login "
+                    "using your registered method."
+                ),
+                "registration_type": exc.registration_type,
+            },
         )
 
 

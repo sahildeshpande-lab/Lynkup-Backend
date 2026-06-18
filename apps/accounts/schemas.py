@@ -29,7 +29,7 @@ class EmailSignupRequest(BaseModel):
     firstName: str
     lastName: str
     email: EmailStr
-    password: str = Field(min_length=8)
+    password: str = Field(min_length=8, max_length=20)
     role: Role
     firebaseId: str
     device_id: str

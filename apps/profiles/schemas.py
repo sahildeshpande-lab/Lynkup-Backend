@@ -36,12 +36,13 @@ class ReportUserRequest(BaseModel):
 
 
 class OnboardingRequest(BaseModel):
-    profile_photo_key: str = Field(..., description="S3 storage key returned by POST /uploads/image")
+    profile_photo_key: Optional[str] = Field(None, description="S3 storage key returned by POST /uploads/image")
+    banner_photo_key : Optional[str] = Field(None, description="S3 storage key returned by POST /uploads/image")
     university_id: str
     major: str
     minor: Optional[str] = None
     education_level_id: int
-    bio: str = Field(..., max_length=500)
+    bio: Optional[str] = Field(None, max_length=500)
     academic_interests: list[str | int]
 
 

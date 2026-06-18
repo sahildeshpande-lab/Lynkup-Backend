@@ -13,31 +13,37 @@ from typing import Optional
 from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
 
 async def search_universities(params: UniversitySearchParams, db: AsyncSession) -> dict:
-    normalized_query = params.query.strip().lower()
-    search_terms = normalized_query.split()
-    if not search_terms:
-        search_terms = [normalized_query]
+    normalized_query = (params.query or "").strip().lower()
 
-    from sqlalchemy import and_
-    conditions = [func.lower(University.name).like(f"%{term}%") for term in search_terms]
-    similarity_score = func.similarity(func.lower(University.name), normalized_query)
+    if normalized_query : 
+        search_terms = normalized_query.split()
+        if not search_terms:
+            search_terms = [normalized_query]
 
-    count_stmt = (
-        select(func.count())
-        .select_from(University)
-        .outerjoin(Country, Country.id == University.country_id)
-        .where(and_(*conditions))
-    )
+        from sqlalchemy import and_
+        conditions = [func.lower(University.name).like(f"%{term}%") for term in search_terms]
+        similarity_score = func.similarity(func.lower(University.name), normalized_query)
+
+        count_stmt = (
+            select(func.count())
+            .select_from(University)
+            .outerjoin(Country, Country.id == University.country_id)
+            .where(and_(*conditions))
+        )
+        stmt=(
+            select(University,Country.name.label("country_name"),)
+            .outerjoin(Country,Country.id==University.country_id)
+            .where(and_(*conditions))
+            .order_by(similarity_score.desc(),University.name.asc(),))
+    else :
+        count_stmt=(
+            select(func.count()).select_from(University)
+        )
+        stmt=(select(University,Country.name.label("country_name"),).outerjoin(Country,Country.id==University.country_id).order_by(University.name.asc()))
     total_items = int((await db.execute(count_stmt)).scalar_one())
 
-    stmt = (
-        select(University, Country.name.label("country_name"))
-        .outerjoin(Country, Country.id == University.country_id)
-        .where(and_(*conditions))
-        .order_by(similarity_score.desc(), University.name.asc())
-        .offset((params.page - 1) * params.pageSize)
-        .limit(params.pageSize)
-    )
+    stmt = stmt.offset(
+    (params.page - 1) * params.pageSize).limit(params.pageSize)
     result = await db.execute(stmt)
     rows = result.all()
     items = [

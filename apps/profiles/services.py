@@ -253,13 +253,14 @@ def update_profile(payload: ProfileUpdateRequest) -> dict:
 
 async def complete_onboarding(
     user: User,
-    bio: str,
+    bio: str | None ,
     major: str,
     minor: str | None,
     university_id: str,
     education_level_id: int,
     academic_interests: list[str],
-    profile_photo_key: str,
+    profile_photo_key: str | None ,
+    banner_photo_key :str | None ,
     db: AsyncSession,
 ) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
@@ -268,29 +269,68 @@ async def complete_onboarding(
     from uuid import UUID
     from common.enums import EducationLevel, OnboardingStatus
 
-    # Validate that the uploaded image key exists in storage
-    if not file_exists(profile_photo_key):
-        from fastapi import HTTPException, status
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="profile_photo_key does not reference an uploaded file"
-        )
 
+    
     stmt = select(Profile).where(Profile.user_id == user.id)
     profile = (await db.execute(stmt)).scalar_one_or_none()
+
+    if not profile:
+        profile = Profile(
+            user_id=user.id,
+            display_name="",
+            completeness_score=0,
+        )
+    db.add(profile)
+    await db.flush()
+
+    profile_data = {}
+
+    # Validate that the uploaded image key exists in storage
+    if profile_photo_key:
+        if not file_exists(profile_photo_key):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="profile_photo_key does not reference an uploaded file"
+            )
+
+        profile.profile_photo_url = normalize_image_name(profile_photo_key)
+        profile_data["profilePhotoUrl"] = generate_download_url(
+        profile.profile_photo_url
+    )
+    else:
+        profile_data["profilePhotoUrl"] = (
+        generate_download_url(profile.profile_photo_url)
+        if profile.profile_photo_url
+        else None
+    )
+    # Optional banner photo
+    if banner_photo_key:
+        if not file_exists(banner_photo_key):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="banner_photo_key does not reference an uploaded file"
+            )
+
+        profile.banner_photo_url = normalize_image_name(
+            banner_photo_key
+    )
+
+    else :
+        profile_data["bannerPhotoUrl"] = (
+        generate_download_url(profile.banner_photo_url)
+        if profile.banner_photo_url
+        else None
+    )
+        
+    if bio is not None :
+        profile.bio = bio 
+    profile_data["bio"] = profile.bio
+
     if not profile:
         profile = Profile(user_id=user.id, display_name="", completeness_score=0)
         db.add(profile)
         await db.flush()
-
-    profile_data = {}
-
-    profile.profile_photo_url = normalize_image_name(profile_photo_key)
-    profile_data["profilePhotoUrl"] = generate_download_url(profile.profile_photo_url)
-
-    profile.bio = bio
-    profile_data["bio"] = bio
-
+    
     if university_id:
         try:
             profile.university_id = UUID(str(university_id))
@@ -303,6 +343,13 @@ async def complete_onboarding(
 
     profile.minor = minor
     profile_data["minor"] = minor
+
+
+
+    # profile.profile_photo_url = normalize_image_name(profile_photo_key)
+    # profile_data["profilePhotoUrl"] = generate_download_url(profile.profile_photo_url)
+
+
 
     try:
         education_level = EducationLevel.from_id(education_level_id)

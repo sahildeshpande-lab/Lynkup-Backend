@@ -16,20 +16,16 @@ router = APIRouter(tags=["3] Search & Discovery"])
 
 @router.get("/universities", response_model=ApiResponse)
 async def universities(
-    query: str = Query(...),
+    query: str | None = Query(default=None),
     pagination: PaginationParams = Depends(),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    if not query or len(query.strip()) < 3:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Search query must be at least 3 characters",
-        )
     data = await services.search_universities(
-        UniversitySearchParams(query=query.strip(), page=pagination.page, pageSize=pagination.pageSize),
+        UniversitySearchParams(query=query.strip() if query else "" , page=pagination.page, pageSize=pagination.pageSize),
         db,
     )
-    return ApiResponse(message="Universities fetched successfully", data=data)
+    message=("No universities found" if data["totalItems"]==0 else "Universities fetched successfully")
+    return ApiResponse(message=message, data=data)
 
 
 

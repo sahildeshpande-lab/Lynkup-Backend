@@ -15,6 +15,8 @@ from .schemas import (
     ApiResponse,
     AdminSignupRequest,
     AdminLoginRequest,
+    AdminForgotPasswordRequest,
+    AdminResetPasswordRequest,
 )
 from apps.accounts.schemas import EmailSignupRequest, RefreshTokenRequest, AdminAuthResponse
 from apps.profiles.schemas import CompletenessWeightsUpdateRequest
@@ -70,14 +72,34 @@ async def admin_token(payload: RefreshTokenRequest, db: AsyncSession = Depends(g
     return ApiResponse(message="token refreshed", data=await services.admin_token(payload, db))
 
 
+@router.post("/forgot-password", response_model=ApiResponse)
+async def forgot_password(
+    payload: AdminForgotPasswordRequest,
+    db: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    return await services.admin_forgot_password(payload, db)
+
+
+@router.post("/reset-password", response_model=ApiResponse)
+async def reset_password(
+    payload: AdminResetPasswordRequest,
+    db: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    return await services.admin_reset_password(payload, db)
+
+
 @router.get("/users", response_model=ApiResponse)
 async def list_users(
-    page: int = Query(default=1, ge=1),
-    pageSize: int = Query(default=20, ge=1, le=200),
+    page: int | None = Query(default=None, ge=1),
+    pageSize: int | None = Query(default=None, ge=1, le=200),
+    search: str | None = Query(default=None, description="Search across university, name, or email"),
     db: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_superadmin),
 ) -> ApiResponse:
-    return ApiResponse(message="users listed", data=await services.list_users(page, pageSize, db))
+    return ApiResponse(
+        message="users listed",
+        data=await services.list_users(page, pageSize, db, search=search)
+    )
 
 
 @router.get("/export", response_model=ApiResponse)
@@ -118,26 +140,26 @@ async def delete_user_by_admin(
     return ApiResponse(message="user deletion scheduled", data=await services.admin_delete_user(userId, db))
 
 
-@router.post("/users/{userId:uuid}/suspend", response_model=ApiResponse)
-async def suspend_user_by_admin(
-    userId: UUID,
-    payload: AdminUserActionRequest,
-    db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
-) -> ApiResponse:
-    _ = userId
-    return ApiResponse(message="user suspended by admin", data=await services.admin_suspend_user(payload, db))
+# @router.post("/users/{userId:uuid}/suspend", response_model=ApiResponse)
+# async def suspend_user_by_admin(
+#     userId: UUID,
+#     payload: AdminUserActionRequest,
+#     db: AsyncSession = Depends(get_session),
+#     current_user=Depends(get_current_superadmin),
+# ) -> ApiResponse:
+#     _ = userId
+#     return ApiResponse(message="user suspended by admin", data=await services.admin_suspend_user(payload, db))
 
 
-@router.post("/users/{userId:uuid}/ban", response_model=ApiResponse)
-async def ban_user_by_admin(
-    userId: UUID,
-    payload: AdminUserActionRequest,
-    db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
-) -> ApiResponse:
-    _ = userId
-    return ApiResponse(message="user banned by admin", data=await services.admin_ban_user(payload, db))
+# @router.post("/users/{userId:uuid}/ban", response_model=ApiResponse)
+# async def ban_user_by_admin(
+#     userId: UUID,
+#     payload: AdminUserActionRequest,
+#     db: AsyncSession = Depends(get_session),
+#     current_user=Depends(get_current_superadmin),
+# ) -> ApiResponse:
+#     _ = userId
+#     return ApiResponse(message="user banned by admin", data=await services.admin_ban_user(payload, db))
 
 
 

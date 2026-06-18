@@ -30,7 +30,6 @@ from apps.accounts.services import (
     _fetch_user_profile,
     _issue_auth_session,
     build_firebase_session_response,
-    social_auth_bearer,
     AccountExistsException,
 )
 
@@ -169,51 +168,3 @@ async def test_accounts_session_management() -> None:
         await engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_accounts_social_auth_bearer(monkeypatch) -> None:
-    try:
-        await init_db()
-        
-        # 1. Success case: verify token mock
-        firebase_claims = {
-            "uid": f"uid-{uuid.uuid4()}",
-            "email": "user_social_new@example.com",
-            "email_verified": True,
-            "name": "Social User",
-            "firebase": {"sign_in_provider": "google.com"}
-        }
-        monkeypatch.setattr("core.auth.services.verify_firebase_token", lambda *args, **kwargs: firebase_claims)
-
-        async with async_session_factory() as session:
-            res_data, is_new = await social_auth_bearer("valid-token", session)
-            assert res_data["user"]["firebase_uid"] == firebase_claims["uid"]
-            assert is_new is True
-
-        # 2. Existing email conflict case
-        conflict_uid = f"uid-{uuid.uuid4()}"
-        conflict_claims = {
-            "uid": conflict_uid,
-            "email": "user_social_conflict@example.com",
-            "email_verified": True,
-            "name": "Conflict User",
-            "firebase": {"sign_in_provider": "apple.com"}
-        }
-        monkeypatch.setattr("core.auth.services.verify_firebase_token", lambda *args, **kwargs: conflict_claims)
-
-        async with async_session_factory() as session:
-            # Seed user with same email but different provider/firebase_uid
-            user = User(
-                firebase_uid=f"different-uid-{uuid.uuid4()}",
-                email="user_social_conflict@example.com",
-                role="user",
-                registration_type=RegistrationType.email,
-            )
-            session.add(user)
-            await session.commit()
-
-            with pytest.raises(AccountExistsException) as exc:
-                await social_auth_bearer("valid-token", session)
-            assert exc.value.registration_type == "email"
-
-    finally:
-        await engine.dispose()

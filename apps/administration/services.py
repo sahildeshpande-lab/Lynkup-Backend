@@ -19,6 +19,8 @@ from .schemas import (
     AdminUserActionRequest,
     AdminSignupRequest,
     AdminLoginRequest,
+    AdminForgotPasswordRequest,
+    AdminResetPasswordRequest,
 )
 from apps.accounts.schemas import ApiResponse, EmailSignupRequest, RefreshTokenRequest
 from apps.accounts.services import JWT_ALGORITHM, JWT_SECRET, _generate_tokens
@@ -394,6 +396,9 @@ async def _fetch_users_with_details(
     db: AsyncSession,
     page: int | None = None,
     page_size: int | None = None,
+    university: str | None = None,
+    name: str | None = None,
+    email: str | None = None,
 ) -> list[dict]:
     from apps.profiles.db_models.university_db_model import University
     from apps.profiles.db_models.country_db_model import Country
@@ -407,7 +412,16 @@ async def _fetch_users_with_details(
         .outerjoin(University, University.id == Profile.university_id)
         .outerjoin(Country, Country.id == Profile.country_id)
         .where(User.is_deleted.is_(False), Role.name == "user")
-        .options(selectinload(User.roles))
+    )
+    if university:
+        stmt = stmt.where(University.name.ilike(f"%{university}%"))
+    if name:
+        stmt = stmt.where(Profile.display_name.ilike(f"%{name}%"))
+    if email:
+        stmt = stmt.where(User.email.ilike(f"%{email}%"))
+
+    stmt = (
+        stmt.options(selectinload(User.roles))
         .order_by(User.created_at.desc())
     )
     if page is not None and page_size is not None:
@@ -469,10 +483,125 @@ async def _fetch_users_with_details(
     return items
 
 
-async def list_users(page: int, page_size: int, db: AsyncSession) -> dict:
-    total_items = int((await db.execute(select(func.count(User.id)).join(UserRole,UserRole.user_id == User.id).join(Role,Role.id == UserRole.role_id).where(User.is_deleted.is_(False),Role.name=="user"))).scalar_one())
-    items = await _fetch_users_with_details(db, page, page_size)
+async def list_users(
+    page: int | None,
+    page_size: int | None,
+    db: AsyncSession,
+    search: str | None = None,
+) -> dict:
+    from apps.profiles.db_models.university_db_model import University
+
+    count_stmt = (
+        select(func.count(User.id))
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .outerjoin(Profile, Profile.user_id == User.id)
+        .outerjoin(University, University.id == Profile.university_id)
+        .where(User.is_deleted.is_(False), Role.name == "user")
+    )
+    if search:
+        pattern = f"%{search}%"
+        count_stmt = count_stmt.where(
+            (University.name.ilike(pattern)) |
+            (Profile.display_name.ilike(pattern)) |
+            (User.email.ilike(pattern))
+        )
+    total_items = int((await db.execute(count_stmt)).scalar_one())
+    items = await _fetch_users_with_details(db, page, page_size, search=search)
+    if page is None : 
+        page=1 
+    if page_size is None:
+        page_size=len(items)
+    
     return build_paginated_response(items, page, page_size, total_items).model_dump()
+
+async def _fetch_users_with_details(
+    db: AsyncSession,
+    page: int | None = None,
+    page_size: int | None = None,
+    search: str | None = None,
+) -> list[dict]:
+    from apps.profiles.db_models.university_db_model import University
+    from apps.profiles.db_models.country_db_model import Country
+    from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
+
+    stmt = (
+        select(User, Profile, University.name.label("university_name"), Country.name.label("country_name"))
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .outerjoin(Profile, Profile.user_id == User.id)
+        .outerjoin(University, University.id == Profile.university_id)
+        .outerjoin(Country, Country.id == Profile.country_id)
+        .where(User.is_deleted.is_(False), Role.name == "user")
+    )
+    if search:
+        pattern = f"%{search}%"
+        stmt = stmt.where(
+            (University.name.ilike(pattern)) |
+            (Profile.display_name.ilike(pattern)) |
+            (User.email.ilike(pattern))
+        )
+    stmt = (
+        stmt.options(selectinload(User.roles))
+        .order_by(User.created_at.desc())
+    )
+    if page is not None and page_size is not None:
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+
+    results = (await db.execute(stmt)).all()
+
+    # Pre-fetch academic interests in bulk to avoid N+1 query
+    interest_ids = set()
+    for row in results:
+        profile = row.Profile
+        if profile and profile.profile_interests_id:
+            for value in profile.profile_interests_id:
+                if value is None:
+                    continue
+                try:
+                    interest_ids.add(int(value))
+                except (TypeError, ValueError):
+                    pass
+
+    interest_name_map = {}
+    if interest_ids:
+        interest_stmt = select(AcademicInterest.id, AcademicInterest.name).where(
+            AcademicInterest.id.in_(list(interest_ids))
+        )
+        interest_rows = (await db.execute(interest_stmt)).all()
+        interest_name_map = {r.id: r.name for r in interest_rows}
+
+    items = []
+    for row in results:
+        user = row.User
+        profile = row.Profile
+        univ_name = row.university_name
+        cntry_name = row.country_name
+
+        # Map interests for this profile
+        profile_interests = []
+        if profile and profile.profile_interests_id:
+            for value in profile.profile_interests_id:
+                if value is None:
+                    continue
+                try:
+                    interest_id = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if interest_id in interest_name_map:
+                    profile_interests.append(interest_name_map[interest_id])
+
+        user_data = await build_user_base_response(
+            user,
+            profile,
+            db,
+            university_name=univ_name,
+            country_name=cntry_name,
+            interests=profile_interests,
+        )
+        items.append(user_data)
+
+    return items
 
 
 async def export_users(page: int | None, page_size: int | None, db: AsyncSession) -> dict:
@@ -532,24 +661,24 @@ async def admin_delete_user(user_id: str, db: AsyncSession) -> dict:
     }
 
 
-async def admin_suspend_user(payload: AdminUserActionRequest, db: AsyncSession) -> dict:
-    from core.auth.services import revoke_firebase_tokens
+# async def admin_suspend_user(payload: AdminUserActionRequest, db: AsyncSession) -> dict:
+#     from core.auth.services import revoke_firebase_tokens
 
-    user_uuid = _coerce_uuid(payload.id)
-    user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
-    if user is None:
-        return {"id": payload.id, "status": "not_found"}
-    user.status = UserStatus.suspended
-    user.updated_at = datetime.now(timezone.utc)
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
-        try:
-            revoke_firebase_tokens(user.firebase_uid)
-        except Exception:
-            pass
-    return {"id": payload.id, "status": "suspended"}
+#     user_uuid = _coerce_uuid(payload.id)
+#     user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
+#     if user is None:
+#         return {"id": payload.id, "status": "not_found"}
+#     user.status = UserStatus.suspended
+#     user.updated_at = datetime.now(timezone.utc)
+#     db.add(user)
+#     await db.commit()
+#     await db.refresh(user)
+#     if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
+#         try:
+#             revoke_firebase_tokens(user.firebase_uid)
+#         except Exception:
+#             pass
+#     return {"id": payload.id, "status": "suspended"}
 
 
 async def admin_ban_user(payload: AdminUserActionRequest, db: AsyncSession) -> dict:
@@ -608,3 +737,92 @@ async def admin_ban_user(payload: AdminUserActionRequest, db: AsyncSession) -> d
 #         except Exception:
 #             pass
 #     return {"id": payload.id, "status": "banned"}
+
+
+async def admin_forgot_password(payload: AdminForgotPasswordRequest, db: AsyncSession) -> ApiResponse:
+    from core.email_service import send_reset_password_email
+    from apps.accounts.db_models import PasswordResetToken
+    from core.auth.config import settings as auth_settings
+    import os
+    import uuid
+
+    email = payload.email.lower()
+    stmt = select(User).options(selectinload(User.roles)).where(User.email == email)
+    user = (await db.execute(stmt)).scalar_one_or_none()
+    if not user or user.role not in ("admin", "superadmin"):
+        return ApiResponse(status=False, message="User not found", data=None)
+
+    # Check for recent active token to rate limit
+    now = datetime.now(timezone.utc)
+    existing_stmt = select(PasswordResetToken).where(
+        PasswordResetToken.user_id == user.id,
+        PasswordResetToken.used_at == None,
+        PasswordResetToken.expires_at > now
+    )
+    existing_token = (await db.execute(existing_stmt)).scalar_one_or_none()
+    if existing_token:
+        return ApiResponse(
+            status=False,
+            message=f"Recently email for resest password as been send please try after {auth_settings.password_reset_token_expire_minutes} mins  ",
+            data=None
+        )
+
+    # Generate token
+    token_val = str(uuid.uuid4())
+    expires_at = now + timedelta(minutes=auth_settings.password_reset_token_expire_minutes)
+
+    reset_token = PasswordResetToken(
+        user_id=user.id,
+        token=token_val,
+        expires_at=expires_at,
+    )
+    db.add(reset_token)
+    await db.commit()
+
+    # Get application link
+    app_link = os.getenv("APPLICATION_LINK", "https://frontend-domain.com/").rstrip("/") + "/"
+    reset_link = f"{app_link}reset-password?token={token_val}"
+
+    # Send email
+    await send_reset_password_email(email, reset_link)
+
+    return ApiResponse(status=True, message="Password reset link sent successfully to your mail ", data=None)
+
+
+async def admin_reset_password(payload: AdminResetPasswordRequest, db: AsyncSession) -> ApiResponse:
+    from apps.accounts.db_models import PasswordResetToken
+    import uuid
+
+    try:
+        # Check if it is a valid UUID string
+        token_uuid = uuid.UUID(payload.token)
+    except ValueError:
+        return ApiResponse(status=False, message="Invalid token format", data=None)
+
+    stmt = select(PasswordResetToken).where(
+        PasswordResetToken.token == str(token_uuid),
+        PasswordResetToken.used_at == None
+    )
+    reset_token = (await db.execute(stmt)).scalar_one_or_none()
+    if not reset_token:
+        return ApiResponse(status=False, message="Invalid or expired token", data=None)
+
+    now = datetime.now(timezone.utc)
+    if reset_token.expires_at.replace(tzinfo=timezone.utc) < now:
+        return ApiResponse(status=False, message="Token expired", data=None)
+
+    user = (await db.execute(select(User).options(selectinload(User.roles)).where(User.id == reset_token.user_id))).scalar_one_or_none()
+    if not user or user.role not in ("admin", "superadmin"):
+        return ApiResponse(status=False, message="User not found", data=None)
+
+    user.password_hash = PASSWORD_HASHER.hash(payload.new_password)
+    user.updated_at = now
+    db.add(user)
+
+    # Invalidate token
+    reset_token.used_at = now
+    db.add(reset_token)
+    await db.commit()
+
+    return ApiResponse(status=True, message="Password reset successful", data=None)
+

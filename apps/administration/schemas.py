@@ -43,7 +43,7 @@ class AdminSignupRequest(BaseModel):
     firstName: str
     lastName: str
     email: EmailStr
-    password: str = Field(min_length=8)
+    password: str = Field(min_length=8 , max_length=20)
     role: Role = "superadmin"
 
     @field_validator("firstName", "lastName")
@@ -92,3 +92,22 @@ class AdminOnboardingRequest(BaseModel):
     education_level_id: int
     bio: str = Field(..., max_length=500)
     academic_interests: list[str | int]
+
+
+class AdminForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class AdminResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        if not any(char.isupper() for char in value):
+            raise ValueError("password must contain at least one uppercase letter")
+        if not any(char.isdigit() for char in value):
+            raise ValueError("password must contain at least one number")
+        return value
+

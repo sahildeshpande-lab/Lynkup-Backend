@@ -80,6 +80,7 @@ async def complete_onboarding(
     data = await services.complete_onboarding(
         user=current_user,
         profile_photo_key=payload.profile_photo_key,
+        banner_photo_key=payload.banner_photo_key,
         university_id=payload.university_id,
         major=payload.major,
         minor=payload.minor,
