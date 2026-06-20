@@ -11,7 +11,7 @@ from sqlmodel import select
 from core.auth.config import settings as auth_settings
 from core.database.session import get_session
 from apps.accounts.db_models import User
-from apps.accounts.services import complete_firebase_registration
+from apps.accounts.services import complete_firebase_registration, AccountExistsException
 from common.enums import UserStatus
 import hashlib
 import jwt
@@ -72,7 +72,12 @@ async def get_current_user(
     stmt = select(User).options(selectinload(User.roles)).where(User.firebase_uid == firebase_uid)
     user = (await db.execute(stmt)).scalar_one_or_none()
     if not user:
-        user = await complete_firebase_registration(decoded, db)
+        try:
+            user = await complete_firebase_registration(decoded, db)
+        except AccountExistsException as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"User already registered via {exc.registration_type}")
+        else:
+            user = user
 
     if user.deleted_at:
         raise HTTPException(

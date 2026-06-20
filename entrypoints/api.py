@@ -47,14 +47,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+import asyncio
+from fastapi.responses import JSONResponse
 
-BASE_DIR = Path(__file__).resolve().parent
+@app.middleware("http")
+async def timeout_middleware(request, call_next):
+    try:
+        return await asyncio.wait_for(
+            call_next(request),
+            timeout=20.0
+        )
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=504,
+            content={"detail": "Request timeout after 20 seconds"}
+        )
+
+BASE_DIR = Path(__file__).resolve().parent.parent
 (BASE_DIR / "static" / "uploads").mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 app.include_router(build_router())
 
 _original_openapi = app.openapi
+
+
 
 
 def custom_openapi() -> dict:

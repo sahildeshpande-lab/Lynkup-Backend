@@ -51,6 +51,11 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+async def _fetch_user_profile(db: AsyncSession, user: User) -> Profile | None:
+    stmt = select(Profile).where(Profile.user_id == user.id)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 JWT_SECRET = auth_settings.jwt_secret
@@ -234,6 +239,12 @@ async def log_security_event(
     )
 
 
+
+
+
+
+
+
 async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) -> User:
     firebase_uid = firebase_user["uid"]
     stmt = select(User).options(selectinload(User.roles)).where(User.firebase_uid == firebase_uid)
@@ -260,38 +271,61 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
         ).scalar_one()
 
     email = (firebase_user.get("email") or f"{firebase_uid}@firebase.local").lower()
+    
+    # Handle email conflict: Link account if email exists
+    stmt_conflict = select(User).options(selectinload(User.roles)).where(User.email == email)
+    existing_user = (await db.execute(stmt_conflict)).scalar_one_or_none()
+    
     email_verified = bool(firebase_user.get("email_verified"))
-    display_name = _display_name_from_firebase(firebase_user, email)
     registration_type = _registration_type_from_firebase(firebase_user)
-    provider = firebase_user.get("firebase", {}).get("sign_in_provider", "firebase")
 
-    user = User(
-        firebase_uid=firebase_user["uid"],
-        email=email,
-        registration_type=registration_type,
-        status=UserStatus.active,
-        onboarding_status=OnboardingStatus.not_started,
-        created_at=now,
-        updated_at=now,
-        last_login_at=now,
-        email_verified_at=now if email_verified else None,
-    )
-    db.add(user)
-    await db.flush()
+    if existing_user:
+        # Link account if it has no firebase_uid, or if firebase_uid differs but registration type matches (recreated Firebase account)
+        if (not existing_user.firebase_uid) or (existing_user.firebase_uid != firebase_uid and existing_user.registration_type == registration_type):
+            existing_user.firebase_uid = firebase_uid
+            existing_user.updated_at = now
+            if email_verified and not existing_user.email_verified_at:
+                existing_user.email_verified_at = now
+            db.add(existing_user)
+            await db.flush()
+            user = existing_user
+        else:
+            reg_type_str = (
+                existing_user.registration_type.value
+                if hasattr(existing_user.registration_type, "value")
+                else str(existing_user.registration_type)
+            )
+            raise AccountExistsException(registration_type=reg_type_str)
+    else:
+        user = User(
+            firebase_uid=firebase_uid,
+            email=email,
+            registration_type=registration_type,
+            status=UserStatus.active,
+            onboarding_status=OnboardingStatus.not_started,
+            created_at=now,
+            updated_at=now,
+            last_login_at=now,
+            email_verified_at=now if email_verified else None,
+        )
+        db.add(user)
+        await db.flush()
 
-    await assign_user_role(db, user, "user")
+        await assign_user_role(db, user, "user")
 
-    profile = Profile(
-        user_id=user.id,
-        display_name=display_name,
-        completeness_score=0,
-        updated_at=now,
-    )
-    db.add(profile)
-    await db.flush()
-    from apps.profiles.services import calculate_completeness_score
-    profile.completeness_score = await calculate_completeness_score(user.id, db)
-    db.add(profile)
+        display_name = _display_name_from_firebase(firebase_user, email)
+        profile = Profile(
+            user_id=user.id,
+            display_name=display_name,
+            completeness_score=0,
+            updated_at=now,
+        )
+        db.add(profile)
+        await db.flush()
+        from apps.profiles.services import calculate_completeness_score
+        profile.completeness_score = await calculate_completeness_score(user.id, db)
+        db.add(profile)
+
     await log_security_event(db, user.id, SecurityEventType.LOGIN_SUCCESS)
     await db.commit()
 
@@ -301,9 +335,6 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
         )
     ).scalar_one()
 
-
-async def _fetch_user_profile(db: AsyncSession, user: User) -> Profile | None:
-    return (await db.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one_or_none()
 
 
 async def _issue_auth_session(user: User, db: AsyncSession) -> dict:
@@ -397,6 +428,24 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
 
     now = _now()
 
+    if not user:
+        stmt_email = select(User).options(selectinload(User.roles)).where(User.email == email)
+        existing_by_email = (await db.execute(stmt_email)).scalar_one_or_none()
+        if existing_by_email:
+            if existing_by_email.registration_type == RegistrationType(provider_name):
+                existing_by_email.firebase_uid = uid
+                existing_by_email.updated_at = now
+                db.add(existing_by_email)
+                await db.flush()
+                user = existing_by_email
+            else:
+                reg_type_str = (
+                    existing_by_email.registration_type.value
+                    if hasattr(existing_by_email.registration_type, "value")
+                    else str(existing_by_email.registration_type)
+                )
+                raise AccountExistsException(registration_type=reg_type_str)
+
     if user:
         if user.deleted_at:
             raise HTTPException(
@@ -435,17 +484,6 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
 
         session_data = await _issue_auth_session(user, db)
         return session_data, False
-
-    # User does not exist, check email conflicts
-    stmt_email = select(User).where(User.email == email)
-    existing_by_email = (await db.execute(stmt_email)).scalar_one_or_none()
-    if existing_by_email:
-        reg_type_str = (
-            existing_by_email.registration_type.value
-            if hasattr(existing_by_email.registration_type, "value")
-            else str(existing_by_email.registration_type)
-        )
-        raise AccountExistsException(registration_type=reg_type_str)
 
     user = User(
         firebase_uid=uid,
@@ -511,11 +549,85 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     if exisiting_user : 
         return ApiResponse(status=False,message="Account already exists. Please Login",data=None)
 
+    now = _now()
     # 1. Check duplicate email
-    stmt = select(User).where(User.email == email)
+    stmt = select(User).options(selectinload(User.roles)).where(User.email == email)
     existing_user_email = (await db.execute(stmt)).scalar_one_or_none()
     if existing_user_email:
-        return ApiResponse(status=False, message="Email already registered", data=None)
+        if existing_user_email.registration_type == RegistrationType.email:
+            existing_user_email.firebase_uid = firebase_user["uid"]
+            existing_user_email.password_hash = _hash_password(payload.password)
+            existing_user_email.updated_at = now
+            existing_user_email.last_login_at = now
+            if bool(firebase_user.get("email_verified")) and not existing_user_email.email_verified_at:
+                existing_user_email.email_verified_at = now
+            db.add(existing_user_email)
+            await db.flush()
+
+            # Ensure profile exists
+            profile = await _fetch_user_profile(db, existing_user_email)
+            if not profile:
+                profile = Profile(
+                    user_id=existing_user_email.id,
+                    display_name=f"{payload.firstName} {payload.lastName}".strip(),
+                    completeness_score=0,
+                    updated_at=now
+                )
+                db.add(profile)
+                await db.flush()
+                from apps.profiles.services import calculate_completeness_score
+                profile.completeness_score = await calculate_completeness_score(existing_user_email.id, db)
+                db.add(profile)
+            
+            # Ensure installation exists
+            from apps.accounts.db_models import UserInstallation
+            stmt_inst = select(UserInstallation).where(UserInstallation.user_id == existing_user_email.id, UserInstallation.device_id == payload.device_id)
+            inst = (await db.execute(stmt_inst)).scalar_one_or_none()
+            if not inst:
+                inst = UserInstallation(
+                    user_id=existing_user_email.id,
+                    device_id=payload.device_id,
+                    platform=None,
+                    app_version=None,
+                    installed_at=now,
+                    last_active_at=now,
+                )
+                db.add(inst)
+
+            await db.commit()
+
+            if not existing_user_email.email_verified_at:
+                otp = existing_user_email.email_otp or _generate_otp()
+                existing_user_email.email_otp = otp
+                existing_user_email.email_otp_created_at = now
+                db.add(existing_user_email)
+                await db.commit()
+                await send_otp_email(email, otp, "email_verification")
+            else:
+                await db.commit()
+
+            await db.refresh(existing_user_email)
+            if profile:
+                await db.refresh(profile)
+
+            stmt_user = select(User).options(selectinload(User.roles)).where(User.id == existing_user_email.id)
+            user = (await db.execute(stmt_user)).scalar_one()
+
+            data = await _issue_auth_session(user, db)
+            if isinstance(data, dict):
+                data["emailSent"] = not bool(existing_user_email.email_verified_at)
+            return ApiResponse(status=True, message="Signup successful", data=data)
+        else:
+            reg_type_str = (
+                existing_user_email.registration_type.value
+                if hasattr(existing_user_email.registration_type, "value")
+                else str(existing_user_email.registration_type)
+            )
+            return ApiResponse(
+                status=False,
+                message=f"Account already exists. Please login using your registered method: {reg_type_str}",
+                data=None
+            )
 
     # 2. Create User record from verified Firebase identity
     now = _now()
@@ -587,13 +699,13 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
 async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) -> ApiResponse:
     firebase_uid = firebase_user.get("uid")
     if not firebase_uid:
-        return ApiResponse(status=False, message="User not registed in Firebase", data=None)
+        return ApiResponse(status=False, message="User not registed yet", data=None)
 
 
     stmt = select(User).options(selectinload(User.roles)).where(User.firebase_uid == firebase_uid)
     user = (await db.execute(stmt)).scalar_one_or_none()
     if not user:
-        return ApiResponse(status=False, message="User exists in Firebase but is not registered in the application. Please complete signup", data=None)
+        return ApiResponse(status=False, message=" Please complete signup", data=None)
 
     if not user.password_hash or not PASSWORD_HASHER.verify(payload.password, user.password_hash):
         return ApiResponse(status=False, message="Password not matched ", data=None)
@@ -675,10 +787,10 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
         return ApiResponse(status=False, message="Email does not match user", data=None)
 
     if user.email_otp != payload.otp:
-        return ApiResponse(status=False, message="Invalid OTP", data=None)
+        return ApiResponse(status=False, message="Incorrect OTP. Please try again", data=None)
 
     if user.email_otp_created_at and (_now() - user.email_otp_created_at) > timedelta(minutes=auth_settings.otp_expire_minutes):
-        return ApiResponse(status=False, message="OTP expired", data=None)
+        return ApiResponse(status=False, message="OTP has expired. Please request a new OTP", data=None)
 
     if user.email_otp == payload.otp:
         user.email_verified_at = _now()
@@ -737,7 +849,7 @@ async def resend_otp(payload: ResendOtpRequest, firebase_user: dict, db: AsyncSe
     # Enforce cooldown based on configuration (default 2 minutes)
     cooldown = timedelta(minutes=auth_settings.resend_otp_cooldown_minutes)
     if user.email_otp_created_at and (_now() - user.email_otp_created_at) < cooldown:
-          return ApiResponse(status=False, message="Please wait before resending OTP", data=None)
+          return ApiResponse(status=False, message="Please wait for 10 mins before resending OTP. A verification code has already been sent to your email.", data=None)
     otp = _generate_otp()
     user.email_otp = otp
     user.email_otp_created_at = _now()

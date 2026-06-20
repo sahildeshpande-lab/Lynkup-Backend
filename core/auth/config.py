@@ -26,7 +26,7 @@ class AuthSettings(BaseSettings):
     password_reset_token_expire_minutes: int = Field(default=60, alias="PASSWORD_RESET_TOKEN_EXPIRE_MINUTES")
     resend_otp_cooldown_minutes: int = Field(default=2, alias="RESEND_OTP_COOLDOWN_MINUTES")
     otp_expire_minutes: int = Field(default=10, alias="OTP_EXPIRE_MINUTES")
-    logo_url: str = Field(default="/static/images/logo.svg", alias="LOGO_URL")
+    logo_url: str = Field(default="/static/images/logo.png", alias="LOGO_URL")
 
     @property
     def firebase_credential_path(self) -> str | None:
