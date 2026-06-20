@@ -14,7 +14,6 @@ class AuthSettings(BaseSettings):
     )
 
     access_token_expire_minutes: int = Field(default=1440, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
-    refresh_token_expire_days: int = Field(default=7, alias="REFRESH_TOKEN_EXPIRE_DAYS")
     recent_auth_max_age_seconds: int = Field(default=300, alias="RECENT_AUTH_MAX_AGE_SECONDS")
     login_event_throttle_seconds: int = Field(default=300, alias="LOGIN_EVENT_THROTTLE_SECONDS")
     jwt_secret: str = Field(default="ksolves-lynkupproject-authentication", alias="JWT_SECRET")
@@ -23,6 +22,11 @@ class AuthSettings(BaseSettings):
     firebase_credentials: str | None = Field(default=None, alias="FIREBASE_CREDENTIALS")
     firebase_service_account_path: str | None = Field(default=None, alias="FIREBASE_SERVICE_ACCOUNT_PATH")
     firebase_project_id: str | None = Field(default=None, alias="FIREBASE_PROJECT_ID")
+
+    password_reset_token_expire_minutes: int = Field(default=60, alias="PASSWORD_RESET_TOKEN_EXPIRE_MINUTES")
+    resend_otp_cooldown_minutes: int = Field(default=2, alias="RESEND_OTP_COOLDOWN_MINUTES")
+    otp_expire_minutes: int = Field(default=10, alias="OTP_EXPIRE_MINUTES")
+    logo_url: str = Field(default="/static/images/logo.svg", alias="LOGO_URL")
 
     @property
     def firebase_credential_path(self) -> str | None:

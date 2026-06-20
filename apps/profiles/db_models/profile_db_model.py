@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, String
+from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, String, JSON
 from sqlmodel import Field, SQLModel
 
 from common.enums import ProfileVisibility
@@ -22,7 +22,7 @@ class Profile(SQLModel, table=True):
     display_name: str | None = Field(default=None, sa_column=Column(String(128)))
     bio: str | None = Field(default=None, sa_column=Column(String(500)))
     university_id: UUID | None = Field(default=None, foreign_key="universities.id", index=True)
-    academic_program_id: UUID | None = Field(default=None, foreign_key="academic_programs.id", index=True)
+    profile_interests_id: list[int] | None = Field(default=None, sa_column=Column(JSON, nullable=True, server_default='[]'))
     major: str | None = Field(default=None, sa_column=Column(String(255)))
     minor: str | None = Field(default=None, sa_column=Column(String(255)))
     edu_level: str | None = Field(default=None, sa_column=Column(String(32), nullable=True, index=True))
@@ -37,4 +37,25 @@ class Profile(SQLModel, table=True):
     banner_photo_url: str | None = Field(default=None, sa_column=Column(String(2048)))
     welcome_message: str | None = Field(default=None, sa_column=Column(String(255)))
     updated_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
+
+
+class CompletenessWeight(SQLModel, table=True):
+    __tablename__ = "completeness_weights"
+
+    id: int = Field(default=1, primary_key=True)
+    bio: float = Field(default=10.0)
+    university: float = Field(default=10.0)
+    major: float = Field(default=10.0)
+    edu_level: float = Field(default=10.0)
+    first_name: float = Field(default=10.0)
+    last_name: float = Field(default=10.0)
+    email: float = Field(default=10.0)
+    profile_photo_url: float = Field(default=10.0)
+    interests: float = Field(default=10.0)
+    graduation_date: float = Field(default=10.0)
+    location: float = Field(default=10.0)
+
+
+Profile.model_rebuild()
+CompletenessWeight.model_rebuild()
 

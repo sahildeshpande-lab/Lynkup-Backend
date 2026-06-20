@@ -3,9 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional, Literal
 
-from pydantic import BaseModel, EmailStr, Field, ConfigDict
+from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
 
-from common.enums import EducationLevel, Role
+from common.enums import Role
 
 
 class ApiResponse(BaseModel):
@@ -27,25 +27,6 @@ class CamelModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
-class UserUpdate(CamelModel):
-    model_config = ConfigDict(extra="forbid")
-
-    firstName: str | None = None
-    lastName: str | None = None
-    email: EmailStr | None = None
-    university_id: str | None = None
-    major: str | None = None
-    minor: str | None = None
-    educationLevel: EducationLevel | None = None
-    bio: str | None = Field(default=None, max_length=500)
-    status: Literal["pending", "active", "suspicious_review", "suspended", "banned", "deleting"] | None = None
-    academicInterests: list[str] | None = None
-    graduationDate: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}$")
-    location: str | None = None
-
-
-AdminUserUpdateRequest = UserUpdate
-
 
 class AdminUserActionRequest(BaseModel):
     id: str
@@ -56,3 +37,77 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_at: datetime | None = None
+
+
+class AdminSignupRequest(BaseModel):
+    firstName: str
+    lastName: str
+    email: EmailStr
+    password: str = Field(min_length=8 , max_length=20)
+    role: Role = "superadmin"
+
+    @field_validator("firstName", "lastName")
+    @classmethod
+    def validate_names(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("names cannot be blank")
+        return value.strip()
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        if not value or not value.strip():
+            raise ValueError("email cannot be blank")
+        return value.lower().strip()
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("password cannot be blank")
+        if not any(char.isupper() for char in value):
+            raise ValueError("password must contain at least one uppercase letter")
+        if not any(char.isdigit() for char in value):
+            raise ValueError("password must contain at least one number")
+        return value
+
+
+class AdminLoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        if not value or not value.strip():
+            raise ValueError("email cannot be blank")
+        return value.lower().strip()
+
+
+class AdminOnboardingRequest(BaseModel):
+    profile_photo_key: str = Field(..., description="S3 storage key returned by POST /uploads/image")
+    university_id: str
+    major: str
+    minor: Optional[str] = None
+    education_level_id: int
+    bio: str = Field(..., max_length=500)
+    academic_interests: list[str | int]
+
+
+class AdminForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class AdminResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        if not any(char.isupper() for char in value):
+            raise ValueError("password must contain at least one uppercase letter")
+        if not any(char.isdigit() for char in value):
+            raise ValueError("password must contain at least one number")
+        return value
+

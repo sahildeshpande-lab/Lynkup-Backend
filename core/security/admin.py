@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from firebase_admin import auth as firebase_auth
 
-from core.db.session import get_session
+from core.database.session import get_session
 from core.auth.services import verify_firebase_token
 from apps.accounts.db_models import User
 from apps.accounts.services import get_user_by_firebase_uid

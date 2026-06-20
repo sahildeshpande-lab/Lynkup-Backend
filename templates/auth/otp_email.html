@@ -1,7 +1,17 @@
-<div style="font-size:16px;font-weight:700;margin-bottom:16px;">{{header}}</div>
-<p style="margin:0 0 14px;">{{body_text}}</p>
-<div style="margin:24px 0;padding:16px;border:1px dashed #cbd5e1;background:#f8fafc;text-align:center;font-size:28px;font-weight:700;letter-spacing:4px;color:#001E2D;">
-  {{otp}}
-</div>
-<p style="margin:0;">This code expires soon. Please do not share it with anyone.</p>
+<!-- Section Heading -->
+<h2 style="margin: 0 0 10px; font-size: 18px; font-weight: 700; color: #071A35; font-family: Arial, Helvetica, sans-serif;">
+  {{header}}
+</h2>
 
+<!-- Body Text -->
+<p style="margin: 0 0 24px; font-size: 14px; color: #555555; font-family: Arial, Helvetica, sans-serif; line-height: 1.6;">
+  {{body_text}}
+</p>
+
+<!-- OTP Display Box (rendered dynamically in Python) -->
+{{otp_display}}
+
+<!-- Expiry Warning -->
+<p style="margin: 20px 0 0; font-size: 13px; color: #666666; font-family: Arial, Helvetica, sans-serif; line-height: 1.5;">
+  This code expires in 10 minutes . Please do not share it with anyone.
+</p>

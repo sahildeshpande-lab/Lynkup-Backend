@@ -9,6 +9,7 @@ from .config import (
     file_exists,
     s3_client,
     upload_image_to_s3,
+    save_image,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "file_exists",
     "s3_client",
     "upload_image_to_s3",
+    "save_image",
 ]

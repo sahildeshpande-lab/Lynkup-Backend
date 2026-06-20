@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import Depends, HTTPException, Security, status
+from fastapi import Depends, HTTPException, Security, status, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
-from core.db.session import get_session
+from core.database.session import get_session
 
 from .config import settings as auth_settings
 from core.auth.services import verify_firebase_token
@@ -14,7 +14,7 @@ from core.auth.services import verify_firebase_token
 bearer_scheme = HTTPBearer(
     scheme_name="BearerAuth",
     bearerFormat="JWT",
-    description="Send the Firebase ID token as: Bearer <token>",
+    description="Send the Access  token as: Bearer <token>",
     auto_error=False,
 )
 
@@ -30,20 +30,85 @@ def _credentials_or_401(
     return credentials
 
 
+# async def get_current_firebase_user(
+#     credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+# ) -> dict:
+#     """Verify a Firebase ID token without a revocation network call."""
+#     credentials = _credentials_or_401(credentials)
+#     try:
+#         return verify_firebase_token(credentials.credentials, check_revoked=False)
+#     except Exception as exc:
+#         raise HTTPException(
+#             status_code=status.HTTP_401_UNAUTHORIZED,
+#             detail="Invalid Firebase ID token",
+#         ) from exc
+
 async def get_current_firebase_user(
     credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
 ) -> dict:
-    """Verify a Firebase ID token without a revocation network call."""
     credentials = _credentials_or_401(credentials)
+
+    print("Auth header received")
+    print("Token length:", len(credentials.credentials))
+
     try:
-        return verify_firebase_token(credentials.credentials, check_revoked=False)
+        decoded = verify_firebase_token(
+            credentials.credentials,
+            check_revoked=False,
+        )
+        print("Decoded UID:", decoded.get("uid"))
+        return decoded
+
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Firebase ID token",
+            detail=str(exc),
         ) from exc
 
 
+async def get_firebase_user_from_payload(
+    request: Request,
+) -> dict:
+    token = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            token = (
+                body.get("token_id")
+                or body.get("tokenId")
+                or body.get("idToken")
+                or body.get("firebaseId")
+                or body.get("firebase_id")
+            )
+    except Exception:
+        pass
+
+    if not token:
+        # Fallback to header manually to avoid lock icon in Swagger
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1]
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Firebase ID token",
+        )
+
+    try:
+        decoded = verify_firebase_token(
+            token,
+            check_revoked=False,
+        )
+        return decoded
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+        ) from exc
+    
 async def get_current_revoked_checked_firebase_user(
     credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
 ) -> dict:
@@ -87,14 +152,23 @@ async def get_current_user(
     from sqlmodel import select
     from apps.accounts.services import complete_firebase_registration
 
+    from common.enums import UserStatus
+
     firebase_uid = firebase_user["uid"]
     stmt = select(User).where(User.firebase_uid == firebase_uid)
     existing_user = (await db.execute(stmt)).scalar_one_or_none()
-    if existing_user and existing_user.deleted_at:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account deleted",
-        )
+    if existing_user:
+        if existing_user.deleted_at:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account deleted",
+            )
+        if existing_user.status in (UserStatus.suspended, UserStatus.banned):
+            status_str = existing_user.status.value if hasattr(existing_user.status, "value") else str(existing_user.status)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Account is {status_str}",
+            )
 
     return await complete_firebase_registration(firebase_user, db)
 

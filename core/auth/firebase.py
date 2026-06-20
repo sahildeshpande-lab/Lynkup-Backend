@@ -3,6 +3,7 @@ from core.auth.dependencies import (
     get_current_firebase_user,
     get_current_revoked_checked_firebase_user,
     require_recent_auth,
+    get_firebase_user_from_payload,
 )
 
 __all__ = [
@@ -10,4 +11,5 @@ __all__ = [
     "get_current_firebase_user",
     "get_current_revoked_checked_firebase_user",
     "require_recent_auth",
+    "get_firebase_user_from_payload",
 ]

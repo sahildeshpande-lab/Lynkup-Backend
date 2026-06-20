@@ -19,7 +19,7 @@ class RefreshToken(SQLModel, table=True):
     token_hash: str = Field(sa_column=Column(String(255), nullable=False))
     device_id: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
     device_name: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
-    expires_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    expires_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     revoked_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
     last_used_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))

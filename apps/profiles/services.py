@@ -3,12 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import UploadFile
+
 from core.images import normalize_image_name, upload_image_to_s3, generate_download_url
 from apps.accounts.schemas import UserBaseResponse
 
 from .schemas import (
-    EducationUpdateRequest,
     ProfileUpdateRequest,
     ProfileVisibilityRequest,
     ReportUserRequest,
@@ -18,14 +17,76 @@ from apps.accounts.db_models import User
 from common.enums import UserStatus, OnboardingStatus
 
 
-async def build_user_base_response(user: User, profile: Profile | None, db: AsyncSession) -> dict:
-    from apps.profiles.db_models.profile_interest_db_model import ProfileInterest
+async def _resolve_academic_interest_ids(values: list[str | int], db: AsyncSession) -> list[int]:
+    from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
     from sqlmodel import select
 
-    interests = []
-    if profile:
-        stmt = select(ProfileInterest.interest_tag).where(ProfileInterest.profile_id == profile.id)
-        interests = list((await db.execute(stmt)).scalars().all())
+    resolved_ids: list[int] = []
+    for value in values:
+        if value is None:
+            continue
+        tag_clean = str(value).strip()
+        if not tag_clean:
+            continue
+
+        if tag_clean.isdigit():
+            interest_id = int(tag_clean)
+            stmt_interest = select(AcademicInterest).where(AcademicInterest.id == interest_id)
+            interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
+            if interest_rec:
+                resolved_ids.append(interest_id)
+            continue
+
+        stmt_interest = select(AcademicInterest).where(AcademicInterest.name.ilike(tag_clean))
+        interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
+        if not interest_rec:
+            interest_rec = AcademicInterest(name=tag_clean, is_active=True)
+            db.add(interest_rec)
+            await db.flush()
+        if interest_rec.id is not None:
+            resolved_ids.append(int(interest_rec.id))
+
+    return resolved_ids
+
+
+async def build_user_base_response(
+    user: User,
+    profile: Profile | None,
+    db: AsyncSession,
+    *,
+    university_name: str | None = None,
+    country_name: str | None = None,
+    interests: list[str] | None = None,
+) -> dict:
+    from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
+    from sqlmodel import select
+
+    if interests is None:
+        interests = []
+        if profile and profile.profile_interests_id:
+            try:
+                id_list = [int(u) for u in profile.profile_interests_id if u is not None]
+                if id_list:
+                    stmt = select(AcademicInterest.name).where(AcademicInterest.id.in_(id_list))
+                    interests = list((await db.execute(stmt)).scalars().all())
+            except Exception:
+                pass
+
+    if university_name is None and profile and profile.university_id:
+        from apps.profiles.db_models.university_db_model import University
+        try:
+            stmt = select(University.name).where(University.id == profile.university_id)
+            university_name = (await db.execute(stmt)).scalar_one_or_none()
+        except Exception:
+            pass
+
+    if country_name is None and profile and profile.country_id:
+        from apps.profiles.db_models.country_db_model import Country
+        try:
+            stmt = select(Country.name).where(Country.id == profile.country_id)
+            country_name = (await db.execute(stmt)).scalar_one_or_none()
+        except Exception:
+            pass
 
     first_name = ""
     last_name = ""
@@ -45,13 +106,16 @@ async def build_user_base_response(user: User, profile: Profile | None, db: Asyn
         "lastName": last_name,
         "email": user.email,
         "role": user.role,
-        "profilePhotoUrl": generate_download_url(profile.profile_photo_url) if (profile and profile.profile_photo_url) else None,
+        "firebase_uid": user.firebase_uid,
+        "loginType": user.registration_type.value if hasattr(user.registration_type, "value") else str(user.registration_type),
+        "profilePhoto_url": generate_download_url(profile.profile_photo_url) if (profile and profile.profile_photo_url) else None,
         "bannerPhotoUrl": generate_download_url(profile.banner_photo_url) if (profile and profile.banner_photo_url) else None,
         "status": user.status.value if hasattr(user.status, "value") else str(user.status),
-        "university": None,
+        "university": university_name if university_name is not None else (str(profile.university_id) if (profile and profile.university_id) else None),
         "major": profile.major if profile else None,
         "minor": profile.minor if profile else None,
-        "county": "",
+        "country": country_name,
+        "county": country_name or "",
         "educationLevel": profile.edu_level if profile else None,
         "bio": profile.bio if profile else None,
         "academicInterests": interests,
@@ -76,7 +140,8 @@ async def build_user_base_response(user: User, profile: Profile | None, db: Asyn
         "connectionsCount": 0,
         "createdAt": user.created_at.isoformat() if user.created_at else None,
         "updatedAt": user.updated_at.isoformat() if user.updated_at else None,
-        "is_onboarding": user.onboarding_status != OnboardingStatus.completed if hasattr(user, "onboarding_status") else True,
+        "is_onboarding_completed": user.onboarding_status == OnboardingStatus.completed if hasattr(user, "onboarding_status") else False,
+        "is_deleted": user.is_deleted,
         "connectedUserIds": [],
         "followingUserIds": [],
         "blockedUserIds": [],
@@ -102,7 +167,6 @@ async def get_profile_me(user: User, db: AsyncSession) -> dict:
 
 async def update_profile_me(user: User, payload: ProfileUpdateRequest, db: AsyncSession) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
-    from apps.profiles.db_models.profile_interest_db_model import ProfileInterest
     from sqlmodel import select
 
     stmt = select(Profile).where(Profile.user_id == user.id)
@@ -132,31 +196,29 @@ async def update_profile_me(user: User, payload: ProfileUpdateRequest, db: Async
         profile.banner_photo_url = normalize_image_name(uploaded_url)
         profile_data["bannerPhotoUrl"] = profile.banner_photo_url
 
-    if "academicInterests" in profile_data:
-        delete_stmt = select(ProfileInterest).where(ProfileInterest.profile_id == profile.id)
-        old_interests = (await db.execute(delete_stmt)).scalars().all()
-        for interest in old_interests:
-            await db.delete(interest)
-        await db.flush()
+    if "academicInterests" in profile_data and profile_data["academicInterests"] is not None:
+        profile.profile_interests_id = await _resolve_academic_interest_ids(profile_data["academicInterests"], db)
 
-        for tag in profile_data["academicInterests"]:
-            new_interest = ProfileInterest(profile_id=profile.id, interest_tag=tag)
-            db.add(new_interest)
-
-    user.onboarding_status = OnboardingStatus.completed
     db.add(user)
+    db.add(profile)
+    await db.flush()
+    profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
     await db.commit()
     await db.refresh(user)
     await db.refresh(profile)
 
-    return {"updated": True, "profile": profile_data, "onboarding_status": "completed", "is_onboarding": False}
+    user_data = await build_user_base_response(user, profile, db)
+    return {"user": user_data}
 
 
 async def delete_user_me(user: User, db: AsyncSession) -> dict:
     from datetime import timedelta
     from core.auth.services import revoke_firebase_tokens
+    from apps.profiles.db_models.profile_db_model import Profile
+    from sqlmodel import select
     user.status = UserStatus.deleting
+    user.is_deleted = True
     now = _now()
     user.deleted_at = now
     user.purge_after = now + timedelta(days=1)
@@ -167,11 +229,14 @@ async def delete_user_me(user: User, db: AsyncSession) -> dict:
         revoke_firebase_tokens(user.firebase_uid)
     except Exception:
         pass
+    profile = (await db.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one_or_none()
+    user_data = await build_user_base_response(user, profile, db)
     return {
         "deleted": True, 
         "status": user.status.value if hasattr(user.status, "value") else str(user.status), 
         "deleted_at": user.deleted_at,
-        "purge_after": user.purge_after
+        "purge_after": user.purge_after,
+        "user": user_data
     }
 
 
@@ -183,52 +248,138 @@ def update_profile(payload: ProfileUpdateRequest) -> dict:
         profile_data["profilePhotoUrl"] = normalize_image_name(profile_data["profilePhotoUrl"])
     if "bannerPhotoUrl" in profile_data:
         profile_data["bannerPhotoUrl"] = normalize_image_name(profile_data["bannerPhotoUrl"])
-    return {"updated": True, "profile": profile_data, "onboarding_status": "completed", "is_onboarding": False}
+    return {"updated": True, "profile": profile_data, "onboarding_status": "completed", "is_onboarding_completed": True}
 
 
-async def update_education(user_id: str, payload: EducationUpdateRequest, db: AsyncSession) -> dict:
+async def complete_onboarding(
+    user: User,
+    bio: str | None ,
+    major: str,
+    minor: str | None,
+    university_id: str,
+    education_level_id: int,
+    academic_interests: list[str],
+    profile_photo_key: str | None ,
+    banner_photo_key :str | None ,
+    db: AsyncSession,
+) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
     from sqlmodel import select
+    from core.images import generate_download_url, normalize_image_name, file_exists
     from uuid import UUID
+    from common.enums import EducationLevel, OnboardingStatus
 
-    try:
-        user_uuid = UUID(str(user_id))
-    except ValueError:
-        user_uuid = user_id
 
-    stmt = select(Profile).where(Profile.user_id == user_uuid)
+    
+    stmt = select(Profile).where(Profile.user_id == user.id)
     profile = (await db.execute(stmt)).scalar_one_or_none()
+
     if not profile:
-        profile = Profile(user_id=user_uuid, display_name="", completeness_score=0)
+        profile = Profile(
+            user_id=user.id,
+            display_name="",
+            completeness_score=0,
+        )
+    db.add(profile)
+    await db.flush()
+
+    profile_data = {}
+
+    # Validate that the uploaded image key exists in storage
+    if profile_photo_key:
+        if not file_exists(profile_photo_key):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="profile_photo_key does not reference an uploaded file"
+            )
+
+        profile.profile_photo_url = normalize_image_name(profile_photo_key)
+        profile_data["profilePhotoUrl"] = generate_download_url(
+        profile.profile_photo_url
+    )
+    else:
+        profile_data["profilePhotoUrl"] = (
+        generate_download_url(profile.profile_photo_url)
+        if profile.profile_photo_url
+        else None
+    )
+    # Optional banner photo
+    if banner_photo_key:
+        if not file_exists(banner_photo_key):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="banner_photo_key does not reference an uploaded file"
+            )
+
+        profile.banner_photo_url = normalize_image_name(
+            banner_photo_key
+    )
+
+    else :
+        profile_data["bannerPhotoUrl"] = (
+        generate_download_url(profile.banner_photo_url)
+        if profile.banner_photo_url
+        else None
+    )
+        
+    if bio is not None :
+        profile.bio = bio 
+    profile_data["bio"] = profile.bio
+
+    if not profile:
+        profile = Profile(user_id=user.id, display_name="", completeness_score=0)
         db.add(profile)
         await db.flush()
-
-    if payload.universityId:
+    
+    if university_id:
         try:
-            profile.university_id = UUID(str(payload.universityId))
+            profile.university_id = UUID(str(university_id))
         except ValueError:
             pass
+    profile_data["universityId"] = str(profile.university_id) if profile.university_id else None
 
-    profile.major = payload.major
-    profile.minor = payload.minor
-    profile.edu_level = payload.educationLevel
-    if payload.graduationDate is not None:
-        profile.graduation_date = payload.graduationDate
+    profile.major = major
+    profile_data["major"] = major
 
+    profile.minor = minor
+    profile_data["minor"] = minor
+
+
+
+    # profile.profile_photo_url = normalize_image_name(profile_photo_key)
+    # profile_data["profilePhotoUrl"] = generate_download_url(profile.profile_photo_url)
+
+
+
+    try:
+        education_level = EducationLevel.from_id(education_level_id)
+    except (TypeError, ValueError) as exc:
+        from fastapi import HTTPException, status
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid education_level_id"
+        ) from exc
+
+    profile.edu_level = education_level.value
+    profile_data["educationLevel"] = education_level.value
+
+    if academic_interests is not None:
+        profile.profile_interests_id = await _resolve_academic_interest_ids(academic_interests, db)
+        profile_data["academicInterests"] = academic_interests
+
+    user.onboarding_status = OnboardingStatus.completed
+    db.add(user)
+    db.add(profile)
+    await db.flush()
+    profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
     await db.commit()
+    await db.refresh(user)
     await db.refresh(profile)
 
-    return {
-        "user_id": str(user_id),
-        "education": {
-            "universityId": str(profile.university_id) if profile.university_id else None,
-            "major": profile.major,
-            "minor": profile.minor,
-            "educationLevel": profile.edu_level,
-            "graduationDate": profile.graduation_date.isoformat() if profile.graduation_date else None
-        }
-    }
+    user_data = await build_user_base_response(user, profile, db)
+    return {"user": user_data}
+
 
 
 def update_visibility(payload: ProfileVisibilityRequest) -> dict:
@@ -261,9 +412,24 @@ def get_me(token: str) -> dict:
     return {"user": user.model_dump()}
 
 
-def get_me_completeness(token: str) -> dict:
-    _ = token
-    return {"completeness_score": 33}
+async def get_me_completeness(token: str, db: AsyncSession) -> dict:
+    import jwt
+    from core.auth.config import settings as auth_settings
+    from sqlmodel import select
+    from apps.profiles.db_models import Profile
+    from uuid import UUID
+    from fastapi import HTTPException, status
+
+    try:
+        decoded = jwt.decode(token, auth_settings.jwt_secret, algorithms=[auth_settings.jwt_algorithm])
+        user_id = decoded.get("sub")
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token") from exc
+
+    stmt = select(Profile).where(Profile.user_id == UUID(user_id))
+    profile = (await db.execute(stmt)).scalar_one_or_none()
+    score = profile.completeness_score if profile else 0
+    return {"completeness_score": score}
 
 
 def get_public_profile(email: str) -> dict:
@@ -311,9 +477,8 @@ async def update_profile_me_form(
     db: AsyncSession
 ) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
-    from apps.profiles.db_models.profile_interest_db_model import ProfileInterest
     from sqlmodel import select
-    from core.images import s3_client, settings, generate_download_url, normalize_image_name
+    from core.images import save_image, settings, generate_download_url, normalize_image_name
     import uuid
     import json
 
@@ -335,11 +500,10 @@ async def update_profile_me_form(
         if content:
             ext = profile_photo.filename.split(".")[-1] if "." in profile_photo.filename else "png"
             file_name = f"profiles/{uuid.uuid4()}.{ext}"
-            s3_client.put_object(
-                Bucket=settings.aws_s3_bucket,
-                Key=file_name,
-                Body=content,
-                ContentType=profile_photo.content_type or "image/png"
+            save_image(
+                file_name=file_name,
+                content=content,
+                content_type=profile_photo.content_type or "image/png"
             )
             profile.profile_photo_url = normalize_image_name(file_name)
             profile_data["profilePhotoUrl"] = generate_download_url(profile.profile_photo_url)
@@ -349,11 +513,10 @@ async def update_profile_me_form(
         if content:
             ext = banner_photo.filename.split(".")[-1] if "." in banner_photo.filename else "png"
             file_name = f"banners/{uuid.uuid4()}.{ext}"
-            s3_client.put_object(
-                Bucket=settings.aws_s3_bucket,
-                Key=file_name,
-                Body=content,
-                ContentType=banner_photo.content_type or "image/png"
+            save_image(
+                file_name=file_name,
+                content=content,
+                content_type=banner_photo.content_type or "image/png"
             )
             profile.banner_photo_url = normalize_image_name(file_name)
             profile_data["bannerPhotoUrl"] = generate_download_url(profile.banner_photo_url)
@@ -365,28 +528,134 @@ async def update_profile_me_form(
             try:
                 interests_list = json.loads(val)
             except Exception:
-                interests_list = [x.strip() for x in val[1:-1].split(",") if x.strip()]
+                interests_list = [x.strip().strip("'\"") for x in val[1:-1].split(",") if x.strip()]
         else:
             interests_list = [x.strip() for x in val.split(",") if x.strip()]
 
-        delete_stmt = select(ProfileInterest).where(ProfileInterest.profile_id == profile.id)
-        old_interests = (await db.execute(delete_stmt)).scalars().all()
-        for interest in old_interests:
-            await db.delete(interest)
-        await db.flush()
-
-        for tag in interests_list:
-            new_interest = ProfileInterest(profile_id=profile.id, interest_tag=tag)
-            db.add(new_interest)
-        
+        profile.profile_interests_id = await _resolve_academic_interest_ids(interests_list, db)
         profile_data["academicInterests"] = interests_list
 
     current_user.onboarding_status = OnboardingStatus.completed
     db.add(current_user)
     db.add(profile)
+    await db.flush()
+    profile.completeness_score = await calculate_completeness_score(current_user.id, db)
+    db.add(profile)
     await db.commit()
     await db.refresh(current_user)
     await db.refresh(profile)
 
-    return {"updated": True, "profile": profile_data, "onboarding_status": "completed", "is_onboarding": False}
+    user_data = await build_user_base_response(current_user, profile, db)
+    return {"user": user_data}
 
+
+async def get_completeness_weights(db: AsyncSession) -> CompletenessWeight:
+    from apps.profiles.db_models import CompletenessWeight
+    from sqlmodel import select
+
+    stmt = select(CompletenessWeight).where(CompletenessWeight.id == 1)
+    weights = (await db.execute(stmt)).scalar_one_or_none()
+    if not weights:
+        weights = CompletenessWeight()
+        db.add(weights)
+        await db.commit()
+        await db.refresh(weights)
+    return weights
+
+
+async def calculate_completeness_score(user_id, db: AsyncSession) -> int:
+    from apps.accounts.db_models import User
+    from apps.profiles.db_models import Profile
+    from sqlmodel import select
+    from uuid import UUID
+
+    user_uuid = UUID(str(user_id)) if not isinstance(user_id, UUID) else user_id
+
+    stmt_user = select(User).where(User.id == user_uuid)
+    user = (await db.execute(stmt_user)).scalar_one_or_none()
+    if not user:
+        return 0
+
+    stmt_profile = select(Profile).where(Profile.user_id == user_uuid)
+    profile = (await db.execute(stmt_profile)).scalar_one_or_none()
+    if not profile:
+        return 0
+
+    weights = await get_completeness_weights(db)
+    filled_fields = []
+
+    if profile.bio and profile.bio.strip():
+        filled_fields.append(("bio", weights.bio))
+
+    if profile.university_id:
+        filled_fields.append(("university", weights.university))
+
+    if profile.major and profile.major.strip():
+        filled_fields.append(("major", weights.major))
+
+    if profile.edu_level and profile.edu_level.strip():
+        filled_fields.append(("edu_level", weights.edu_level))
+
+    display_name = profile.display_name or ""
+    parts = display_name.split(" ", 1) if display_name else []
+    if len(parts) > 0 and parts[0].strip():
+        filled_fields.append(("first_name", weights.first_name))
+    if len(parts) > 1 and parts[1].strip():
+        filled_fields.append(("last_name", weights.last_name))
+
+    if user.email and user.email.strip():
+        filled_fields.append(("email", weights.email))
+
+    if profile.profile_photo_url and profile.profile_photo_url.strip():
+        filled_fields.append(("profile_photo_url", weights.profile_photo_url))
+
+    if profile.profile_interests_id and len(profile.profile_interests_id) > 0:
+        filled_fields.append(("interests", weights.interests))
+
+    if profile.graduation_date:
+        filled_fields.append(("graduation_date", weights.graduation_date))
+
+    if profile.location_text and profile.location_text.strip():
+        filled_fields.append(("location", weights.location))
+
+    sum_of_weights = sum(item[1] for item in filled_fields)
+    total_weights_sum = (
+        weights.bio + weights.university + weights.major + weights.edu_level +
+        weights.first_name + weights.last_name + weights.email +
+        weights.profile_photo_url + weights.interests + weights.graduation_date +
+        weights.location
+    )
+    if total_weights_sum == 0:
+        return 0
+    calculated_score = (sum_of_weights * 100) / total_weights_sum
+    return min(int(round(calculated_score)), 100)
+
+
+async def update_completeness_weights(payload, db: AsyncSession) -> dict:
+    from apps.profiles.db_models import Profile
+    from sqlmodel import select
+
+    weights = await get_completeness_weights(db)
+    update_data = payload.model_dump(exclude_unset=True)
+    for field, val in update_data.items():
+        if val is not None:
+            setattr(weights, field, val)
+    db.add(weights)
+    await db.commit()
+    await db.refresh(weights)
+
+    # Recalculate completeness score for all profiles
+    stmt = select(Profile)
+    profiles = (await db.execute(stmt)).scalars().all()
+    for profile in profiles:
+        profile.completeness_score = await calculate_completeness_score(profile.user_id, db)
+        db.add(profile)
+    await db.commit()
+
+    return {
+        "message": "Completeness weights updated and all profiles recalculated.",
+        "weights": {
+            k: getattr(weights, k)
+            for k in ["bio", "university", "major", "edu_level", "first_name", "last_name", "email", "profile_photo_url", "interests", "graduation_date", "location"]
+        }
+    }

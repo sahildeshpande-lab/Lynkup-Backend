@@ -33,6 +33,23 @@ s3_client = boto3.client(
 )
 
 
+def save_image(file_name: str, content: bytes, content_type: str = "image/png") -> None:
+    if settings.aws_s3_bucket:
+        s3_client.put_object(
+            Bucket=settings.aws_s3_bucket,
+            Key=file_name,
+            Body=content,
+            ContentType=content_type
+        )
+    else:
+        # Save locally
+        from pathlib import Path
+        base_static_dir = Path(__file__).resolve().parents[2] / "entrypoints" / "static" / "uploads"
+        target_path = base_static_dir / file_name
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(content)
+
+
 def build_image_key(image_name: str, prefix: str = "images") -> str:
     """Builds a unique storage key for an image."""
     return f"{prefix}/{image_name}"
@@ -62,12 +79,14 @@ def generate_upload_url(file_name: str, expiration: int = 3600) -> str:
 
 
 def generate_download_url(file_name: str, expiration: int = 3600) -> str:
-    """Generate a presigned URL to download a file from S3."""
-    if not settings.aws_s3_bucket or not file_name:
+    """Generate a presigned URL to download a file from S3 or return local path."""
+    if not file_name:
         return ""
-    # If it is a full HTTP URL already, return it
-    if file_name.startswith("http://") or file_name.startswith("https://"):
+    # If it is a full HTTP URL or static path already, return it
+    if file_name.startswith("http://") or file_name.startswith("https://") or file_name.startswith("/static/"):
         return file_name
+    if not settings.aws_s3_bucket:
+        return f"/static/uploads/{file_name}"
     try:
         response = s3_client.generate_presigned_url(
             "get_object",
@@ -81,8 +100,18 @@ def generate_download_url(file_name: str, expiration: int = 3600) -> str:
 
 
 def delete_file(file_name: str) -> None:
-    """Delete a file from S3."""
-    if not settings.aws_s3_bucket or not file_name:
+    """Delete a file from S3 or local directory."""
+    if not file_name:
+        return
+    if not settings.aws_s3_bucket:
+        from pathlib import Path
+        base_static_dir = Path(__file__).resolve().parents[2] / "entrypoints" / "static" / "uploads"
+        target_path = base_static_dir / file_name
+        try:
+            if target_path.exists():
+                target_path.unlink()
+        except Exception as e:
+            print(f"Error deleting local file: {e}")
         return
     try:
         s3_client.delete_object(Bucket=settings.aws_s3_bucket, Key=file_name)
@@ -91,9 +120,14 @@ def delete_file(file_name: str) -> None:
 
 
 def file_exists(file_name: str) -> bool:
-    """Check if a file exists in S3."""
-    if not settings.aws_s3_bucket or not file_name:
+    """Check if a file exists in S3 or local directory."""
+    if not file_name:
         return False
+    if not settings.aws_s3_bucket:
+        from pathlib import Path
+        base_static_dir = Path(__file__).resolve().parents[2] / "entrypoints" / "static" / "uploads"
+        target_path = base_static_dir / file_name
+        return target_path.exists()
     try:
         s3_client.head_object(Bucket=settings.aws_s3_bucket, Key=file_name)
         return True
@@ -136,12 +170,7 @@ async def upload_image_to_s3(image_data: str, prefix: str = "profiles") -> str:
                     ext = ext.split(";")[0].split("?")[0]
                     file_name = f"{prefix}/{uuid.uuid4()}.{ext}"
                     
-                    s3_client.put_object(
-                        Bucket=settings.aws_s3_bucket,
-                        Key=file_name,
-                        Body=response.content,
-                        ContentType=content_type
-                    )
+                    save_image(file_name, response.content, content_type)
                     return generate_download_url(file_name)
         except Exception as e:
             print(f"Error downloading/uploading image URL: {e}")
@@ -156,12 +185,7 @@ async def upload_image_to_s3(image_data: str, prefix: str = "profiles") -> str:
             file_bytes = base64.b64decode(encoded)
             file_name = f"{prefix}/{uuid.uuid4()}.{ext}"
             
-            s3_client.put_object(
-                Bucket=settings.aws_s3_bucket,
-                Key=file_name,
-                Body=file_bytes,
-                ContentType=content_type
-            )
+            save_image(file_name, file_bytes, content_type)
             return generate_download_url(file_name)
         except Exception as e:
             print(f"Error decoding/uploading base64 image: {e}")

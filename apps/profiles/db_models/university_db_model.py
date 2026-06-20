@@ -15,6 +15,7 @@ class University(SQLModel, table=True):
     country_id: UUID = Field(foreign_key="countries.id", nullable=False, index=True)
     major: list[dict] | None = Field(default=None, sa_column=Column(JSON))
     minor: list[dict] | None = Field(default=None, sa_column=Column(JSON))
+    academic_program: list[dict] | None = Field(default=None, sa_column=Column(JSON))
     is_active: bool = Field(default=True, nullable=False)
 
     __table_args__ = (

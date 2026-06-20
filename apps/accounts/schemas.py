@@ -6,7 +6,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from common.enums import ProfileVisibility
-from common.enums import EducationLevel, Role, SocialProvider
+from common.enums import Role, SocialProvider
 
 
 class ApiResponse(BaseModel):
@@ -29,8 +29,10 @@ class EmailSignupRequest(BaseModel):
     firstName: str
     lastName: str
     email: EmailStr
-    password: str = Field(min_length=8)
-    role: Role = "user"
+    password: str = Field(min_length=8, max_length=20)
+    role: Role
+    firebaseId: str
+    device_id: str
 
     @field_validator("firstName", "lastName")
     @classmethod
@@ -61,6 +63,8 @@ class EmailSignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
+    firebaseId: str
+    device_id: str
 
     @field_validator("email")
     @classmethod
@@ -83,19 +87,23 @@ EmailLoginRequest = LoginRequest
 class OtpVerifyRequest(BaseModel):
     email: EmailStr
     otp: str
+    firebaseId: str
 
 
 class ResendOtpRequest(BaseModel):
     email: EmailStr
+    firebaseId: str
 
 
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
+    firebaseId: str
 
 
 class ResetPasswordRequest(BaseModel):
     token: str
     new_password: str = Field(min_length=8)
+    firebaseId: str
 
     @field_validator("new_password")
     @classmethod
@@ -123,13 +131,13 @@ class NotificationPreferences(BaseModel):
 
 
 class AuthUserResponse(BaseModel):
-    id: str
-    firebase_uid: str
+    id: str | None = None
     firstName: str
     lastName: str
     email: str
     role: Role
-    profilePhotoUrl: str | None = None
+    firebase_uid: str | None = None
+    profilePhoto_url: str | None = None
     bannerPhotoUrl: str | None = None
     status: str = "pending"
     university: str | None = None
@@ -155,9 +163,10 @@ class AuthUserResponse(BaseModel):
     welcomeMessage: str | None = None
     postsCount: int = 0
     connectionsCount: int = 0
-    createdAt: datetime
-    updatedAt: datetime
-    is_onboarding: bool = True
+    createdAt: datetime | None = None
+    updatedAt: datetime | None = None
+    is_onboarding_completed: bool = False
+    is_deleted: bool = False
     connectedUserIds: list[str] = Field(default_factory=list)
     followingUserIds: list[str] = Field(default_factory=list)
     blockedUserIds: list[str] = Field(default_factory=list)
@@ -166,13 +175,13 @@ class AuthUserResponse(BaseModel):
 
 
 class UserBaseResponse(BaseModel):
-    id: str
-    firebase_uid: str
+    id: str | None = None
     firstName: str = ""
     lastName: str = ""
     email: str = ""
     role: Role = "user"
-    profilePhotoUrl: str | None = None
+    firebase_uid: str | None = None
+    profilePhoto_url: str | None = None
     bannerPhotoUrl: str | None = None
     status: str = ""
     university: str | None = None
@@ -198,14 +207,35 @@ class UserBaseResponse(BaseModel):
     welcomeMessage: str | None = None
     postsCount: int = 0
     connectionsCount: int = 0
-    createdAt: datetime
-    updatedAt: datetime
-    is_onboarding: bool = True
+    createdAt: datetime | None = None
+    updatedAt: datetime | None = None
+    is_onboarding_completed: bool = False
+    is_deleted: bool = False
     connectedUserIds: list[str] = Field(default_factory=list)
     followingUserIds: list[str] = Field(default_factory=list)
     blockedUserIds: list[str] = Field(default_factory=list)
     reportedUserIds: list[str] = Field(default_factory=list)
     lynkupRequestUserIds: list[str] = Field(default_factory=list)
+
+
+class UserAuthSessionResponse(BaseModel):
+    user: UserBaseResponse
+    emailSent: bool = False
+
+
+class UserAuthResponse(ApiResponse):
+    data: UserAuthSessionResponse | None = None
+
+
+class AdminAuthSessionResponse(BaseModel):
+    accessToken: str
+    refreshToken: str
+    user: UserBaseResponse
+    emailSent: bool = False
+
+
+class AdminAuthResponse(ApiResponse):
+    data: AdminAuthSessionResponse | None = None
 
 
 class AuthSessionResponse(BaseModel):
