@@ -175,7 +175,8 @@ def _render_template(template_name: str, context: dict[str, object], raw_keys: s
 
 def _render_email_layout(title: str, body_html: str) -> str:
     base_url = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
-    logo_url = f"{base_url}/static/logo.jpg"
+    logo_path = os.getenv("LOGO_URL", "/static/images/logo.png")
+    logo_url = f"{base_url}{logo_path}"
     return _render_template(
         "layouts/base_email.html",
         {"title": title, "body_html": body_html, "logo_url": logo_url},
@@ -215,6 +216,7 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
 
 def build_otp_email_html(otp: str, otp_purpose: str = "email_verification") -> str:
     title, header, body_text = _otp_template_details(otp_purpose)
+    otp_expire_minutes =int(os.getenv("OTP_EXPIRE_MINUTES","10"))
     
     brand_blue = str(BRAND_COLORS.get("brand_blue", "#0B5FA5"))
     otp_display_html = _build_otp_display_html(otp, brand_blue)
@@ -222,7 +224,7 @@ def build_otp_email_html(otp: str, otp_purpose: str = "email_verification") -> s
     raw_keys = {"otp_display"}
     body_html = _render_template(
         "auth/otp_email.html",
-        {"otp": otp, "header": header, "body_text": body_text, "otp_display": otp_display_html},
+        {"otp": otp, "header": header, "body_text": body_text, "otp_display": otp_display_html,"otp_expire_minutes":otp_expire_minutes},
         raw_keys=raw_keys,
     )
     return _render_email_layout(title, body_html)
@@ -339,9 +341,10 @@ async def send_notification_email(
 async def send_reset_password_email(to_email: str, reset_link: str) -> bool:
     """Send password reset link immediately (send first, then log). Users are actively waiting for this."""
     subject = "Reset Your Password"
+    password_reset_expire_minutes=int(os.getenv("PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "60"))
     body_html = _render_template(
         "auth/password_reset_email.html",
-        {"reset_link": reset_link, "subject": subject},
+        {"reset_link": reset_link, "subject": subject , "password_reset_expire_minutes":password_reset_expire_minutes} ,
         raw_keys={"reset_link"},
     )
     html_content = _render_email_layout(subject, body_html)

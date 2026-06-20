@@ -76,6 +76,29 @@ async def test_accounts_complete_firebase_registration() -> None:
             user_again = await complete_firebase_registration(firebase_user, session)
             assert user_again.id == user.id
 
+            # 3. Test recreated Firebase user (different uid, same email and sign_in_provider)
+            recreated_firebase_user = {
+                "uid": f"uid-{uuid.uuid4()}",
+                "email": "user_reg_new@example.com",
+                "email_verified": True,
+                "name": "Recreated New User",
+                "firebase": {"sign_in_provider": "google.com"}
+            }
+            user_recreated = await complete_firebase_registration(recreated_firebase_user, session)
+            assert user_recreated.id == user.id
+            assert user_recreated.firebase_uid == recreated_firebase_user["uid"]
+
+            # 4. Test provider mismatch conflict
+            mismatch_firebase_user = {
+                "uid": f"uid-{uuid.uuid4()}",
+                "email": "user_reg_new@example.com",
+                "email_verified": True,
+                "name": "Mismatch User",
+                "firebase": {"sign_in_provider": "password"}
+            }
+            with pytest.raises(AccountExistsException):
+                await complete_firebase_registration(mismatch_firebase_user, session)
+
     finally:
         await engine.dispose()
 
