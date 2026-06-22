@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # tests/unit/test_auth_dependencies.py
 """Tests for the new Firebase‑only authentication dependency.
 
@@ -320,3 +321,175 @@ async def test_get_firebase_user_from_payload(monkeypatch) -> None:
     assert exc.value.status_code == 401
 
 
+=======
+"""
+Unit tests for core/auth/dependencies.py and core/auth/firebase.py
+Tests the Firebase auth dependency helpers using pure mocks — no real DB or
+Firebase calls are made.
+"""
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
+
+
+# ---------------------------------------------------------------------------
+# _credentials_or_401
+# ---------------------------------------------------------------------------
+
+class TestCredentialsOr401:
+    def test_raises_when_none(self):
+        from core.auth.dependencies import _credentials_or_401
+
+        with pytest.raises(HTTPException) as exc_info:
+            _credentials_or_401(None)
+        assert exc_info.value.status_code == 401
+
+    def test_returns_credentials_when_present(self):
+        from core.auth.dependencies import _credentials_or_401
+
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="tok")
+        result = _credentials_or_401(creds)
+        assert result is creds
+
+
+# ---------------------------------------------------------------------------
+# get_current_firebase_user
+# ---------------------------------------------------------------------------
+
+class TestGetCurrentFirebaseUser:
+    @pytest.mark.asyncio
+    async def test_missing_credentials_raises_401(self):
+        from core.auth.dependencies import get_current_firebase_user
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_current_firebase_user(credentials=None)
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_invalid_token_raises_401(self):
+        from core.auth.dependencies import get_current_firebase_user
+
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="bad-token")
+
+        with patch(
+            "core.auth.dependencies.verify_firebase_token",
+            side_effect=Exception("bad token"),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await get_current_firebase_user(credentials=creds)
+            assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_valid_token_returns_user_dict(self):
+        from core.auth.dependencies import get_current_firebase_user
+
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="valid-token")
+        fake_user = {"uid": "pytest-firebase-uid", "email": "pytest@example.com"}
+
+        with patch(
+            "core.auth.dependencies.verify_firebase_token",
+            return_value=fake_user,
+        ):
+            result = await get_current_firebase_user(credentials=creds)
+
+        assert result == fake_user
+
+
+# ---------------------------------------------------------------------------
+# get_current_revoked_checked_firebase_user
+# ---------------------------------------------------------------------------
+
+class TestGetCurrentRevokedCheckedFirebaseUser:
+    @pytest.mark.asyncio
+    async def test_missing_credentials_raises_401(self):
+        from core.auth.dependencies import get_current_revoked_checked_firebase_user
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_current_revoked_checked_firebase_user(credentials=None)
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_revoked_token_raises_401(self):
+        from core.auth.dependencies import get_current_revoked_checked_firebase_user
+
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="revoked")
+
+        with patch(
+            "core.auth.dependencies.verify_firebase_token",
+            side_effect=Exception("revoked"),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await get_current_revoked_checked_firebase_user(credentials=creds)
+            assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_valid_token_returns_user(self):
+        from core.auth.dependencies import get_current_revoked_checked_firebase_user
+
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="valid")
+        fake_user = {"uid": "pytest-uid-chk", "email": "pytest-chk@example.com"}
+
+        with patch(
+            "core.auth.dependencies.verify_firebase_token",
+            return_value=fake_user,
+        ):
+            result = await get_current_revoked_checked_firebase_user(credentials=creds)
+
+        assert result == fake_user
+
+
+# ---------------------------------------------------------------------------
+# require_recent_auth
+# ---------------------------------------------------------------------------
+
+class TestRequireRecentAuth:
+    @pytest.mark.asyncio
+    async def test_missing_auth_time_raises(self):
+        from core.auth.dependencies import require_recent_auth
+
+        with pytest.raises(HTTPException) as exc_info:
+            await require_recent_auth(firebase_user={"uid": "pytest-uid"})
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_old_auth_time_raises(self):
+        from core.auth.dependencies import require_recent_auth
+
+        with pytest.raises(HTTPException) as exc_info:
+            await require_recent_auth(
+                firebase_user={"uid": "pytest-uid", "auth_time": 0}
+            )
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_fresh_auth_time_passes(self):
+        import time
+        from core.auth.dependencies import require_recent_auth
+
+        recent = int(time.time()) - 10  # 10 seconds ago
+        result = await require_recent_auth(
+            firebase_user={"uid": "pytest-uid", "auth_time": recent}
+        )
+        assert result["uid"] == "pytest-uid"
+
+
+# ---------------------------------------------------------------------------
+# firebase.py re-exports
+# ---------------------------------------------------------------------------
+
+class TestFirebaseModuleExports:
+    def test_all_exports_importable(self):
+        from core.auth.firebase import (
+            bearer_scheme,
+            get_current_firebase_user,
+            get_current_revoked_checked_firebase_user,
+            require_recent_auth,
+        )
+        assert callable(get_current_firebase_user)
+        assert callable(get_current_revoked_checked_firebase_user)
+        assert callable(require_recent_auth)
+>>>>>>> 5038703 (Test cases)

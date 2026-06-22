@@ -22,4 +22,10 @@ credentials/
 Thumbs.db
 
 *.log
-
+.gemini 
+tech_stackl
+.coverage
+.coveragerc
+.scannerwork
+.agents
+sonar-project.properties

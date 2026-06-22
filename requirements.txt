@@ -29,3 +29,4 @@ boto3
 pydantic[email]
 pydantic-settings
 alembic
+pysonar

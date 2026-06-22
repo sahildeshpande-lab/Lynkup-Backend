@@ -1,19 +1,16 @@
 from fastapi.testclient import TestClient
 
-from entrypoints.api import app
-from core.security.auth import get_current_user
-from core.auth.dependencies import require_recent_auth
 from apps.accounts.db_models import User
+from core.auth.dependencies import require_recent_auth
+from core.security.auth import get_current_user
+from entrypoints.api import app
+
 
 client = TestClient(app)
 
 
 async def _override_current_user():
-    return User(
-        email="jane@example.com",
-        role="user",
-        firebase_uid="test-uid",
-    )
+    return User(email="jane@example.com", role="user", firebase_uid="test-uid")
 
 
 async def _override_recent_auth():
@@ -28,7 +25,6 @@ def setup_module() -> None:
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_current_user, None)
     app.dependency_overrides.pop(require_recent_auth, None)
-
 
 
 def test_update_visibility_returns_success() -> None:
@@ -83,22 +79,22 @@ def test_get_me_requires_bearer_token() -> None:
             app.dependency_overrides[get_current_user] = override
 
 
-
 def test_get_me_returns_user_payload(monkeypatch) -> None:
     from apps.profiles import services as profiles_services
 
     async def _mock_get_profile_me(user, db):
+<<<<<<< HEAD
         return {"user": {
             "email": "jane@example.com",
             "is_onboarding_completed": False
         }}
+=======
+        return {"user": {"email": "jane@example.com", "is_onboarding": True}}
+>>>>>>> 5038703 (Test cases)
 
     monkeypatch.setattr(profiles_services, "get_profile_me", _mock_get_profile_me)
 
-    response = client.get(
-        "/api/v1/users/me",
-        headers={"Authorization": "Bearer access_jane@example.com"},
-    )
+    response = client.get("/api/v1/users/me", headers={"Authorization": "Bearer access_jane@example.com"})
 
     assert response.status_code == 200
     body = response.json()
@@ -107,6 +103,7 @@ def test_get_me_returns_user_payload(monkeypatch) -> None:
     assert body["data"]["user"]["is_onboarding_completed"] is False
 
 
+<<<<<<< HEAD
 def test_get_me_completeness_returns_score(monkeypatch) -> None:
     from apps.profiles import services as profiles_services
 
@@ -119,6 +116,10 @@ def test_get_me_completeness_returns_score(monkeypatch) -> None:
         "/api/v1/users/me/completeness",
         headers={"Authorization": "Bearer access_jane@example.com"},
     )
+=======
+def test_get_me_completeness_returns_score() -> None:
+    response = client.get("/api/v1/users/me/completeness", headers={"Authorization": "Bearer access_jane@example.com"})
+>>>>>>> 5038703 (Test cases)
 
     assert response.status_code == 200
     body = response.json()
@@ -127,8 +128,9 @@ def test_get_me_completeness_returns_score(monkeypatch) -> None:
 
 
 def test_delete_user_me_returns_success(monkeypatch) -> None:
-    from apps.profiles import services as profiles_services
     from datetime import datetime, timezone
+
+    from apps.profiles import services as profiles_services
 
     async def _mock_delete_user_me(user, db):
         return {"deleted": True, "status": "deleting", "deleted_at": datetime.now(timezone.utc).isoformat()}
@@ -147,6 +149,7 @@ def test_delete_user_me_returns_success(monkeypatch) -> None:
     assert body["data"]["deleted"] is True
     assert body["data"]["status"] == "deleting"
     assert "deleted_at" in body["data"]
+<<<<<<< HEAD
 
 
 def test_complete_onboarding_returns_success_payload(monkeypatch) -> None:
@@ -180,3 +183,5 @@ def test_complete_onboarding_returns_success_payload(monkeypatch) -> None:
 
 
 
+=======
+>>>>>>> 5038703 (Test cases)

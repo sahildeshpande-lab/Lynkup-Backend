@@ -1,19 +1,16 @@
 from fastapi.testclient import TestClient
 
-from apps.search import routes as search_routes
-from entrypoints.api import app
-from core.security.auth import get_current_user
 from apps.accounts.db_models import User
+from apps.search import routes as search_routes
+from core.security.auth import get_current_user
+from entrypoints.api import app
+
 
 client = TestClient(app)
 
 
 async def _override_current_user():
-    return User(
-        email="jane@example.com",
-        role="user",
-        firebase_uid="test-uid",
-    )
+    return User(email="jane@example.com", role="user", firebase_uid="test-uid")
 
 
 def setup_module() -> None:
@@ -22,7 +19,6 @@ def setup_module() -> None:
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_current_user, None)
-
 
 
 async def _search_universities(_params, _db) -> dict:

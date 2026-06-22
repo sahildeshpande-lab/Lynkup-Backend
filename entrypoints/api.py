@@ -16,6 +16,7 @@ USER_TAG = "2] User Management"
 DISCOVERY_TAG = "3] Search & Discovery"
 ADMIN_TAG = "4] Admin Management"
 
+
 app = FastAPI(
     title="KampuLynk User Management API",
     version="1.0.0",
@@ -40,31 +41,25 @@ app = FastAPI(
     ],
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-import asyncio
-from fastapi.responses import JSONResponse
+import time 
+import logging
 
+logger=logging.getLogger(__name__)
 @app.middleware("http")
-async def timeout_middleware(request, call_next):
-    try:
-        return await asyncio.wait_for(
-            call_next(request),
-            timeout=20.0
-        )
-    except asyncio.TimeoutError:
-        return JSONResponse(
-            status_code=504,
-            content={"detail": "Request timeout after 20 seconds"}
-        )
+async def log_requests(request,call_next):
+    start=time.time()
+    logger.info(f"START{request.method} {request.url}")
+    response=await call_next(request)
+    logger.info(
+        f"END {request.method} {request.url.path}"
+        f"Status = {response.status_code}"
+        f"Time ={time.time()-start:.2f}s"
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-(BASE_DIR / "static" / "uploads").mkdir(parents=True, exist_ok=True)
+    )
+    return response
+
+
+BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 app.include_router(build_router())
@@ -87,7 +82,6 @@ def custom_openapi() -> dict:
         "description": "Use Firebase ID token in the Authorization header (Format: Bearer <token>).",
     }
     
-
     
     app.openapi_schema = schema
     return schema

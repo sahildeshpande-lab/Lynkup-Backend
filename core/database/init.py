@@ -25,6 +25,7 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE profiles DROP COLUMN IF EXISTS profile_photo_media_id"))
         await conn.execute(text("ALTER TABLE profiles DROP COLUMN IF EXISTS banner_media_id"))
         await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS welcome_message VARCHAR(255)"))
+        await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS academic_program_id UUID"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS registration_type VARCHAR(20) NOT NULL DEFAULT 'email'"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)"))
         await conn.execute(text("ALTER TABLE users ALTER COLUMN firebase_uid DROP NOT NULL"))

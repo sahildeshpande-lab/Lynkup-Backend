@@ -3,7 +3,11 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from apps.administration import routes as admin_routes
+<<<<<<< HEAD
 from core.security.auth import get_session, get_current_user, get_current_superadmin, get_current_admin
+=======
+from core.security.auth import get_current_superadmin, get_session
+>>>>>>> 5038703 (Test cases)
 from entrypoints.api import app
 
 
@@ -27,14 +31,18 @@ class _NoopSession:
         return None
 
 
+<<<<<<< HEAD
 from fastapi import Request
 
+=======
+>>>>>>> 5038703 (Test cases)
 async def _override_session():
     yield _NoopSession()
 
 
 async def _override_current_user():
     from apps.accounts.db_models import User
+<<<<<<< HEAD
     from uuid import UUID
     return User(
         id=UUID("11111111-1111-1111-1111-111111111111"),
@@ -69,22 +77,49 @@ def teardown_module() -> None:
     app.dependency_overrides.pop(get_current_admin, None)
     app.dependency_overrides.pop(get_current_firebase_user, None)
     app.dependency_overrides.pop(get_firebase_user_from_payload, None)
+=======
+
+    return User(email="admin@example.com", role="superadmin", firebase_uid="admin-test-uid")
+
+
+def setup_module() -> None:
+    app.dependency_overrides[get_session] = _override_session
+    app.dependency_overrides[get_current_superadmin] = _override_current_user
+
+
+def teardown_module() -> None:
+    app.dependency_overrides.pop(get_session, None)
+    app.dependency_overrides.pop(get_current_superadmin, None)
+
+
+>>>>>>> 5038703 (Test cases)
 async def _list_users(_page: int, _page_size: int, _db) -> dict:
     return {"items": [], "page": 1, "pageSize": 10, "totalItems": 1, "totalPages": 1}
 
 
+<<<<<<< HEAD
 async def _create_user(_payload, _db) -> dict:
     return {"user": {"email": "ada@example.com"}, "created": True}
 
 
+=======
+>>>>>>> 5038703 (Test cases)
 async def _get_user(_user_id: str, _db) -> dict:
     return {"user": {"id": _user_id}, "found": True}
 
 
+<<<<<<< HEAD
+=======
+async def _update_user(_user_id: str, _payload, _db) -> dict:
+    return {"user": {"id": _user_id}, "updated": {"firstName": "Ada"}, "found": True}
+
+
+>>>>>>> 5038703 (Test cases)
 async def _delete_user(_user_id: str, _db) -> dict:
     return {"userId": _user_id, "deleted": True}
 
 
+<<<<<<< HEAD
 async def _export_users(_page: int | None, _page_size: int | None, _db) -> dict:
     page = _page or 1
     page_size = _page_size or 5
@@ -92,6 +127,8 @@ async def _export_users(_page: int | None, _page_size: int | None, _db) -> dict:
 
 
 
+=======
+>>>>>>> 5038703 (Test cases)
 async def _suspend_user(_payload, _db) -> dict:
     return {"id": "11111111-1111-1111-1111-111111111111", "status": "suspended"}
 
@@ -106,9 +143,18 @@ async def _mock_admin_signup(payload, db) -> dict:
         "message": "success",
         "data": {
             "user": {"email": payload.email, "role": payload.role},
+<<<<<<< HEAD
             "accessToken": "mock-access-token",
             "refreshToken": "mock-refresh-token",
         }
+=======
+            "tokens": {
+                "access_token": "mock-access-token",
+                "refresh_token": "mock-refresh-token",
+                "token_type": "bearer",
+            },
+        },
+>>>>>>> 5038703 (Test cases)
     }
 
 
@@ -132,6 +178,7 @@ def test_admin_signup_returns_success_payload(monkeypatch) -> None:
     assert body["data"]["user"]["email"] == "ada@example.com"
 
 
+<<<<<<< HEAD
 def test_admin_login_route(monkeypatch) -> None:
     async def _mock_admin_signin(payload, db):
         from apps.accounts.schemas import ApiResponse
@@ -179,13 +226,33 @@ def test_admin_onboarding_returns_success_payload(monkeypatch) -> None:
         files={
             "profile_photo": ("test.png", dummy_file, "image/png")
         }
+=======
+def test_admin_education_returns_success_payload(monkeypatch) -> None:
+    async def _mock_admin_education(payload, db):
+        return {"education": payload.model_dump(), "saved": True}
+
+    monkeypatch.setattr(admin_routes.services, "admin_education", _mock_admin_education)
+
+    response = client.post(
+        "/api/v1/auth/admin/education",
+        json={
+            "universityId": "univ-123",
+            "major": "Computer Science",
+            "minor": "Math",
+            "educationLevel": "Masters",
+        },
+>>>>>>> 5038703 (Test cases)
     )
 
     assert response.status_code == 201
     body = response.json()
     assert body["status"] is True
+<<<<<<< HEAD
     assert body["data"]["user_id"] == user_id
     assert body["data"]["onboarded"] is True
+=======
+    assert body["data"]["education"]["universityId"] == "univ-123"
+>>>>>>> 5038703 (Test cases)
 
 
 def test_admin_list_users_returns_paginated_payload(monkeypatch) -> None:
@@ -203,18 +270,32 @@ def test_admin_list_users_returns_paginated_payload(monkeypatch) -> None:
 
 def test_admin_user_routes_use_users_path(monkeypatch) -> None:
     monkeypatch.setattr(admin_routes.services, "admin_get_user", _get_user)
+<<<<<<< HEAD
+=======
+    monkeypatch.setattr(admin_routes.services, "admin_update_user", _update_user)
+>>>>>>> 5038703 (Test cases)
     monkeypatch.setattr(admin_routes.services, "admin_delete_user", _delete_user)
 
     user_id = "11111111-1111-1111-1111-111111111111"
     get_response = client.get(f"/api/v1/users/{user_id}")
+<<<<<<< HEAD
+=======
+    patch_response = client.patch(f"/api/v1/users/{user_id}", json={"firstName": "Ada"})
+>>>>>>> 5038703 (Test cases)
     delete_response = client.delete(f"/api/v1/users/{user_id}")
 
     assert get_response.status_code == 200
     assert get_response.json()["data"]["found"] is True
+<<<<<<< HEAD
+=======
+    assert patch_response.status_code == 200
+    assert patch_response.json()["data"]["found"] is True
+>>>>>>> 5038703 (Test cases)
     assert delete_response.status_code == 200
     assert delete_response.json()["data"]["deleted"] is True
 
 
+<<<<<<< HEAD
 def test_admin_export_users(monkeypatch) -> None:
     monkeypatch.setattr(admin_routes.services, "export_users", _export_users)
 
@@ -233,11 +314,14 @@ def test_admin_export_users(monkeypatch) -> None:
     assert response_paginated.json()["data"]["pageSize"] == 10
 
 
+=======
+>>>>>>> 5038703 (Test cases)
 def test_admin_suspend_and_ban_routes_exist(monkeypatch) -> None:
     monkeypatch.setattr(admin_routes.services, "admin_suspend_user", _suspend_user)
     monkeypatch.setattr(admin_routes.services, "admin_ban_user", _ban_user)
 
     user_id = "11111111-1111-1111-1111-111111111111"
+<<<<<<< HEAD
     suspend_response = client.post(
         f"/api/v1/users/{user_id}/suspend",
         json={"id": user_id},
@@ -246,11 +330,16 @@ def test_admin_suspend_and_ban_routes_exist(monkeypatch) -> None:
         f"/api/v1/users/{user_id}/ban",
         json={"id": user_id},
     )
+=======
+    suspend_response = client.post(f"/api/v1/users/{user_id}/suspend", json={"id": user_id})
+    ban_response = client.post(f"/api/v1/users/{user_id}/ban", json={"id": user_id})
+>>>>>>> 5038703 (Test cases)
 
     assert suspend_response.status_code == 200
     assert suspend_response.json()["data"]["status"] == "suspended"
     assert ban_response.status_code == 200
     assert ban_response.json()["data"]["status"] == "banned"
+<<<<<<< HEAD
 
 
 def test_update_completeness_weights(monkeypatch) -> None:
@@ -285,3 +374,5 @@ def test_update_completeness_weights(monkeypatch) -> None:
     body = response.json()
     assert body["status"] is True
     assert body["data"]["weights"]["bio"] == 15.0
+=======
+>>>>>>> 5038703 (Test cases)

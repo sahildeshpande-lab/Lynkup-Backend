@@ -1,13 +1,106 @@
+"""
+Root conftest for all unit tests.
+
+Rules:
+- Every test user is created with 'pytest' in its email or firebase_uid.
+- The db_cleanup fixture runs BEFORE and AFTER every test to remove any
+  pytest-tagged data, so no test data ever persists in the real DB.
+- Existing (non-pytest) users are never touched.
+"""
+from __future__ import annotations
+
 import pytest
 import pytest_asyncio
+<<<<<<< HEAD
 from core.database.session import engine, async_session_factory
 from apps.accounts.db_models import User, RefreshToken, TransactionalEmailLog, SecurityEvent, UserRole
 from apps.profiles.db_models import Profile
 from sqlmodel import select, delete
+=======
+from sqlalchemy import bindparam, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from core.db.session import engine, async_session_factory
+
+
+# ---------------------------------------------------------------------------
+# Helper: delete all rows that belong to pytest test users
+# ---------------------------------------------------------------------------
+
+async def _purge_pytest_data(session: AsyncSession) -> None:
+    """Delete every row created by pytest test cases (identified by 'pytest' in
+    email or firebase_uid).  Foreign-key order matters.
+    """
+    result = await session.execute(
+        text(
+            "SELECT id FROM users "
+            "WHERE email ILIKE '%pytest%' OR firebase_uid ILIKE '%pytest%'"
+        )
+    )
+    user_ids = [row[0] for row in result.fetchall()]
+
+    if user_ids:
+        user_id_params = {"user_ids": user_ids}
+        user_id_filter = bindparam("user_ids", expanding=True)
+
+        profile_result = await session.execute(
+            text("SELECT id FROM profiles WHERE user_id IN :user_ids").bindparams(user_id_filter),
+            user_id_params,
+        )
+        profile_ids = [row[0] for row in profile_result.fetchall()]
+
+        if profile_ids:
+            await session.execute(
+                text("DELETE FROM profile_interests WHERE profile_id IN :profile_ids").bindparams(
+                    bindparam("profile_ids", expanding=True)
+                ),
+                {"profile_ids": profile_ids},
+            )
+
+        for table in (
+            "security_events",
+            "refresh_tokens",
+            "user_identities",
+            "user_installations",
+            "consent_records",
+            "profiles",
+            "user_roles",
+            "password_reset_tokens",
+        ):
+            await session.execute(
+                text(f"DELETE FROM {table} WHERE user_id IN :user_ids").bindparams(user_id_filter),
+                user_id_params,
+            )
+
+        await session.execute(
+            text("DELETE FROM users WHERE id IN :user_ids").bindparams(user_id_filter),
+            user_id_params,
+        )
+
+    # Clean up transactional email logs for pytest addresses
+    await session.execute(
+        text("DELETE FROM transactional_email_log WHERE \"to\" ILIKE '%pytest%'")
+    )
+
+    await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+>>>>>>> 5038703 (Test cases)
 
 @pytest_asyncio.fixture(autouse=True)
-async def cleanup_db_connections():
+async def db_cleanup():
+    """Autouse fixture: purge pytest data before AND after each test."""
+    async with async_session_factory() as session:
+        await _purge_pytest_data(session)
+
     yield
+
+    async with async_session_factory() as session:
+        await _purge_pytest_data(session)
+
     await engine.dispose()
 
 @pytest_asyncio.fixture(autouse=True)
