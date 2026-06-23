@@ -13,6 +13,9 @@ from .schemas import (
     # AdminSigninRequest,
     # AdminSignupRequest,
     # AdminEducationRequest,
+    LogoutRequest, 
+    ResetPasswordRequest,
+    ForgotPasswordRequest,
     ApiResponse,
     UserAuthResponse,
     EmailSignupRequest,
@@ -23,7 +26,7 @@ from .schemas import (
     SocialAuthRequest,
     OtpVerifyRequest,
     ForgotPasswordRequest,
-    ResetPasswordRequest,
+    UserChangePasswordRequest,
 )
 from . import services
 
@@ -127,13 +130,23 @@ async def resend_otp(payload: ResendOtpRequest, db: AsyncSession = Depends(get_s
 
 
 
-# @router.post("/logout", response_model=ApiResponse)
-# async def logout(
-#     payload: LogoutRequest,
-#     current_user: User = Depends(get_current_user),
-#     db: AsyncSession = Depends(get_session),
-# ) -> ApiResponse:
-#     return ApiResponse(message="logged out", data=await services.logout(payload, db, current_user))
+@router.post("/logout", response_model=ApiResponse)
+async def logout(
+    payload: LogoutRequest,
+    firebase_user: dict = Depends(get_firebase_user_from_payload),
+    db: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    await services.logout(
+        payload=payload,
+        firebase_user=firebase_user,
+        db=db,
+    )
+
+    return ApiResponse(
+        status=True,
+        message="Logout successful",
+        data=None,
+    )
 
 
 @router.post("/logout-all", response_model=ApiResponse)
@@ -144,38 +157,19 @@ async def logout_all(
     return ApiResponse(message="logged out from all devices", data=await services.logout_all(current_user, db))
 
 
-@router.get("/me", response_model=ApiResponse)
-async def me(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_session),
-) -> ApiResponse:
-    profile = await services._fetch_user_profile(db, current_user)
-    return ApiResponse(message="current user fetched", data=services._build_auth_user_response(current_user, profile).model_dump())
-
 
 @router.post("/forgot-password", response_model=ApiResponse)
-async def forgot_password(payload: ForgotPasswordRequest, db: AsyncSession = Depends(get_session), firebase_user: dict = Depends(get_firebase_user_from_payload)) -> ApiResponse:
-    if firebase_user.get("email") and firebase_user.get("email").lower() != payload.email.lower():
-        raise HTTPException(status_code=400, detail="Firebase token email does not match payload email")
+async def forgot_password(payload: ForgotPasswordRequest,db: AsyncSession = Depends(get_session),) -> ApiResponse:
     return await services.forgot_password(payload, db)
 
+@router.post("/change-password", response_model=ApiResponse)
+async def change_password(
+    payload: UserChangePasswordRequest,
+    db: AsyncSession = Depends(get_session)
+) -> ApiResponse:
+    return await services.change_password(payload, db)
 
 @router.post("/reset-password", response_model=ApiResponse)
-async def reset_password(payload: ResetPasswordRequest, db: AsyncSession = Depends(get_session), firebase_user: dict = Depends(get_firebase_user_from_payload)) -> ApiResponse:
+async def reset_password(
+payload: ResetPasswordRequest,db: AsyncSession = Depends(get_session),) -> ApiResponse:   
     return await services.reset_password(payload, db)
-
-
-
-# @router.post("/admin/signup", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
-# def admin_signup(payload: AdminSignupRequest) -> ApiResponse:
-#     return ApiResponse(message="admin signup processed", data=services.admin_signup(payload))
-# 
-# 
-# @router.post("/admin/education", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
-# def admin_education(payload: AdminEducationRequest) -> ApiResponse:
-#     return ApiResponse(message="admin education saved", data=services.admin_education(payload))
-# 
-# 
-# @router.post("/admin/signin", response_model=ApiResponse)
-# def admin_signin(payload: AdminSigninRequest) -> ApiResponse:
-#     return ApiResponse(message="admin signin processed", data=services.admin_signin(payload))

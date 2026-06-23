@@ -22,6 +22,7 @@ class AuthSettings(BaseSettings):
     firebase_credentials: str | None = Field(default=None, alias="FIREBASE_CREDENTIALS")
     firebase_service_account_path: str | None = Field(default=None, alias="FIREBASE_SERVICE_ACCOUNT_PATH")
     firebase_project_id: str | None = Field(default=None, alias="FIREBASE_PROJECT_ID")
+    firebase_web_api_key: str | None = Field(default=None, alias="FIREBASE_WEB_API_KEY")
 
     password_reset_token_expire_minutes: int = Field(default=60, alias="PASSWORD_RESET_TOKEN_EXPIRE_MINUTES")
     resend_otp_cooldown_minutes: int = Field(default=2, alias="RESEND_OTP_COOLDOWN_MINUTES")

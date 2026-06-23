@@ -58,3 +58,10 @@ class CompletenessWeightsUpdateRequest(BaseModel):
     interests: Optional[float] = None
     graduation_date: Optional[float] = None
     location: Optional[float] = None
+
+class UpdateProfileMeRequest(BaseModel):
+    firstName: str | None = None
+    lastName: str | None = None
+    universityId: str | None = None
+    major: str | None = None
+    bio: str | None = None

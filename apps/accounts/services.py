@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import secrets
 import jwt
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from uuid import uuid4
+from uuid import uuid4,UUID
 
 from dotenv import load_dotenv
 from fastapi import HTTPException, UploadFile, status
@@ -16,20 +17,19 @@ from sqlmodel import select
 from sqlalchemy.orm import selectinload
 from pwdlib import PasswordHash
 from pwdlib.hashers.bcrypt import BcryptHasher
+from apps.accounts.db_models import Role, UserRole
+import httpx
 
-from apps.accounts.db_models import RefreshToken, SecurityEvent, SecurityEventType, TransactionalEmailLog, User, PasswordResetToken
+from apps.accounts.db_models import RefreshToken, SecurityEvent, SecurityEventType, TransactionalEmailLog, User , UserInstallation  , PasswordResetToken
 from apps.profiles.db_models import Profile
 from common.enums import OnboardingStatus, RegistrationType, UserStatus
 from core.auth.config import settings as auth_settings
-from core.email_service import send_otp_email, send_verification_success_email, build_email_verified_success_html
-
+from core.email_service import send_otp_email, send_verification_success_email, build_email_verified_success_html , send_reset_password_email
+ 
 from .schemas import (
-    # AdminSigninRequest,
-    # AdminSignupRequest,
-    # AdminEducationRequest,
-    # AdminUserCreateRequest,
-    # AdminUserUpdateRequest,
     ApiResponse,
+    ResetPasswordRequest, 
+    LogoutRequest,
     AuthSessionResponse,
     AuthUserResponse,
     EmailLoginRequest,
@@ -43,8 +43,11 @@ from .schemas import (
     RefreshSessionResponse,
     UserBaseResponse,
     ForgotPasswordRequest,
-    ResetPasswordRequest,
+    UserChangePasswordRequest,
 )
+from core.auth.services import update_firebase_password
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
@@ -70,7 +73,7 @@ def _hash_password(password: str, username: str | None = None) -> str:
 
 
 def _generate_otp() -> str:
-    return f"{secrets.randbelow(900000) + 100000}"
+    return f"{secrets.randbelow(9000) + 1000}"
 
 
 async def _log_email_event(
@@ -166,13 +169,8 @@ def _refresh_token_payload(user: User) -> dict:
 
 
 def _build_auth_user_response(user: User, profile: Profile | None) -> AuthUserResponse:
-    display_name = profile.display_name if profile else ""
-    first_name = ""
-    last_name = ""
-    if display_name:
-        parts = display_name.split(" ", 1)
-        first_name = parts[0]
-        last_name = parts[1] if len(parts) > 1 else ""
+    first_name = profile.first_name if profile and profile.first_name else ""
+    last_name = profile.last_name if profile and profile.last_name else ""
 
     from core.images import generate_download_url
 
@@ -237,10 +235,6 @@ async def log_security_event(
             ip_address=ip_address,
         )
     )
-
-
-
-
 
 
 
@@ -314,9 +308,11 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
         await assign_user_role(db, user, "user")
 
         display_name = _display_name_from_firebase(firebase_user, email)
+        display_parts = display_name.split(" ", 1)
         profile = Profile(
             user_id=user.id,
-            display_name=display_name,
+            first_name=display_parts[0] if display_parts else "",
+            last_name=display_parts[1] if len(display_parts) > 1 else "",
             completeness_score=0,
             updated_at=now,
         )
@@ -502,19 +498,25 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
     await assign_user_role(db, user, "user")
 
     # 6. Review Name Handling:
-    # Display name is resolved by prioritizing client payload if provided,
-    # falling back to Firebase token claims display name, and finally to email prefix.
-    # This aligns with existing requirements where the user might specify a custom display name.
+    # Persist first and last name independently while still deriving them from the
+    # same sources the API already accepts.
     if payload.fullName:
-        display_name = payload.fullName
+        name_parts = payload.fullName.split(" ", 1)
+        first_name = name_parts[0]
+        last_name = name_parts[1] if len(name_parts) > 1 else ""
     elif payload.firstName or payload.lastName:
-        display_name = f"{payload.firstName or ''} {payload.lastName or ''}".strip()
+        first_name = payload.firstName or ""
+        last_name = payload.lastName or ""
     else:
-        display_name = firebase_user.get("name") or email.split("@")[0]
+        fallback_name = firebase_user.get("name") or email.split("@")[0]
+        name_parts = fallback_name.split(" ", 1)
+        first_name = name_parts[0]
+        last_name = name_parts[1] if len(name_parts) > 1 else ""
 
     profile = Profile(
         user_id=user.id,
-        display_name=display_name,
+        first_name=first_name,
+        last_name=last_name,
         completeness_score=0,
         updated_at=now
     )
@@ -569,7 +571,8 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
             if not profile:
                 profile = Profile(
                     user_id=existing_user_email.id,
-                    display_name=f"{payload.firstName} {payload.lastName}".strip(),
+                    first_name=payload.firstName,
+                    last_name=payload.lastName,
                     completeness_score=0,
                     updated_at=now
                 )
@@ -591,7 +594,12 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
                     app_version=None,
                     installed_at=now,
                     last_active_at=now,
+                    is_active=True,
                 )
+                db.add(inst)
+            else:
+                inst.last_active_at = now
+                inst.is_active = True
                 db.add(inst)
 
             await db.commit()
@@ -655,7 +663,8 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     # 3. Create Profile record
     profile = Profile(
         user_id=user.id,
-        display_name=f"{payload.firstName} {payload.lastName}".strip(),
+        first_name=payload.firstName,
+        last_name=payload.lastName,
         completeness_score=0,
         updated_at=now
     )
@@ -674,6 +683,7 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
         app_version=None,
         installed_at=now,
         last_active_at=now,
+        is_active=True,
     )
     db.add(installation)
 
@@ -714,7 +724,7 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
         return ApiResponse(status=False, message="Account is not active", data=None)
 
     if user.status in (UserStatus.suspended, UserStatus.banned):
-        return ApiResponse(status=False, message="Account is not active", data=None)
+        return ApiResponse(status=False, message="Account is either Suspended or banned ", data=None)
 
     from apps.accounts.db_models import UserInstallation
     stmt_install = select(UserInstallation).where(
@@ -743,8 +753,13 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
                 app_version=None,
                 installed_at=now,
                 last_active_at=now,
+                is_active=True,
             )
             db.add(new_install)
+        elif installation:
+            installation.last_active_at = now
+            installation.is_active = True
+            db.add(installation)
 
         await db.commit()
         await send_otp_email(user.email, otp, "email_verification")
@@ -765,6 +780,7 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
 
         if installation:
             installation.last_active_at = _now()
+            installation.is_active = True
             db.add(installation)
 
         await db.commit()
@@ -802,7 +818,7 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
 
         stmt_profile = select(Profile).where(Profile.user_id == user.id)
         profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-        full_name = profile.display_name if profile else None
+        full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip() if profile else None
 
         html_content = build_email_verified_success_html(full_name)
         # Send a verification success email using existing account_created_email template
@@ -831,7 +847,7 @@ async def verify_email(token: str, db: AsyncSession) -> HTMLResponse | ApiRespon
 
     stmt_profile = select(Profile).where(Profile.user_id == user.id)
     profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-    full_name = profile.display_name if profile else None
+    full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip() if profile else None
 
     html_content = build_email_verified_success_html(full_name)
     return HTMLResponse(content=html_content, status_code=200)
@@ -847,9 +863,9 @@ async def resend_otp(payload: ResendOtpRequest, firebase_user: dict, db: AsyncSe
         return ApiResponse(status=False, message="Unauthorized action for this user account", data=None)
 
     # Enforce cooldown based on configuration (default 2 minutes)
-    cooldown = timedelta(minutes=auth_settings.resend_otp_cooldown_minutes)
-    if user.email_otp_created_at and (_now() - user.email_otp_created_at) < cooldown:
-          return ApiResponse(status=False, message="Please wait for 10 mins before resending OTP. A verification code has already been sent to your email.", data=None)
+    # cooldown = timedelta(minutes=auth_settings.resend_otp_cooldown_minutes)
+    # if user.email_otp_created_at and (_now() - user.email_otp_created_at) < cooldown:
+    #       return ApiResponse(status=False, message="Please wait for 10 mins before resending OTP. A verification code has already been sent to your email.", data=None)
     otp = _generate_otp()
     user.email_otp = otp
     user.email_otp_created_at = _now()
@@ -912,22 +928,82 @@ async def refresh_token(payload: RefreshTokenRequest, db: AsyncSession) -> dict:
     await db.commit()
     return {"access_token": access_token, "refresh_token": new_refresh_token, "token_type": "bearer"}
 
+from firebase_admin import auth
 
-async def logout(payload: LogoutRequest, db: AsyncSession, current_user: User) -> dict:
-    if payload.refreshToken:
-        token_hash = _hash_token(payload.refreshToken)
-        token_row = (
-            await db.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash, RefreshToken.user_id == current_user.id))
-        ).scalar_one_or_none()
-        if token_row and token_row.revoked_at is None:
-            await _revoke_refresh_token_row(db, token_row)
-    
-    current_user.status = UserStatus.pending
-    current_user.updated_at = _now()
-    db.add(current_user)
+async def logout(
+    payload: LogoutRequest,
+    firebase_user: dict,
+    db: AsyncSession,
+) -> None:
+    firebase_uid = firebase_user.get("uid")
+
+    if not firebase_uid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Firebase user",
+        )
+
+    user = (
+        await db.execute(
+            select(User).where(User.firebase_uid == firebase_uid)
+        )
+    ).scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    device_id = payload.device_id.strip()
+
+    installation = (
+        await db.execute(
+            select(UserInstallation).where(
+                UserInstallation.user_id == user.id,
+                UserInstallation.device_id == device_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if installation:
+        installation.is_active = False
+        installation.last_active_at = _now()
+        db.add(installation)
+    else:
+        logger.info(
+            "Logout requested for user %s with unknown device_id %s",
+            user.id,
+            device_id,
+        )
+
+    token_rows = (
+        await db.execute(
+            select(RefreshToken).where(
+                RefreshToken.user_id == user.id,
+                RefreshToken.device_id == device_id,
+                RefreshToken.revoked_at.is_(None),
+            )
+        )
+    ).scalars().all()
+
+    for token_row in token_rows:
+        await _revoke_refresh_token_row(db, token_row)
+
+    if firebase_uid:
+        try:
+            auth.revoke_refresh_tokens(firebase_uid)
+        except Exception as exc:
+            logger.exception(
+                "Firebase token revocation failed during logout for user %s",
+                user.id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to revoke Firebase session",
+            ) from exc
+
     await db.commit()
-    return {"logged_out": True}
-
 
 async def logout_all(current_user: User, db: AsyncSession) -> dict:
     rows = (await db.execute(select(RefreshToken).where(RefreshToken.user_id == current_user.id, RefreshToken.revoked_at == None))).scalars().all()
@@ -939,7 +1015,6 @@ async def logout_all(current_user: User, db: AsyncSession) -> dict:
     db.add(current_user)
     await db.commit()
     return {"logged_out_all": True}
-
 
 
 
@@ -973,100 +1048,447 @@ async def get_user_by_firebase_uid(db: AsyncSession, firebase_uid: str) -> User 
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
-async def forgot_password(payload: ForgotPasswordRequest, db: AsyncSession) -> ApiResponse:
-    from core.email_service import send_reset_password_email
-    import uuid
+async def forgot_password( payload: ForgotPasswordRequest,db: AsyncSession ) -> ApiResponse: 
 
     email = payload.email.lower()
+
     stmt = select(User).where(User.email == email)
     user = (await db.execute(stmt)).scalar_one_or_none()
-    if not user:
-        return ApiResponse(status=False, message="User not found", data=None)
 
-    # Check for recent active token to rate limit
+    if not user:
+        return ApiResponse(
+            status=False,
+            message="User not found",
+            data=None
+        )
+
     now = _now()
+
     existing_stmt = select(PasswordResetToken).where(
         PasswordResetToken.user_id == user.id,
         PasswordResetToken.used_at == None,
         PasswordResetToken.expires_at > now
     )
-    existing_token = (await db.execute(existing_stmt)).scalar_one_or_none()
+
+    existing_token = (
+        await db.execute(existing_stmt)
+    ).scalar_one_or_none()
+
     if existing_token:
         return ApiResponse(
             status=False,
-            message=f"Recently email for resest password as been send please try after {auth_settings.password_reset_token_expire_minutes} mins  ",
+            message=f"Recently email for reset password has been sent. Please try after {auth_settings.password_reset_token_expire_minutes} mins",
             data=None
         )
 
-    # Generate token
-    token_val = str(uuid.uuid4())
-    now = _now() 
-    expires_at = now + timedelta(minutes=auth_settings.password_reset_token_expire_minutes)
+    token_val = str(uuid4())
 
     reset_token = PasswordResetToken(
         user_id=user.id,
         token=token_val,
-        expires_at=expires_at,
+        expires_at=now + timedelta(
+            minutes=auth_settings.password_reset_token_expire_minutes
+        )
     )
+
     db.add(reset_token)
     await db.commit()
 
-    # Get application link
-    app_link = os.getenv("APPLICATION_LINK", "https://frontend-domain.com/").rstrip("/") + "/"
-    reset_link = f"{app_link}reset-password?token={token_val}"
+    app_link = os.getenv(
+        "APPLICATION_LINK",
+        "https://frontend-domain.com/"
+    ).rstrip("/") + "/"
 
-    # Send email
-    await send_reset_password_email(email, reset_link)
-
-    return ApiResponse(status=True, message="Password reset link sent successfully to your mail ", data=None)
-
-
-async def reset_password(payload: ResetPasswordRequest, db: AsyncSession) -> ApiResponse:
-    from firebase_admin import auth
-    from core.auth.services import revoke_firebase_tokens
-    import uuid
-
-    try:
-        # Check if it is a valid UUID string
-        token_uuid = uuid.UUID(payload.token)
-    except ValueError:
-        return ApiResponse(status=False, message="Invalid token format", data=None)
-
-    stmt = select(PasswordResetToken).where(
-        PasswordResetToken.token == str(token_uuid),
-        PasswordResetToken.used_at == None
+    reset_link = (
+        f"{app_link}reset-password?token={token_val}"
     )
-    reset_token = (await db.execute(stmt)).scalar_one_or_none()
-    if not reset_token:
-        return ApiResponse(status=False, message="Invalid or expired token", data=None)
+    print("Sending email to:", email)
+    await send_reset_password_email(
+        email,
+        reset_link
+    )
+    print("Email function completed")
 
+    return ApiResponse(
+        status=True,
+        message="Password reset link sent successfully to your mail",
+        data=None
+)
+
+
+async def reset_password(payload: ResetPasswordRequest,  db: AsyncSession    ) -> ApiResponse:
+
+
+    if not payload.token and not payload.firebaseId:
+        return ApiResponse(
+            status=False,
+            message="Token or firebaseId is required",
+            data=None
+        )
+
+    user = None
+    reset_token = None
     now = _now()
-    if reset_token.expires_at.replace(tzinfo=timezone.utc) < now:
-        return ApiResponse(status=False, message="Token expired", data=None)
 
-    user = await db.get(User, reset_token.user_id)
+    # TOKEN FLOW
+    if payload.token:
+
+        try:
+            token_uuid = UUID(payload.token)
+        except ValueError:
+            return ApiResponse(
+                status=False,
+                message="Invalid token format",
+                data=None
+            )
+
+        stmt = select(PasswordResetToken).where(
+            PasswordResetToken.token == str(token_uuid),
+            PasswordResetToken.used_at == None
+        )
+
+        reset_token = (
+            await db.execute(stmt)
+        ).scalar_one_or_none()
+
+        if not reset_token:
+            return ApiResponse(
+                status=False,
+                message="Invalid reset password link",
+                data=None
+            )
+
+        if reset_token.expires_at.replace(
+            tzinfo=timezone.utc
+        ) < now:
+            return ApiResponse(
+                status=False,
+                message="Your reset password link has expired.",
+                data=None
+            )
+
+        user = await db.get(
+            User,
+            reset_token.user_id
+        )
+
+
+        # FIREBASE FLOW
+
+    elif payload.firebaseId:
+
+        try:
+            decoded_token = auth.verify_id_token(
+                payload.firebaseId
+            )
+
+            firebase_uid = decoded_token.get("uid")
+
+            stmt = select(User).where(
+                User.firebase_uid == firebase_uid
+            )
+
+            user = (
+                await db.execute(stmt)
+            ).scalar_one_or_none()
+
+        except Exception:
+            return ApiResponse(
+                status=False,
+                message="Invalid firebase authentication",
+                data=None
+            )
+
     if not user:
-        return ApiResponse(status=False, message="User not found", data=None)
+        return ApiResponse(
+            status=False,
+            message="User not found",
+            data=None
+        )
 
-    # Update password in Firebase
     try:
-        auth.update_user(user.firebase_uid, password=payload.new_password)
+        update_firebase_password(
+            user.firebase_uid,
+            password=payload.new_password
+        )
     except Exception as exc:
-        return ApiResponse(status=False, message=f"Failed to reset password: {str(exc)}", data=None)
+        return ApiResponse(
+            status=False,
+            message=f"Failed to update password in firebase: {str(exc)}",
+            data=None
+        )
 
-    user.password_hash = _hash_password(payload.new_password)
+    user.password_hash = PASSWORD_HASHER.hash(
+        payload.new_password
+    )
     user.updated_at = now
+
     db.add(user)
 
-    # Invalidate token
-    reset_token.used_at = now
+    if reset_token:
+        reset_token.used_at = now
+        db.add(reset_token)
+
+    await db.commit()
+
+    await db.flush()
+
+    user_role = UserRole(user_id=user.id, role_id=role_obj.id)
+    db.add(user_role)
+    await db.flush()
+
+
+async def get_user_by_firebase_uid(db: AsyncSession, firebase_uid: str) -> User | None:
+    stmt = select(User).options(selectinload(User.roles)).where(User.firebase_uid == firebase_uid)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def forgot_password( payload: ForgotPasswordRequest,db: AsyncSession ) -> ApiResponse: 
+
+    email = payload.email.lower()
+
+    stmt = select(User).where(User.email == email)
+    user = (await db.execute(stmt)).scalar_one_or_none()
+
+    if not user:
+        return ApiResponse(
+            status=False,
+            message="User not found",
+            data=None
+        )
+
+    now = _now()
+
+    existing_stmt = select(PasswordResetToken).where(
+        PasswordResetToken.user_id == user.id,
+        PasswordResetToken.used_at == None,
+        PasswordResetToken.expires_at > now
+    )
+
+    existing_token = (
+        await db.execute(existing_stmt)
+    ).scalar_one_or_none()
+
+    if existing_token:
+        return ApiResponse(
+            status=False,
+            message=f"Recently email for reset password has been sent. Please try after {auth_settings.password_reset_token_expire_minutes} mins",
+            data=None
+        )
+
+    token_val = str(uuid4())
+
+    reset_token = PasswordResetToken(
+        user_id=user.id,
+        token=token_val,
+        expires_at=now + timedelta(
+            minutes=auth_settings.password_reset_token_expire_minutes
+        )
+    )
+
     db.add(reset_token)
     await db.commit()
 
-    # Revoke tokens
-    try:
-        revoke_firebase_tokens(user.firebase_uid)
-    except Exception:
-        pass
+    app_link = os.getenv(
+        "APPLICATION_LINK",
+        "https://frontend-domain.com/"
+    ).rstrip("/") + "/"
 
-    return ApiResponse(status=True, message="Password reset successful", data=None)
+    reset_link = (
+        f"{app_link}reset-password?token={token_val}"
+    )
+    print("Sending email to:", email)
+    await send_reset_password_email(
+        email,
+        reset_link
+    )
+    print("Email function completed")
+
+    return ApiResponse(
+        status=True,
+        message="Password reset link sent successfully to your mail",
+        data=None
+)
+
+
+async def reset_password(payload: ResetPasswordRequest,  db: AsyncSession    ) -> ApiResponse:
+
+
+    if not payload.token and not payload.firebaseId:
+        return ApiResponse(
+            status=False,
+            message="Token or firebaseId is required",
+            data=None
+        )
+
+    user = None
+    reset_token = None
+    now = _now()
+
+    # TOKEN FLOW
+    if payload.token:
+
+        try:
+            token_uuid = UUID(payload.token)
+        except ValueError:
+            return ApiResponse(
+                status=False,
+                message="Invalid token format",
+                data=None
+            )
+
+        stmt = select(PasswordResetToken).where(
+            PasswordResetToken.token == str(token_uuid),
+            PasswordResetToken.used_at == None
+        )
+
+        reset_token = (
+            await db.execute(stmt)
+        ).scalar_one_or_none()
+
+        if not reset_token:
+            return ApiResponse(
+                status=False,
+                message="Invalid reset password link",
+                data=None
+            )
+
+        if reset_token.expires_at.replace(
+            tzinfo=timezone.utc
+        ) < now:
+            return ApiResponse(
+                status=False,
+                message="Your reset password link has expired.",
+                data=None
+            )
+
+        user = await db.get(
+            User,
+            reset_token.user_id
+        )
+
+
+        # FIREBASE FLOW
+
+    elif payload.firebaseId:
+
+        try:
+            decoded_token = auth.verify_id_token(
+                payload.firebaseId
+            )
+
+            firebase_uid = decoded_token.get("uid")
+
+            stmt = select(User).where(
+                User.firebase_uid == firebase_uid
+            )
+
+            user = (
+                await db.execute(stmt)
+            ).scalar_one_or_none()
+
+        except Exception:
+            return ApiResponse(
+                status=False,
+                message="Invalid firebase authentication",
+                data=None
+            )
+
+    if not user:
+        return ApiResponse(
+            status=False,
+            message="User not found",
+            data=None
+        )
+
+    try:
+        update_firebase_password(
+            user.firebase_uid,
+            password=payload.new_password
+        )
+    except Exception as exc:
+        return ApiResponse(
+            status=False,
+            message=f"Failed to update password in firebase: {str(exc)}",
+            data=None
+        )
+
+    user.password_hash = PASSWORD_HASHER.hash(
+        payload.new_password
+    )
+    user.updated_at = now
+
+    db.add(user)
+
+    if reset_token:
+        reset_token.used_at = now
+        db.add(reset_token)
+
+    await db.commit()
+
+    return ApiResponse(
+        status=True, message="Password reset successful", data=None
+    )
+
+
+async def change_password(payload: UserChangePasswordRequest, db: AsyncSession) -> ApiResponse:
+    from firebase_admin import auth
+    
+    try:
+        decoded_token = auth.verify_id_token(payload.firebaseId)
+    except Exception as e:
+        logger.error(f"Failed to verify firebase token: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid firebase token"
+        )
+        
+    firebase_uid = decoded_token.get("uid")
+
+    stmt = select(User).where(
+        User.firebase_uid == firebase_uid
+    )
+
+    user = (
+        await db.execute(stmt)
+    ).scalar_one_or_none()
+
+    if not user:
+        return ApiResponse(
+            status=False,
+            message="User not found",
+            data=None
+        )
+
+    if not user.password_hash or not PASSWORD_HASHER.verify(payload.current_password, user.password_hash):
+        return ApiResponse(
+            status=False,
+            message="existing password does not match",
+            data=None
+        )
+
+    user.password_hash = PASSWORD_HASHER.hash(
+        payload.new_password
+    )
+    user.updated_at = _now()
+
+    try:
+        update_firebase_password(
+            user.firebase_uid,
+            password=payload.new_password
+        )
+    except Exception as e:
+        logger.error(f"Failed to update firebase password: {e}")
+        return ApiResponse(
+            status=False,
+            message="Failed to update password in Firebase",
+            data=None
+        )
+
+    await db.commit()
+
+    return ApiResponse(
+        status=True,
+        message="Password updated successfully",
+        data=None
+    )

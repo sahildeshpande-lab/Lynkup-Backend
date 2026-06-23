@@ -19,7 +19,8 @@ class Profile(SQLModel, table=True):
 
     id: UUID = Field(default_factory=uuid4, primary_key=True, index=True)
     user_id: UUID = Field(foreign_key="users.id", nullable=False, unique=True, index=True)
-    display_name: str | None = Field(default=None, sa_column=Column(String(128)))
+    first_name: str | None = Field(default=None, sa_column=Column(String(64)))
+    last_name: str | None = Field(default=None, sa_column=Column(String(64)))
     bio: str | None = Field(default=None, sa_column=Column(String(500)))
     university_id: UUID | None = Field(default=None, foreign_key="universities.id", index=True)
     profile_interests_id: list[int] | None = Field(default=None, sa_column=Column(JSON, nullable=True, server_default='[]'))

@@ -4,12 +4,18 @@ from enum import Enum
 
 
 class UserStatus(str, Enum):
-    pending = "pending"
+    pending="pending"
     active = "active"
     suspicious_review = "suspicious_review"
     suspended = "suspended"
     banned = "banned"
+    
     deleting = "deleting"
+
+class AdminUserStatus(str, Enum):
+    active = "active"
+    suspended = "suspended"
+    banned = "banned"
 
 
 class OnboardingStatus(str, Enum):

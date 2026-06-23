@@ -17,10 +17,13 @@ from common.pagination import build_paginated_response
 
 from .schemas import (
     AdminUserActionRequest,
+    ChangePasswordRequest,
     AdminSignupRequest,
+    AdminEditProfileRequest,
     AdminLoginRequest,
     AdminForgotPasswordRequest,
     AdminResetPasswordRequest,
+    AdminUserStatus,
 )
 from apps.accounts.schemas import ApiResponse, EmailSignupRequest, RefreshTokenRequest
 from apps.accounts.services import JWT_ALGORITHM, JWT_SECRET, _generate_tokens
@@ -88,7 +91,8 @@ async def admin_signup(payload: AdminSignupRequest, db: AsyncSession):
 
     profile = Profile(
         user_id=user.id,
-        display_name=f"{payload.firstName} {payload.lastName}".strip(),
+        first_name=payload.firstName,
+        last_name=payload.lastName,
         completeness_score=0,
         updated_at=now
     )
@@ -122,134 +126,33 @@ async def admin_signup(payload: AdminSignupRequest, db: AsyncSession):
         },
     )
 
+async def admin_me(
+    current_user: User,
+    db: AsyncSession,
+) -> ApiResponse:
 
-# async def admin_complete_onboarding(
-#     user_id: UUID,
-#     bio: str,
-#     major: str,
-#     minor: str | None,
-#     university_id: str,
-#     education_level: str,
-#     academic_interests: str,
-#     profile_photo: UploadFile,
-#     db: AsyncSession,
-# ) -> dict:
-#     if db is not None:
-#         from apps.profiles.db_models import Profile
-#         from core.images import save_image, settings, generate_download_url, normalize_image_name
-#         from uuid import UUID as pyUUID
-#         import uuid
-#         import json
-#         from common.enums import OnboardingStatus
-#         from apps.profiles.services import calculate_completeness_score, build_user_base_response
-        
-#         # Verify user exists
-#         stmt = select(User).where(User.id == user_id)
-#         user = (await db.execute(stmt)).scalar_one_or_none()
-#         if not user:
-#             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-        
-#         # Fetch or create profile
-#         profile_stmt = select(Profile).where(Profile.user_id == user_id)
-#         profile = (await db.execute(profile_stmt)).scalar_one_or_none()
-#         if not profile:
-#             profile = Profile(user_id=user_id, display_name="", completeness_score=0)
-#             db.add(profile)
-#             await db.flush()
-            
-#         profile_data = {}
+    stmt_profile = select(Profile).where(
+        Profile.user_id == current_user.id
+    )
 
-#         if profile_photo and profile_photo.filename:
-#             content = await profile_photo.read()
-#             if content:
-#                 ext = profile_photo.filename.split(".")[-1] if "." in profile_photo.filename else "png"
-#                 file_name = f"profiles/{uuid.uuid4()}.{ext}"
-#                 save_image(
-#                     file_name=file_name,
-#                     content=content,
-#                     content_type=profile_photo.content_type or "image/png"
-#                 )
-#                 profile.profile_photo_url = normalize_image_name(file_name)
-#                 profile_data["profilePhotoUrl"] = generate_download_url(profile.profile_photo_url)
+    profile = (
+        await db.execute(stmt_profile)
+    ).scalar_one_or_none()
 
-#         profile.bio = bio
-#         profile_data["bio"] = bio
+    user_data = await build_user_base_response(
+        current_user,
+        profile,
+        db
+    )
 
-#         if university_id:
-#             try:
-#                 profile.university_id = pyUUID(str(university_id))
-#             except ValueError:
-#                 pass
-#         profile_data["universityId"] = str(profile.university_id) if profile.university_id else None
-                    
-#         profile.major = major
-#         profile.minor = minor
-#         profile.edu_level = education_level
-#         profile_data["educationLevel"] = education_level
-        
-#         if academic_interests is not None:
-#             interests_list = []
-#             val = academic_interests.strip()
-#             if val.startswith("[") and val.endswith("]"):
-#                 try:
-#                     interests_list = json.loads(val)
-#                 except Exception:
-#                     interests_list = [x.strip().strip("'\"") for x in val[1:-1].split(",") if x.strip()]
-#             else:
-#                 interests_list = [x.strip() for x in val.split(",") if x.strip()]
-
-#             from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
-#             from uuid import UUID
-
-#             resolved_uuids = []
-#             for tag in interests_list:
-#                 tag_clean = tag.strip()
-#                 if not tag_clean:
-#                     continue
-#                 is_uuid = False
-#                 try:
-#                     uuid_val = UUID(tag_clean)
-#                     is_uuid = True
-#                 except ValueError:
-#                     pass
-                
-#                 if is_uuid:
-#                     stmt_interest = select(AcademicInterest).where(AcademicInterest.id == uuid_val)
-#                     interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
-#                     if interest_rec:
-#                         resolved_uuids.append(str(interest_rec.id))
-#                 else:
-#                     stmt_interest = select(AcademicInterest).where(AcademicInterest.name.ilike(tag_clean))
-#                     interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
-#                     if not interest_rec:
-#                         interest_rec = AcademicInterest(name=tag_clean, is_active=True)
-#                         db.add(interest_rec)
-#                         await db.flush()
-#                     resolved_uuids.append(str(interest_rec.id))
-
-#             profile.profile_interests_id = resolved_uuids
-            
-#             profile_data["academicInterests"] = interests_list
-
-#         user.onboarding_status = OnboardingStatus.completed
-#         db.add(user)
-#         db.add(profile)
-#         await db.flush()
-        
-#         try:
-#             profile.completeness_score = await calculate_completeness_score(user_id, db)
-#             db.add(profile)
-#         except Exception:
-#             pass
-            
-#         await db.commit()
-#         await db.refresh(user)
-#         await db.refresh(profile)
-
-#         user_data = await build_user_base_response(user, profile, db)
-#         return {"user": user_data}
-#     return {}
-
+    return ApiResponse(
+        status=True,
+        message="Profile fetched successfully",
+        data={
+            "user": user_data,
+            "emailSent": False,
+        },
+    )
 
 async def admin_complete_onboarding(
     user_id: UUID,
@@ -278,7 +181,7 @@ async def admin_complete_onboarding(
 
     profile = (await db.execute(select(Profile).where(Profile.user_id == user_id))).scalar_one_or_none()
     if not profile:
-        profile = Profile(user_id=user_id, display_name="", completeness_score=0)
+        profile = Profile(user_id=user_id, first_name="", last_name="", completeness_score=0)
         db.add(profile)
         await db.flush()
 
@@ -416,7 +319,12 @@ async def _fetch_users_with_details(
     if university:
         stmt = stmt.where(University.name.ilike(f"%{university}%"))
     if name:
-        stmt = stmt.where(Profile.display_name.ilike(f"%{name}%"))
+        pattern = f"%{name}%"
+        stmt = stmt.where(
+            (Profile.first_name.ilike(pattern)) |
+            (Profile.last_name.ilike(pattern)) |
+            (func.concat(Profile.first_name, " ", Profile.last_name).ilike(pattern))
+        )
     if email:
         stmt = stmt.where(User.email.ilike(f"%{email}%"))
 
@@ -503,7 +411,9 @@ async def list_users(
         pattern = f"%{search}%"
         count_stmt = count_stmt.where(
             (University.name.ilike(pattern)) |
-            (Profile.display_name.ilike(pattern)) |
+            (Profile.first_name.ilike(pattern)) |
+            (Profile.last_name.ilike(pattern)) |
+            (func.concat(Profile.first_name, " ", Profile.last_name).ilike(pattern)) |
             (User.email.ilike(pattern))
         )
     total_items = int((await db.execute(count_stmt)).scalar_one())
@@ -538,7 +448,9 @@ async def _fetch_users_with_details(
         pattern = f"%{search}%"
         stmt = stmt.where(
             (University.name.ilike(pattern)) |
-            (Profile.display_name.ilike(pattern)) |
+            (Profile.first_name.ilike(pattern)) |
+            (Profile.last_name.ilike(pattern)) |
+            (func.concat(Profile.first_name, " ", Profile.last_name).ilike(pattern)) |
             (User.email.ilike(pattern))
         )
     stmt = (
@@ -660,84 +572,132 @@ async def admin_delete_user(user_id: str, db: AsyncSession) -> dict:
         "user": user_data,
     }
 
+async def admin_edit_profile(
+    user_id: str,
+    payload: AdminEditProfileRequest,
+    db: AsyncSession,
+):
+    from apps.profiles.db_models.profile_db_model import Profile
+    from core.images import (
+        file_exists,
+        normalize_image_name,
+        generate_download_url,
+    )
 
-# async def admin_suspend_user(payload: AdminUserActionRequest, db: AsyncSession) -> dict:
-#     from core.auth.services import revoke_firebase_tokens
+    stmt = select(Profile).where(Profile.user_id == user_id)
+    profile = (await db.execute(stmt)).scalar_one_or_none()
 
-#     user_uuid = _coerce_uuid(payload.id)
-#     user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
-#     if user is None:
-#         return {"id": payload.id, "status": "not_found"}
-#     user.status = UserStatus.suspended
-#     user.updated_at = datetime.now(timezone.utc)
-#     db.add(user)
-#     await db.commit()
-#     await db.refresh(user)
-#     if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
-#         try:
-#             revoke_firebase_tokens(user.firebase_uid)
-#         except Exception:
-#             pass
-#     return {"id": payload.id, "status": "suspended"}
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Profile not found"
+        )
 
+    profile.first_name = payload.firstName
+    profile.last_name = payload.lastName
 
-async def admin_ban_user(payload: AdminUserActionRequest, db: AsyncSession) -> dict:
-    from core.auth.services import revoke_firebase_tokens
+    # Update photo if supplied
+    if payload.profile_photo_key:
 
-    user_uuid = _coerce_uuid(payload.id)
-    user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
-    if user is None:
-        return {"id": payload.id, "status": "not_found"}
-    user.status = UserStatus.banned
-    user.updated_at = datetime.now(timezone.utc)
-    db.add(user)
+        if not file_exists(payload.profile_photo_key):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="profile_photo_key does not reference an uploaded file"
+            )
+
+        profile.profile_photo_url = normalize_image_name(
+            payload.profile_photo_key
+        )
+
+    db.add(profile)
     await db.commit()
-    await db.refresh(user)
-    if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
-        try:
-            revoke_firebase_tokens(user.firebase_uid)
-        except Exception:
-            pass
-    return {"id": payload.id, "status": "banned"}
+    await db.refresh(profile)
 
+    stmt = (
+    select(User)
+    .options(selectinload(User.roles))
+    .where(User.id == user_id) )
+    user = (await db.execute(stmt)).scalar_one()
+    user_data = await build_user_base_response(user, profile, db)
+    return ApiResponse(
+        status=True,
+        message="Profile updated successfully",
+        data={
+            "user": user_data,
+            "emailSent": False,
+        },
+    )
 
-# async def admin_suspend_user(payload: AdminUserActionRequest, db: AsyncSession) -> dict:
-#     from core.auth.services import revoke_firebase_tokens
-#     user_uuid = _coerce_uuid(payload.id)
-#     user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
-#     if user is None:
-#         return {"id": payload.id, "status": "not_found"}
-#     user.status = UserStatus.suspended
-#     user.updated_at = datetime.now(timezone.utc)
-#     db.add(user)
-#     await db.commit()
-#     await db.refresh(user)
-#     if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
-#         try:
-#             revoke_firebase_tokens(user.firebase_uid)
-#         except Exception:
-#             pass
-#     return {"id": payload.id, "status": "suspended"}
+async def admin_update_user_status(
+    user_id: str,
+    status: AdminUserStatus,
+    db: AsyncSession
+) -> dict:
+    from core.auth.services import (
+        disable_firebase_user,
+        enable_firebase_user
+    )
 
+    user_uuid = _coerce_uuid(user_id)
 
-# async def admin_ban_user(payload: AdminUserActionRequest, db: AsyncSession) -> dict:
-#     from core.auth.services import revoke_firebase_tokens
-#     user_uuid = _coerce_uuid(payload.id)
-#     user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
-#     if user is None:
-#         return {"id": payload.id, "status": "not_found"}
-#     user.status = UserStatus.banned
-#     user.updated_at = datetime.now(timezone.utc)
-#     db.add(user)
-#     await db.commit()
-#     await db.refresh(user)
-#     if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
-#         try:
-#             revoke_firebase_tokens(user.firebase_uid)
-#         except Exception:
-#             pass
-#     return {"id": payload.id, "status": "banned"}
+    user = (
+        await db.execute(
+            select(User)
+            .options(selectinload(User.roles))
+            .where(User.id == user_uuid)
+        )
+    ).scalar_one_or_none()
 
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found"
+        )
+
+    # Check BEFORE updating
+    already_same_status = user.status == status
+
+    if not already_same_status:
+        user.status = status
+        user.updated_at = datetime.now(timezone.utc)
+
+        await db.commit()
+        await db.refresh(user)
+
+        firebase_error = None
+
+        if user.firebase_uid:
+            try:
+                if status == AdminUserStatus.active:
+                    enable_firebase_user(user.firebase_uid)
+                else:
+                    disable_firebase_user(user.firebase_uid)
+            except Exception as e:
+                firebase_error = str(e)
+    else:
+        firebase_error = None
+
+    profile = (
+        await db.execute(
+            select(Profile)
+            .where(Profile.user_id == user.id)
+        )
+    ).scalar_one_or_none()
+
+    response = {
+        "status": status.value,
+        "already_exists": already_same_status,
+        "user": await build_user_base_response(
+            user,
+            profile,
+            db
+        )
+    }
+
+    if firebase_error:
+        response["firebase_error"] = firebase_error
+
+    return response
 
 async def admin_forgot_password(payload: AdminForgotPasswordRequest, db: AsyncSession) -> ApiResponse:
     from core.email_service import send_reset_password_email
@@ -792,37 +752,66 @@ async def admin_forgot_password(payload: AdminForgotPasswordRequest, db: AsyncSe
 async def admin_reset_password(payload: AdminResetPasswordRequest, db: AsyncSession) -> ApiResponse:
     from apps.accounts.db_models import PasswordResetToken
     import uuid
+    now=datetime.now(timezone.utc)
 
-    try:
-        # Check if it is a valid UUID string
-        token_uuid = uuid.UUID(payload.token)
-    except ValueError:
-        return ApiResponse(status=False, message="Invalid token format", data=None)
+    if payload.token  :
+        try:
+            # Check if it is a valid UUID string
+            token_uuid = uuid.UUID(payload.token)
+        except ValueError:
+            return ApiResponse(status=False, message="Invalid token format", data=None)
 
-    stmt = select(PasswordResetToken).where(
-        PasswordResetToken.token == str(token_uuid),
-        PasswordResetToken.used_at == None
+        stmt = select(PasswordResetToken).where(
+            PasswordResetToken.token == str(token_uuid),
+            PasswordResetToken.used_at == None
+        )
+        reset_token = (await db.execute(stmt)).scalar_one_or_none()
+        if not reset_token:
+            return ApiResponse(status=False, message="Invalid reset password link", data=None)
+
+        now = datetime.now(timezone.utc)
+        if reset_token.expires_at.replace(tzinfo=timezone.utc) < now:
+            return ApiResponse(status=False, message="Your reset password link has expired.", data=None)
+
+        user = (await db.execute(select(User).options(selectinload(User.roles)).where(User.id == reset_token.user_id))).scalar_one_or_none()
+        if not user or user.role not in ("admin", "superadmin"):
+            return ApiResponse(status=False, message="User not found", data=None)
+
+        user.password_hash = PASSWORD_HASHER.hash(payload.new_password)
+        user.updated_at = now
+        db.add(user)
+
+        # Invalidate token
+        reset_token.used_at = now
+        db.add(reset_token)
+        await db.commit()
+
+        return ApiResponse(status=True, message="Password reset successful", data=None)
+
+async def change_password(
+    payload: ChangePasswordRequest,
+    current_user: User,
+    db: AsyncSession
+) -> ApiResponse:
+
+    if not current_user.password_hash or not PASSWORD_HASHER.verify(payload.current_password, current_user.password_hash):
+        return ApiResponse(
+            status=False,
+            message="existing password does not match",
+            data=None
+        )
+
+    current_user.password_hash = PASSWORD_HASHER.hash(
+        payload.new_password
     )
-    reset_token = (await db.execute(stmt)).scalar_one_or_none()
-    if not reset_token:
-        return ApiResponse(status=False, message="Invalid or expired token", data=None)
 
-    now = datetime.now(timezone.utc)
-    if reset_token.expires_at.replace(tzinfo=timezone.utc) < now:
-        return ApiResponse(status=False, message="Token expired", data=None)
+    current_user.updated_at = datetime.now(timezone.utc)
 
-    user = (await db.execute(select(User).options(selectinload(User.roles)).where(User.id == reset_token.user_id))).scalar_one_or_none()
-    if not user or user.role not in ("admin", "superadmin"):
-        return ApiResponse(status=False, message="User not found", data=None)
-
-    user.password_hash = PASSWORD_HASHER.hash(payload.new_password)
-    user.updated_at = now
-    db.add(user)
-
-    # Invalidate token
-    reset_token.used_at = now
-    db.add(reset_token)
     await db.commit()
 
-    return ApiResponse(status=True, message="Password reset successful", data=None)
+    return ApiResponse(
+        status=True,
+        message="Password updated successfully",
+        data=None
+    )
 

@@ -11,10 +11,20 @@ from .schemas import (
     ProfileUpdateRequest,
     ProfileVisibilityRequest,
     ReportUserRequest,
+    UpdateProfileMeRequest,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
 from common.enums import UserStatus, OnboardingStatus
+
+
+def _normalize_name_part(value: str | None) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _compose_full_name(first_name: str | None, last_name: str | None) -> str:
+    parts = [_normalize_name_part(first_name), _normalize_name_part(last_name)]
+    return " ".join(part for part in parts if part).strip()
 
 
 async def _resolve_academic_interest_ids(values: list[str | int], db: AsyncSession) -> list[int]:
@@ -88,13 +98,8 @@ async def build_user_base_response(
         except Exception:
             pass
 
-    first_name = ""
-    last_name = ""
-    display_name = profile.display_name if profile else ""
-    if display_name:
-        parts = display_name.split(" ", 1)
-        first_name = parts[0]
-        last_name = parts[1] if len(parts) > 1 else ""
+    first_name = profile.first_name if profile and profile.first_name else ""
+    last_name = profile.last_name if profile and profile.last_name else ""
 
     profile_visibility = "public"
     if profile and profile.profile_visibility:
@@ -157,7 +162,7 @@ async def get_profile_me(user: User, db: AsyncSession) -> dict:
     stmt = select(Profile).where(Profile.user_id == user.id)
     profile = (await db.execute(stmt)).scalar_one_or_none()
     if not profile:
-        profile = Profile(user_id=user.id, display_name="", completeness_score=0)
+        profile = Profile(user_id=user.id, first_name="", last_name="", completeness_score=0)
         db.add(profile)
         await db.commit()
         await db.refresh(profile)
@@ -165,51 +170,102 @@ async def get_profile_me(user: User, db: AsyncSession) -> dict:
     return {"user": user_data}
 
 
-async def update_profile_me(user: User, payload: ProfileUpdateRequest, db: AsyncSession) -> dict:
-    from apps.profiles.db_models.profile_db_model import Profile
+async def update_profile_me(
+    current_user: User,
+    payload: UpdateProfileMeRequest,
+    db: AsyncSession
+) -> dict:
+    from uuid import UUID
+    from fastapi import HTTPException, status
     from sqlmodel import select
+    from apps.profiles.db_models.profile_db_model import Profile
 
-    stmt = select(Profile).where(Profile.user_id == user.id)
-    profile = (await db.execute(stmt)).scalar_one_or_none()
+    stmt = select(Profile).where(
+        Profile.user_id == current_user.id
+    )
+
+    profile = (
+        await db.execute(stmt)
+    ).scalar_one_or_none()
+
     if not profile:
-        profile = Profile(user_id=user.id, display_name="", completeness_score=0)
+        profile = Profile(
+            user_id=current_user.id,
+            first_name="",
+            last_name="",
+            completeness_score=0
+        )
         db.add(profile)
         await db.flush()
 
-    profile_data = payload.model_dump(exclude_none=True)
-    if "bio" in profile_data:
-        profile.bio = profile_data["bio"]
-    if "major" in profile_data:
-        profile.major = profile_data["major"]
-    if "minor" in profile_data:
-        profile.minor = profile_data["minor"]
-    if "graduationDate" in profile_data:
-        profile.graduation_date = profile_data["graduationDate"]
-    if "welcomeMessage" in profile_data:
-        profile.welcome_message = profile_data["welcomeMessage"]
-    if "profilePhotoUrl" in profile_data:
-        uploaded_url = await upload_image_to_s3(profile_data["profilePhotoUrl"], prefix="profiles")
-        profile.profile_photo_url = normalize_image_name(uploaded_url)
-        profile_data["profilePhotoUrl"] = profile.profile_photo_url
-    if "bannerPhotoUrl" in profile_data:
-        uploaded_url = await upload_image_to_s3(profile_data["bannerPhotoUrl"], prefix="banners")
-        profile.banner_photo_url = normalize_image_name(uploaded_url)
-        profile_data["bannerPhotoUrl"] = profile.banner_photo_url
+    #
+    # Name
+    #
+    first_name = payload.firstName
+    last_name = payload.lastName
 
-    if "academicInterests" in profile_data and profile_data["academicInterests"] is not None:
-        profile.profile_interests_id = await _resolve_academic_interest_ids(profile_data["academicInterests"], db)
+    if first_name is not None or last_name is not None:
+        profile.first_name = first_name if first_name is not None else profile.first_name
+        profile.last_name = last_name if last_name is not None else profile.last_name
 
-    db.add(user)
+    #
+    # Bio
+    #
+    if payload.bio is not None:
+        profile.bio = payload.bio
+
+    #
+    # Major
+    #
+    if payload.major is not None:
+        profile.major = payload.major
+
+    #
+    # University
+    #
+    if payload.universityId is not None:
+        try:
+            profile.university_id = UUID(
+                payload.universityId
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid universityId"
+            )
+
+    current_user.onboarding_status = (
+        OnboardingStatus.completed
+    )
+
+    db.add(current_user)
     db.add(profile)
+
     await db.flush()
-    profile.completeness_score = await calculate_completeness_score(user.id, db)
+
+    profile.completeness_score = (
+        await calculate_completeness_score(
+            current_user.id,
+            db
+        )
+    )
+
     db.add(profile)
+
     await db.commit()
-    await db.refresh(user)
+
+    await db.refresh(current_user)
     await db.refresh(profile)
 
-    user_data = await build_user_base_response(user, profile, db)
-    return {"user": user_data}
+    user_data = await build_user_base_response(
+        current_user,
+        profile,
+        db
+    )
+
+    return {
+        "user": user_data
+    }
 
 
 async def delete_user_me(user: User, db: AsyncSession) -> dict:
@@ -277,7 +333,8 @@ async def complete_onboarding(
     if not profile:
         profile = Profile(
             user_id=user.id,
-            display_name="",
+            first_name="",
+            last_name="",
             completeness_score=0,
         )
     db.add(profile)
@@ -327,7 +384,7 @@ async def complete_onboarding(
     profile_data["bio"] = profile.bio
 
     if not profile:
-        profile = Profile(user_id=user.id, display_name="", completeness_score=0)
+        profile = Profile(user_id=user.id, first_name="", last_name="", completeness_score=0)
         db.add(profile)
         await db.flush()
     
@@ -485,7 +542,7 @@ async def update_profile_me_form(
     stmt = select(Profile).where(Profile.user_id == current_user.id)
     profile = (await db.execute(stmt)).scalar_one_or_none()
     if not profile:
-        profile = Profile(user_id=current_user.id, display_name="", completeness_score=0)
+        profile = Profile(user_id=current_user.id, first_name="", last_name="", completeness_score=0)
         db.add(profile)
         await db.flush()
 
@@ -596,11 +653,9 @@ async def calculate_completeness_score(user_id, db: AsyncSession) -> int:
     if profile.edu_level and profile.edu_level.strip():
         filled_fields.append(("edu_level", weights.edu_level))
 
-    display_name = profile.display_name or ""
-    parts = display_name.split(" ", 1) if display_name else []
-    if len(parts) > 0 and parts[0].strip():
+    if profile.first_name and profile.first_name.strip():
         filled_fields.append(("first_name", weights.first_name))
-    if len(parts) > 1 and parts[1].strip():
+    if profile.last_name and profile.last_name.strip():
         filled_fields.append(("last_name", weights.last_name))
 
     if user.email and user.email.strip():

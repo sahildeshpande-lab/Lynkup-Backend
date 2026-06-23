@@ -84,6 +84,8 @@ class LoginRequest(BaseModel):
 EmailLoginRequest = LoginRequest
 
 
+
+
 class OtpVerifyRequest(BaseModel):
     email: EmailStr
     otp: str
@@ -97,22 +99,7 @@ class ResendOtpRequest(BaseModel):
 
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
-    firebaseId: str
-
-
-class ResetPasswordRequest(BaseModel):
-    token: str
-    new_password: str = Field(min_length=8)
-    firebaseId: str
-
-    @field_validator("new_password")
-    @classmethod
-    def validate_password(cls, value: str) -> str:
-        if not any(char.isupper() for char in value):
-            raise ValueError("password must contain at least one uppercase letter")
-        if not any(char.isdigit() for char in value):
-            raise ValueError("password must contain at least one number")
-        return value
+    firebaseId: Optional[str] = None
 
 
 class RefreshTokenRequest(BaseModel):
@@ -120,8 +107,7 @@ class RefreshTokenRequest(BaseModel):
 
 
 class LogoutRequest(BaseModel):
-    accessToken: Optional[str] = None
-    refreshToken: Optional[str] = None
+    device_id: str = Field(min_length=1)
 
 
 class NotificationPreferences(BaseModel):
@@ -246,6 +232,10 @@ class AuthSessionResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class LogoutRequest(BaseModel):
+    firebaseId: str
+    device_id: str
+
 class RefreshSessionResponse(BaseModel):
     refreshToken: str
     user: UserBaseResponse
@@ -256,8 +246,28 @@ class PaginationParams(BaseModel):
     pageSize: int = 20
 
 
+class ResetPasswordRequest(BaseModel):
+    token: str | None = None
+    firebaseId: str | None = None
+    new_password: str
+
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
     expires_at: datetime | None = None
+
+class UserChangePasswordRequest(BaseModel):
+    firebaseId: str
+    current_password: str
+    new_password: str = Field(min_length=8)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        if not any(char.isupper() for char in value):
+            raise ValueError("password must contain at least one uppercase letter")
+        if not any(char.isdigit() for char in value):
+            raise ValueError("password must contain at least one number")
+        return value

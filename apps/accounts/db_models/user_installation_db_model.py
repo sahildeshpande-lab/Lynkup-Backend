@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, ForeignKey, Index, String
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, String, text
 from sqlmodel import Field, SQLModel
 
 
@@ -21,6 +21,7 @@ class UserInstallation(SQLModel, table=True):
     app_version: str | None = Field(default=None, sa_column=Column(String(64)))
     installed_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
     last_active_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
+    is_active: bool = Field(default=True, sa_column=Column(Boolean, nullable=False, server_default=text("true")))
 
     __table_args__ = (
         Index("ix_user_installations_user_id_device_id", "user_id", "device_id", unique=True),

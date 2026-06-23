@@ -242,7 +242,8 @@ async def test_export_users() -> None:
 
             profile1 = Profile(
                 user_id=user1.id,
-                display_name="Export One",
+                first_name="Export",
+                last_name="One",
                 completeness_score=10,
                 university_id=univ.id,
                 country_id=country.id,
@@ -259,7 +260,8 @@ async def test_export_users() -> None:
 
             profile2 = Profile(
                 user_id=user2.id,
-                display_name="Export Two",
+                first_name="Export",
+                last_name="Two",
                 completeness_score=20,
             )
             session.add(profile2)
@@ -373,7 +375,7 @@ async def test_admin_signin_success() -> None:
             await assign_user_role(session, user, "superadmin")
             await session.commit()
             
-            profile = Profile(user_id=user.id, display_name="Admin User")
+            profile = Profile(user_id=user.id, first_name="Admin", last_name="User")
             session.add(profile)
             await session.commit()
 

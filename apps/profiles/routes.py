@@ -13,6 +13,7 @@ from .schemas import (
     ProfileUpdateRequest,
     ProfileVisibilityRequest,
     ReportUserRequest,
+    UpdateProfileMeRequest,
 )
 from . import services
 
@@ -43,22 +44,21 @@ async def get_me_completeness(
 
 @router.patch("/users/me", response_model=ApiResponse)
 async def update_profile(
-    bio: str | None = Form(None),
-    academic_interests: str | None = Form(None),
-    profile_photo: UploadFile | None = File(None),
-    banner_photo: UploadFile | None = File(None),
+    payload: UpdateProfileMeRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    data = await services.update_profile_me_form(
+
+    data = await services.update_profile_me(
         current_user=current_user,
-        bio=bio,
-        academic_interests=academic_interests,
-        profile_photo=profile_photo,
-        banner_photo=banner_photo,
+        payload=payload,
         db=db
     )
-    return ApiResponse(message="profile updated", data=data)
+
+    return ApiResponse(
+        message="Profile updated successfully",
+        data=data
+    )
 
 
 @router.delete("/users/me/deletion", response_model=ApiResponse, dependencies=[Depends(require_recent_auth)])

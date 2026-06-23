@@ -17,3 +17,16 @@ def revoke_firebase_tokens(uid: str):
     """
     initialize_firebase_app()
     auth.revoke_refresh_tokens(uid)
+
+def disable_firebase_user(uid:str):
+    initialize_firebase_app()
+    auth.update_user(uid,disabled=True)
+    auth.revoke_refresh_tokens(uid)
+
+def enable_firebase_user(uid:str):
+    initialize_firebase_app()
+    auth.update_user(uid,disabled=False)
+
+def update_firebase_password(uid:str,password:str):
+    initialize_firebase_app()
+    auth.update_user(uid,password=password)

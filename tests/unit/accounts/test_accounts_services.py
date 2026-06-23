@@ -70,7 +70,8 @@ async def test_accounts_complete_firebase_registration() -> None:
             # Verify profile created
             profile = await _fetch_user_profile(session, user)
             assert profile is not None
-            assert profile.display_name == "New User"
+            assert profile.first_name == "New"
+            assert profile.last_name == "User"
 
             # 2. Test registration of the same user (existing user case)
             user_again = await complete_firebase_registration(firebase_user, session)

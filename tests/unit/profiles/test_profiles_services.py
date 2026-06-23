@@ -202,7 +202,7 @@ async def test_get_me_completeness(monkeypatch) -> None:
             await session.commit()
             await session.refresh(user)
             
-            profile = Profile(user_id=user.id, display_name="Test", completeness_score=75)
+            profile = Profile(user_id=user.id, first_name="Test", last_name="", completeness_score=75)
             session.add(profile)
             await session.commit()
 

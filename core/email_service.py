@@ -39,7 +39,7 @@ async def _log_transactional_email(to_email: str, subject: str, html_body: str, 
         async with async_session_factory() as session:
             log_entry = TransactionalEmailLog(
                 to=to_email,
-                from_email=from_email,
+                from_email=os.getenv("SENDGRID_FROM_EMAIL"),
                 body=html_body,
                 attachment=attachment,
                 purpose=purpose,
@@ -144,7 +144,7 @@ async def cron_send_emails() -> None:
                         to_email=email_log.to,
                         subject=email_log.subject,
                         html_body=email_log.body,
-                        from_email=email_log.from_email,
+                        from_email=os.getenv("SENDGRID_FROM_EMAIL"),
                     )
                     if success:
                         email_log.is_sent = True

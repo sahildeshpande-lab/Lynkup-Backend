@@ -5,7 +5,7 @@ from typing import Any, Optional, Literal
 
 from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
 
-from common.enums import Role
+from common.enums import Role,AdminUserStatus
 
 
 class ApiResponse(BaseModel):
@@ -31,6 +31,9 @@ class CamelModel(BaseModel):
 class AdminUserActionRequest(BaseModel):
     id: str
 
+
+class AdminUserStatusRequest(BaseModel):
+    status: AdminUserStatus
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -96,6 +99,28 @@ class AdminOnboardingRequest(BaseModel):
 
 class AdminForgotPasswordRequest(BaseModel):
     email: EmailStr
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        if not any(char.isupper() for char in value):
+            raise ValueError("password must contain at least one uppercase letter")
+        if not any(char.isdigit() for char in value):
+            raise ValueError("password must contain at least one number")
+        return value
+
+
+
+class AdminEditProfileRequest(BaseModel):
+    profile_photo_key: str | None = None
+    firstName: str
+    lastName: str
+
 
 
 class AdminResetPasswordRequest(BaseModel):

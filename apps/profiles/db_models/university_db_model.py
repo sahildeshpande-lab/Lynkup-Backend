@@ -16,7 +16,7 @@ class University(SQLModel, table=True):
     major: list[dict] | None = Field(default=None, sa_column=Column(JSON))
     minor: list[dict] | None = Field(default=None, sa_column=Column(JSON))
     academic_program: list[dict] | None = Field(default=None, sa_column=Column(JSON))
-    is_active: bool = Field(default=True, nullable=False)
+    is_active: bool = Field(default=True, nullable=False, index=True)
 
     __table_args__ = (
         Index("ix_universities_name_trgm", "name", postgresql_using="gin", postgresql_ops={"name": "gin_trgm_ops"}),

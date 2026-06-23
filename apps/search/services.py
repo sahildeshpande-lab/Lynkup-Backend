@@ -21,8 +21,8 @@ async def search_universities(params: UniversitySearchParams, db: AsyncSession) 
             search_terms = [normalized_query]
 
         from sqlalchemy import and_
-        conditions = [func.lower(University.name).like(f"%{term}%") for term in search_terms]
-        similarity_score = func.similarity(func.lower(University.name), normalized_query)
+        conditions = [University.name.ilike(f"%{term}%") for term in search_terms]
+        similarity_score = func.similarity(University.name, normalized_query)
 
         count_stmt = (
             select(func.count())
@@ -77,7 +77,11 @@ async def get_academic_interests(
         clean_query = query.strip()
         if clean_query:
             count_stmt = count_stmt.where(AcademicInterest.name.ilike(f"%{clean_query}%"))
-            stmt = stmt.where(AcademicInterest.name.ilike(f"%{clean_query}%"))
+            similarity_score = func.similarity(AcademicInterest.name, clean_query)
+            stmt = select(AcademicInterest).where(
+                AcademicInterest.is_active == True,
+                AcademicInterest.name.ilike(f"%{clean_query}%")
+            ).order_by(similarity_score.desc(), AcademicInterest.name.asc())
 
     # Execute count query
     total_items = int((await db.execute(count_stmt)).scalar_one())

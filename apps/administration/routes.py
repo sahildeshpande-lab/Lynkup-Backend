@@ -12,9 +12,12 @@ from apps.accounts.db_models import User
 from . import services
 from .schemas import (
     AdminUserActionRequest,
+    AdminEditProfileRequest,
+    AdminUserStatusRequest,
     ApiResponse,
     AdminSignupRequest,
     AdminLoginRequest,
+    ChangePasswordRequest,
     AdminForgotPasswordRequest,
     AdminResetPasswordRequest,
 )
@@ -66,6 +69,16 @@ async def admin_signin(
 ) -> AdminAuthResponse:
     return await services.admin_signin(payload, db)
 
+@router.get("/me",response_model=ApiResponse)
+async def admin_me(
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
+):
+    return await services.admin_me(
+        current_user,
+        db
+    )
+
 
 @router.post("/auth/admin/token", response_model=ApiResponse)
 async def admin_token(payload: RefreshTokenRequest, db: AsyncSession = Depends(get_session)) -> ApiResponse:
@@ -87,6 +100,18 @@ async def reset_password(
 ) -> ApiResponse:
     return await services.admin_reset_password(payload, db)
 
+
+@router.post("/change-password")
+async def change_password(
+    payload: ChangePasswordRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+):
+    return await services.change_password(
+        payload,
+        current_user,
+        db
+    )
 
 @router.get("/users", response_model=ApiResponse)
 async def list_users(
@@ -140,26 +165,37 @@ async def delete_user_by_admin(
     return ApiResponse(message="user deletion scheduled", data=await services.admin_delete_user(userId, db))
 
 
-# @router.post("/users/{userId:uuid}/suspend", response_model=ApiResponse)
-# async def suspend_user_by_admin(
-#     userId: UUID,
-#     payload: AdminUserActionRequest,
-#     db: AsyncSession = Depends(get_session),
-#     current_user=Depends(get_current_superadmin),
-# ) -> ApiResponse:
-#     _ = userId
-#     return ApiResponse(message="user suspended by admin", data=await services.admin_suspend_user(payload, db))
+@router.patch("/users/{userId}/status", response_model=ApiResponse)
+async def update_user_status_by_admin(
+    userId: UUID,
+    payload: AdminUserStatusRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+) -> ApiResponse:
+    return ApiResponse(
+        message=f"user {payload.status.value} by admin",
+        data=await services.admin_update_user_status(
+            str(userId),
+            payload.status,
+            db
+        )
+    )
 
+@router.patch(
+    "/update-profile",
+    response_model=ApiResponse
+)
+async def edit_profile(
+    payload: AdminEditProfileRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_admin),
+):
+    return await services.admin_edit_profile(
+        current_user.id,
+        payload,
+        db,
+    )
 
-# @router.post("/users/{userId:uuid}/ban", response_model=ApiResponse)
-# async def ban_user_by_admin(
-#     userId: UUID,
-#     payload: AdminUserActionRequest,
-#     db: AsyncSession = Depends(get_session),
-#     current_user=Depends(get_current_superadmin),
-# ) -> ApiResponse:
-#     _ = userId
-#     return ApiResponse(message="user banned by admin", data=await services.admin_ban_user(payload, db))
 
 
 
