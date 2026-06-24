@@ -24,7 +24,7 @@ from apps.accounts.db_models import RefreshToken, SecurityEvent, SecurityEventTy
 from apps.profiles.db_models import Profile
 from common.enums import OnboardingStatus, RegistrationType, UserStatus
 from core.auth.config import settings as auth_settings
-from core.email_service import send_otp_email, send_verification_success_email, build_email_verified_success_html , send_reset_password_email
+from core.email_service import send_otp_email, send_verification_success_email, build_email_verified_success_html , send_reset_password_email 
  
 from .schemas import (
     ApiResponse,
@@ -45,7 +45,7 @@ from .schemas import (
     ForgotPasswordRequest,
     UserChangePasswordRequest,
 )
-from core.auth.services import update_firebase_password
+from core.auth.services import update_firebase_password , revoke_firebase_tokens , verify_firebase_token
 
 logger = logging.getLogger(__name__)
 
@@ -890,45 +890,45 @@ def _build_user_base(refresh_token: str) -> UserBaseResponse:
     )
 
 
-async def refresh_token(payload: RefreshTokenRequest, db: AsyncSession) -> dict:
-    try:
-        decoded = jwt.decode(payload.refreshToken, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except jwt.ExpiredSignatureError as exc:
-        from fastapi import HTTPException, status
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired") from exc
-    except jwt.InvalidTokenError as exc:
-        from fastapi import HTTPException, status
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token") from exc
+# async def refresh_token(payload: RefreshTokenRequest, db: AsyncSession) -> dict:
+#     try:
+#         decoded = jwt.decode(payload.refreshToken, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+#     except jwt.ExpiredSignatureError as exc:
+#         from fastapi import HTTPException, status
+#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired") from exc
+#     except jwt.InvalidTokenError as exc:
+#         from fastapi import HTTPException, status
+#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token") from exc
 
-    user_id = decoded.get("sub")
-    if not user_id or decoded.get("type") not in (None, "refresh"):
-        from fastapi import HTTPException, status
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+#     user_id = decoded.get("sub")
+#     if not user_id or decoded.get("type") not in (None, "refresh"):
+#         from fastapi import HTTPException, status
+#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
 
-    token_hash = _hash_token(payload.refreshToken)
-    token_stmt = select(RefreshToken).where(RefreshToken.token_hash == token_hash)
-    token_row = (await db.execute(token_stmt)).scalar_one_or_none()
-    if not token_row or token_row.revoked_at is not None:
-        from fastapi import HTTPException, status
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token revoked or not found")
-    if token_row.expires_at and token_row.expires_at <= _now():
-        from fastapi import HTTPException, status
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired")
+#     token_hash = _hash_token(payload.refreshToken)
+#     token_stmt = select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+#     token_row = (await db.execute(token_stmt)).scalar_one_or_none()
+#     if not token_row or token_row.revoked_at is not None:
+#         from fastapi import HTTPException, status
+#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token revoked or not found")
+#     if token_row.expires_at and token_row.expires_at <= _now():
+#         from fastapi import HTTPException, status
+#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired")
 
-    stmt = select(User).options(selectinload(User.roles)).where(User.id == user_id)
-    user = (await db.execute(stmt)).scalar_one_or_none()
-    if user is None:
-        from fastapi import HTTPException, status
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+#     stmt = select(User).options(selectinload(User.roles)).where(User.id == user_id)
+#     user = (await db.execute(stmt)).scalar_one_or_none()
+#     if user is None:
+#         from fastapi import HTTPException, status
+#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
-    access_token, _refresh_token = _generate_tokens(user)
-    new_refresh_token = jwt.encode(_refresh_token_payload(user), JWT_SECRET, algorithm=JWT_ALGORITHM)
-    await _revoke_refresh_token_row(db, token_row)
-    await _store_refresh_token(db, user, new_refresh_token)
-    await db.commit()
-    return {"access_token": access_token, "refresh_token": new_refresh_token, "token_type": "bearer"}
+#     access_token, _refresh_token = _generate_tokens(user)
+#     new_refresh_token = jwt.encode(_refresh_token_payload(user), JWT_SECRET, algorithm=JWT_ALGORITHM)
+#     await _revoke_refresh_token_row(db, token_row)
+#     await _store_refresh_token(db, user, new_refresh_token)
+#     await db.commit()
+#     return {"access_token": access_token, "refresh_token": new_refresh_token, "token_type": "bearer"}
 
-from firebase_admin import auth
+
 
 async def logout(
     payload: LogoutRequest,
@@ -992,7 +992,7 @@ async def logout(
 
     if firebase_uid:
         try:
-            auth.revoke_refresh_tokens(firebase_uid)
+            revoke_firebase_tokens(firebase_uid)
         except Exception as exc:
             logger.exception(
                 "Firebase token revocation failed during logout for user %s",
@@ -1432,12 +1432,11 @@ async def reset_password(payload: ResetPasswordRequest,  db: AsyncSession    ) -
 
 
 async def change_password(payload: UserChangePasswordRequest, db: AsyncSession) -> ApiResponse:
-    from firebase_admin import auth
+    
     
     try:
-        decoded_token = auth.verify_id_token(payload.firebaseId)
+        decoded_token = verify_firebase_token(payload.firebaseId)
     except Exception as e:
-        logger.error(f"Failed to verify firebase token: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid firebase token"

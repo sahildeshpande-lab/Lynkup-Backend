@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Optional
+from typing import Any, Optional, Literal
 
 from pydantic import BaseModel, Field
 
@@ -27,7 +27,11 @@ class ProfileUpdateRequest(BaseModel):
 
 
 class ProfileVisibilityRequest(BaseModel):
-    profileVisibility: str = Field(pattern="^(public|connections_only|private)$")
+    profileVisibility: Literal[
+        "public",
+        "connection_only",
+        "private"
+    ]
 
 
 class ReportUserRequest(BaseModel):
@@ -64,4 +68,14 @@ class UpdateProfileMeRequest(BaseModel):
     lastName: str | None = None
     universityId: str | None = None
     major: str | None = None
+    bio: str | None = None
+
+
+class UpdateProfileRequest(BaseModel):
+    firstName: str | None = None
+    lastName: str | None = None
+    major: str | None = None
+    minor: str | None = None
+    profilePhotoKey: str | None = None
+    bannerPhotoKey: str | None = None
     bio: str | None = None

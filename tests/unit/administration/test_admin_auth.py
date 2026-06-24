@@ -8,17 +8,8 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-<<<<<<< HEAD
-from core.security.admin import (
-    router as admin_router,
-    get_current_admin_user,
-    _csrf_store,
-)
 from core.database.session import get_session
-=======
->>>>>>> 5038703 (Test cases)
 from apps.accounts.db_models import User
-from core.db.session import get_session
 from core.security.admin import _csrf_store, get_current_admin_user, router as admin_router
 
 

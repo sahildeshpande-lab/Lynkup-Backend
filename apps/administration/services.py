@@ -596,28 +596,33 @@ async def admin_edit_profile(
     profile.first_name = payload.firstName
     profile.last_name = payload.lastName
 
-    # Update photo if supplied
-    if payload.profile_photo_key:
+    photo_key = payload.profilePhotoKey or payload.profile_photo_key
 
-        if not file_exists(payload.profile_photo_key):
+    # Update photo if supplied
+    if photo_key:
+
+        if not file_exists(photo_key):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="profile_photo_key does not reference an uploaded file"
             )
 
         profile.profile_photo_url = normalize_image_name(
-            payload.profile_photo_key
+            photo_key
         )
 
     db.add(profile)
+
+    stmt = (
+        select(User)
+        .options(selectinload(User.roles))
+        .where(User.id == user_id)
+    )
+    user = (await db.execute(stmt)).scalar_one()
+
     await db.commit()
     await db.refresh(profile)
 
-    stmt = (
-    select(User)
-    .options(selectinload(User.roles))
-    .where(User.id == user_id) )
-    user = (await db.execute(stmt)).scalar_one()
     user_data = await build_user_base_response(user, profile, db)
     return ApiResponse(
         status=True,

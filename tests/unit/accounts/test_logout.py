@@ -9,7 +9,7 @@ from apps.accounts.schemas import LogoutRequest
 
 
 @pytest.mark.asyncio
-async def test_logout_deactivates_current_installation(db_scalar_result, db_scalars_result):
+async def test_logout_deactivates_current_installation(db_scalar_result, db_scalars_result, monkeypatch):
     from apps.accounts.services import logout
 
     user = MagicMock()
@@ -22,6 +22,7 @@ async def test_logout_deactivates_current_installation(db_scalar_result, db_scal
     mock_db = AsyncMock()
     mock_db.execute = AsyncMock(
         side_effect=[
+            db_scalar_result(user),
             db_scalar_result(installation),
             db_scalars_result([]),
         ]
@@ -29,7 +30,13 @@ async def test_logout_deactivates_current_installation(db_scalar_result, db_scal
     mock_db.add = MagicMock()
     mock_db.commit = AsyncMock()
 
-    result = await logout(LogoutRequest(device_id="device-123"), mock_db, user)
+    monkeypatch.setattr("apps.accounts.services.revoke_firebase_tokens", lambda *args, **kwargs: None)
+
+    result = await logout(
+        LogoutRequest(firebaseId="firebase-token", device_id="device-123"),
+        {"uid": str(user.id)},
+        mock_db,
+    )
 
     assert result is None
     assert installation.is_active is False

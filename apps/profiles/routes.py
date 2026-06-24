@@ -14,6 +14,7 @@ from .schemas import (
     ProfileVisibilityRequest,
     ReportUserRequest,
     UpdateProfileMeRequest,
+    UpdateProfileRequest,
 )
 from . import services
 
@@ -26,31 +27,34 @@ def _require_bearer_token(token: str | None = Depends(get_bearer_token)) -> str:
     return token
 
 
-@router.get("/users/me", response_model=ApiResponse)
-async def get_me(
+@router.get("/myprofile", response_model=ApiResponse)
+async def get_my_profile(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    return ApiResponse(message="current user fetched", data=await services.get_profile_me(current_user, db))
+    return ApiResponse(
+        message="Profile retrieved successfully",
+        data=await services.get_my_profile_service(current_user, db)
+    )
 
 
 @router.get("/users/me/completeness", response_model=ApiResponse)
 async def get_me_completeness(
-    token: str = Depends(_require_bearer_token),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    return ApiResponse(message="profile completeness fetched", data=await services.get_me_completeness(token, db))
+    return ApiResponse(message="profile completeness fetched", data=await services.get_me_completeness(current_user.id, db))
 
 
-@router.patch("/users/me", response_model=ApiResponse)
+@router.patch("/updateprofile", response_model=ApiResponse)
 async def update_profile(
-    payload: UpdateProfileMeRequest,
+    payload: UpdateProfileRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
 
-    data = await services.update_profile_me(
-        current_user=current_user,
+    data = await services.update_my_profile_service(
+        user=current_user,
         payload=payload,
         db=db
     )
@@ -92,9 +96,18 @@ async def complete_onboarding(
     return ApiResponse(message="onboarding completed", data=data)
 
 
-@router.patch("/users/me/visibility", response_model=ApiResponse)
-def set_visibility(payload: ProfileVisibilityRequest) -> ApiResponse:
-    return ApiResponse(message="profile visibility updated", data=services.update_visibility(payload))
+@router.patch("/profilevisibility", response_model=ApiResponse)
+async def update_profile_visibility(
+    payload: ProfileVisibilityRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    data = await services.update_profile_visibility_service(
+        user=current_user,
+        payload=payload,
+        db=db
+    )
+    return ApiResponse(message="profile visibility updated", data=data)
 
 
 @router.get("/users/{email}", response_model=ApiResponse)

@@ -76,10 +76,10 @@ async def social_auth(
             content={
                 "success": False,
                 "error_code": "ACCOUNT_EXISTS",
-                "message": (
+                "message":
                     "Account already exists. Please login "
                     "using your registered method."
-                ),
+                ,
                 "registration_type": exc.registration_type,
             },
         )

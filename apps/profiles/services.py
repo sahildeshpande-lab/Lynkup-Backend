@@ -12,6 +12,7 @@ from .schemas import (
     ProfileVisibilityRequest,
     ReportUserRequest,
     UpdateProfileMeRequest,
+    UpdateProfileRequest,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
@@ -146,12 +147,7 @@ async def build_user_base_response(
         "createdAt": user.created_at.isoformat() if user.created_at else None,
         "updatedAt": user.updated_at.isoformat() if user.updated_at else None,
         "is_onboarding_completed": user.onboarding_status == OnboardingStatus.completed if hasattr(user, "onboarding_status") else False,
-        "is_deleted": user.is_deleted,
-        "connectedUserIds": [],
-        "followingUserIds": [],
-        "blockedUserIds": [],
-        "reportedUserIds": [],
-        "lynkupRequestUserIds": []
+        "is_deleted": user.is_deleted
     }
 
 
@@ -469,21 +465,11 @@ def get_me(token: str) -> dict:
     return {"user": user.model_dump()}
 
 
-async def get_me_completeness(token: str, db: AsyncSession) -> dict:
-    import jwt
-    from core.auth.config import settings as auth_settings
+async def get_me_completeness(user_id: UUID, db: AsyncSession) -> dict:
     from sqlmodel import select
     from apps.profiles.db_models import Profile
-    from uuid import UUID
-    from fastapi import HTTPException, status
 
-    try:
-        decoded = jwt.decode(token, auth_settings.jwt_secret, algorithms=[auth_settings.jwt_algorithm])
-        user_id = decoded.get("sub")
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token") from exc
-
-    stmt = select(Profile).where(Profile.user_id == UUID(user_id))
+    stmt = select(Profile).where(Profile.user_id == user_id)
     profile = (await db.execute(stmt)).scalar_one_or_none()
     score = profile.completeness_score if profile else 0
     return {"completeness_score": score}
@@ -714,3 +700,112 @@ async def update_completeness_weights(payload, db: AsyncSession) -> dict:
             for k in ["bio", "university", "major", "edu_level", "first_name", "last_name", "email", "profile_photo_url", "interests", "graduation_date", "location"]
         }
     }
+
+
+async def get_my_profile_service(user: User, db: AsyncSession) -> dict:
+    from apps.profiles.db_models.profile_db_model import Profile
+    from sqlmodel import select
+    from core.images import generate_download_url
+
+    stmt = select(Profile).where(Profile.user_id == user.id)
+    profile = (await db.execute(stmt)).scalar_one_or_none()
+    
+    first_name = profile.first_name if profile else ""
+    last_name = profile.last_name if profile else ""
+    major = profile.major if profile else ""
+    minor = profile.minor if profile else ""
+    bio = profile.bio if profile else ""
+    profile_photo_key = profile.profile_photo_url if profile else ""
+    banner_photo_key = profile.banner_photo_url if profile else ""
+    
+    profile_visibility = "public"
+    if profile and profile.profile_visibility:
+        profile_visibility = profile.profile_visibility.value if hasattr(profile.profile_visibility, "value") else str(profile.profile_visibility)
+    
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "firstName": first_name,
+        "lastName": last_name,
+        "major": major,
+        "minor": minor,
+        "bio": bio,
+        "profilePhotoKey": profile_photo_key,
+        "bannerPhotoKey": banner_photo_key,
+        "profileVisibility": profile_visibility,
+        "profilePhotoUrl": generate_download_url(profile_photo_key) if profile_photo_key else None,
+        "bannerPhotoUrl": generate_download_url(banner_photo_key) if banner_photo_key else None,
+    }
+
+
+async def update_my_profile_service(user: User, payload: UpdateProfileRequest, db: AsyncSession) -> dict:
+    from apps.profiles.db_models.profile_db_model import Profile
+    from sqlmodel import select
+    from core.images import file_exists, normalize_image_name
+    from fastapi import HTTPException
+
+    stmt = select(Profile).where(Profile.user_id == user.id)
+    profile = (await db.execute(stmt)).scalar_one_or_none()
+    if not profile:
+        profile = Profile(user_id=user.id, first_name="", last_name="", completeness_score=0)
+        db.add(profile)
+        await db.flush()
+
+    if payload.firstName is not None:
+        profile.first_name = payload.firstName
+    if payload.lastName is not None:
+        profile.last_name = payload.lastName
+    if payload.major is not None:
+        profile.major = payload.major
+    if payload.minor is not None:
+        profile.minor = payload.minor
+    if payload.bio is not None:
+        profile.bio = payload.bio
+        
+    if payload.profilePhotoKey is not None:
+        if payload.profilePhotoKey:
+            if not file_exists(payload.profilePhotoKey):
+                raise HTTPException(status_code=400, detail="profilePhotoKey does not reference an uploaded file")
+            profile.profile_photo_url = normalize_image_name(payload.profilePhotoKey)
+        else:
+            profile.profile_photo_url = None
+            
+    if payload.bannerPhotoKey is not None:
+        if payload.bannerPhotoKey:
+            if not file_exists(payload.bannerPhotoKey):
+                raise HTTPException(status_code=400, detail="bannerPhotoKey does not reference an uploaded file")
+            profile.banner_photo_url = normalize_image_name(payload.bannerPhotoKey)
+        else:
+            profile.banner_photo_url = None
+
+    db.add(profile)
+    await db.commit()
+    await db.refresh(profile)
+
+    return await get_my_profile_service(user, db)
+
+
+async def update_profile_visibility_service(user: User, payload: ProfileVisibilityRequest, db: AsyncSession) -> dict:
+    from apps.profiles.db_models.profile_db_model import Profile
+    from sqlmodel import select
+    from common.enums import ProfileVisibility
+
+    stmt = select(Profile).where(Profile.user_id == user.id)
+    profile = (await db.execute(stmt)).scalar_one_or_none()
+    if not profile:
+        profile = Profile(user_id=user.id, first_name="", last_name="", completeness_score=0)
+        db.add(profile)
+        await db.flush()
+
+    try:
+        profile.profile_visibility = ProfileVisibility(payload.profileVisibility)
+    except ValueError:
+        profile.profile_visibility = ProfileVisibility.public
+
+    db.add(profile)
+    await db.commit()
+    await db.refresh(profile)
+
+    return await get_my_profile_service(user, db)
+
+

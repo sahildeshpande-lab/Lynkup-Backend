@@ -20,6 +20,7 @@ from apps.profiles.schemas import (
     ProfileVisibilityRequest,
     ReportUserRequest,
     CompletenessWeightsUpdateRequest,
+    UpdateProfileMeRequest,
 )
 from core.auth.config import settings as auth_settings
 
@@ -103,22 +104,17 @@ async def test_profiles_get_and_update_me(monkeypatch) -> None:
         async with async_session_factory() as session:
             # We must query the user in the session
             db_user = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
-            payload = ProfileUpdateRequest(
-                bio="New Bio Info",
+            payload = UpdateProfileMeRequest(
+                firstName="New",
+                lastName="User",
                 major="Biology",
-                minor="Chemistry",
-                academicInterests=["Bio101", "Chem201"],
-                profilePhotoUrl="dummy_photo_url",
-                bannerPhotoUrl="dummy_banner_url",
-                graduationDate=date(2028, 5, 15),
-                welcomeMessage="Welcome!",
+                bio="New Bio Info",
             )
             res_up = await update_profile_me(db_user, payload, session)
             assert res_up["user"]["bio"] == "New Bio Info"
+            assert res_up["user"]["firstName"] == "New"
+            assert res_up["user"]["lastName"] == "User"
             assert res_up["user"]["major"] == "Biology"
-            assert "Bio101" in res_up["user"]["academicInterests"]
-            assert res_up["user"]["graduationDate"] == "2028-05-15"
-            assert res_up["user"]["welcomeMessage"] == "Welcome!"
 
         # 3. delete_user_me
         async with async_session_factory() as session:
@@ -179,11 +175,12 @@ async def test_profiles_complete_onboarding(monkeypatch) -> None:
                 education_level_id=2,
                 academic_interests=["Math", "Physics"],
                 profile_photo_key="profiles/test.png",
+                banner_photo_key=None,
                 db=session,
             )
             assert res["user"]["id"] == str(user.id)
             assert res["user"]["major"] == "Physics"
-            assert res["user"]["educationLevel"] == EducationLevel.masters
+            assert res["user"]["educationLevel"] == EducationLevel.masters.value
     finally:
         await engine.dispose()
 

@@ -153,11 +153,6 @@ class AuthUserResponse(BaseModel):
     updatedAt: datetime | None = None
     is_onboarding_completed: bool = False
     is_deleted: bool = False
-    connectedUserIds: list[str] = Field(default_factory=list)
-    followingUserIds: list[str] = Field(default_factory=list)
-    blockedUserIds: list[str] = Field(default_factory=list)
-    reportedUserIds: list[str] = Field(default_factory=list)
-    lynkupRequestUserIds: list[str] = Field(default_factory=list)
 
 
 class UserBaseResponse(BaseModel):
@@ -197,11 +192,6 @@ class UserBaseResponse(BaseModel):
     updatedAt: datetime | None = None
     is_onboarding_completed: bool = False
     is_deleted: bool = False
-    connectedUserIds: list[str] = Field(default_factory=list)
-    followingUserIds: list[str] = Field(default_factory=list)
-    blockedUserIds: list[str] = Field(default_factory=list)
-    reportedUserIds: list[str] = Field(default_factory=list)
-    lynkupRequestUserIds: list[str] = Field(default_factory=list)
 
 
 class UserAuthSessionResponse(BaseModel):

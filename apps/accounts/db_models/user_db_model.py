@@ -64,6 +64,7 @@ class User(SQLModel, table=True):
     is_deleted: bool = Field(default=False, sa_column=Column(Boolean, server_default=text("false"), nullable=False))
     last_login_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
 
+
     roles: List[UserRole] = Relationship(
         sa_relationship=relationship("UserRole", back_populates="user", cascade="all, delete-orphan", lazy="selectin")
     )

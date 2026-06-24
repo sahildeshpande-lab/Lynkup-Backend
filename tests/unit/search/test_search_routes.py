@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from apps.accounts.db_models import User
 from apps.search import routes as search_routes
+from core.database.session import get_session
 from core.security.auth import get_current_user
 from entrypoints.api import app
 
@@ -13,12 +14,30 @@ async def _override_current_user():
     return User(email="jane@example.com", role="user", firebase_uid="test-uid")
 
 
+class _NoopSession:
+    async def execute(self, *_args, **_kwargs):
+        raise AssertionError("db session should not be used in this route test")
+
+    def add(self, *_args, **_kwargs):
+        return None
+
+    async def commit(self):
+        return None
+
+    async def refresh(self, *_args, **_kwargs):
+        return None
+
+
 def setup_module() -> None:
     app.dependency_overrides[get_current_user] = _override_current_user
+    async def _override_session():
+        yield _NoopSession()
+    app.dependency_overrides[get_session] = _override_session
 
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_current_user, None)
+    app.dependency_overrides.pop(get_session, None)
 
 
 async def _search_universities(_params, _db) -> dict:

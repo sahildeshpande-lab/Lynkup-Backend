@@ -15,6 +15,7 @@ AUTH_TAG = "1] User Registration, Authentication & Onboarding"
 USER_TAG = "2] User Management"
 DISCOVERY_TAG = "3] Search & Discovery"
 ADMIN_TAG = "4] Admin Management"
+CONNECTION_TAG = "5] Connection Managements" 
 
 
 app = FastAPI(
@@ -37,6 +38,10 @@ app = FastAPI(
         {
             "name": ADMIN_TAG,
             "description": "Admin-only authentication and user management APIs.",
+        },
+        {
+            "name": CONNECTION_TAG,
+            "description": "API for Lynkup , follow and Block user.",
         },
     ],
 )

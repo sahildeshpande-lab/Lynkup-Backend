@@ -118,6 +118,7 @@ class ChangePasswordRequest(BaseModel):
 
 class AdminEditProfileRequest(BaseModel):
     profile_photo_key: str | None = None
+    profilePhotoKey: str | None = None
     firstName: str
     lastName: str
 

@@ -32,11 +32,11 @@ from apps.administration.services import (
     admin_create_user,
     admin_get_user,
     admin_delete_user,
-    admin_suspend_user,
-    admin_ban_user,
+    admin_update_user_status,
     PASSWORD_HASHER,
     _generate_admin_tokens,
 )
+from common.enums import AdminUserStatus
 from apps.accounts.services import JWT_SECRET, JWT_ALGORITHM, _generate_tokens
 
 
@@ -341,14 +341,12 @@ async def test_admin_actions(monkeypatch) -> None:
             
         # Test suspend user
         async with async_session_factory() as session:
-            payload = AdminUserActionRequest(id=str(user.id))
-            sus_res = await admin_suspend_user(payload, session)
+            sus_res = await admin_update_user_status(str(user.id), AdminUserStatus.suspended, session)
             assert sus_res["status"] == "suspended"
             
         # Test ban user
         async with async_session_factory() as session:
-            payload = AdminUserActionRequest(id=str(user.id))
-            ban_res = await admin_ban_user(payload, session)
+            ban_res = await admin_update_user_status(str(user.id), AdminUserStatus.banned, session)
             assert ban_res["status"] == "banned"
             
     finally:
