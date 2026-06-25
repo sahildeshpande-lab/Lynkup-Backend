@@ -126,7 +126,7 @@ async def get_current_admin(
             detail="Account is not active",
         )
 
-    if user.role not in ("admin", "superadmin"):
+    if user.role in ("user"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Insufficient permissions",
@@ -138,7 +138,7 @@ async def get_current_admin(
 async def get_current_superadmin(
     user: User = Depends(get_current_admin),
 ) -> User:
-    if user.role != "superadmin":
+    if user.role == "user":
         raise HTTPException(
             status_code=403,
             detail="Insufficient permissions"

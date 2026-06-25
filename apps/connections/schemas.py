@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from common.enums import LynkupResponse
+
 T = TypeVar("T")
 
 
@@ -16,12 +18,20 @@ class ApiResponse(BaseModel):
 
 
 class ConnectionRequestCreate(BaseModel):
-    receiver_user_id: UUID
+    receiver_user_id: str
 
 
 class ConnectionRequestRespond(BaseModel):
-    request_id: UUID
-    response: str = Field(..., description="Must be 'accepted' or 'declined'")
+    receiver_user_id: str
+    response: LynkupResponse
+
+
+class FollowRequest(BaseModel):
+    following_user_id: str
+
+
+class BlockRequest(BaseModel):
+    blocked_user_id: str
 
 
 # Response Schemas for serialization
@@ -73,7 +83,7 @@ class RecommendedUserResponse(BaseModel):
     score: float
     first_name: str | None = None
     last_name: str | None = None
-    university_id: UUID | None = None
+    university: str | None = None
     major: str | None = None
     minor: str | None = None
     edu_level: str | None = None

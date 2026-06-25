@@ -741,7 +741,10 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
         otp = _generate_otp()
         user.email_otp = otp
         user.email_otp_created_at = now
-        user.status = UserStatus.pending
+        # Only demote to pending when the email itself is not yet verified.
+        # A new-device OTP for an already-verified user should not touch their status.
+        if user.email_verified_at is None:
+            user.status = UserStatus.pending
         user.updated_at = now
         db.add(user)
 
@@ -824,7 +827,7 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
         # Send a verification success email using existing account_created_email template
         from core.email_service import send_verification_success_email
         await send_verification_success_email(user.email, full_name)
-        return ApiResponse(status=True, message="Email verified successfully", data=None)
+        return ApiResponse(status=True, message="OTP successfully verified", data=None)
 
     return ApiResponse(status=False, message="Email not verified in Firebase yet", data=None)
 
@@ -1010,7 +1013,6 @@ async def logout_all(current_user: User, db: AsyncSession) -> dict:
     for row in rows:
         await _revoke_refresh_token_row(db, row)
         
-    current_user.status = UserStatus.pending
     current_user.updated_at = _now()
     db.add(current_user)
     await db.commit()

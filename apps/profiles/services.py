@@ -16,7 +16,7 @@ from .schemas import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
-from common.enums import UserStatus, OnboardingStatus
+from common.enums import UserStatus, OnboardingStatus, EducationLevel
 
 
 def _normalize_name_part(value: str | None) -> str:
@@ -72,16 +72,22 @@ async def build_user_base_response(
     from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
     from sqlmodel import select
 
+    interest_details: list[dict] = []
     if interests is None:
         interests = []
         if profile and profile.profile_interests_id:
             try:
                 id_list = [int(u) for u in profile.profile_interests_id if u is not None]
                 if id_list:
-                    stmt = select(AcademicInterest.name).where(AcademicInterest.id.in_(id_list))
-                    interests = list((await db.execute(stmt)).scalars().all())
+                    stmt = select(AcademicInterest.id, AcademicInterest.name).where(AcademicInterest.id.in_(id_list))
+                    rows = (await db.execute(stmt)).all()
+                    interests = [row.name for row in rows]
+                    interest_details = [row.id for row in rows]
             except Exception:
                 pass
+    else:
+        # interests were passed in as names — details stay empty unless rebuilt
+        interest_details = []
 
     if university_name is None and profile and profile.university_id:
         from apps.profiles.db_models.university_db_model import University
@@ -118,13 +124,24 @@ async def build_user_base_response(
         "bannerPhotoUrl": generate_download_url(profile.banner_photo_url) if (profile and profile.banner_photo_url) else None,
         "status": user.status.value if hasattr(user.status, "value") else str(user.status),
         "university": university_name if university_name is not None else (str(profile.university_id) if (profile and profile.university_id) else None),
+         "university_details":{
+			"id":profile.university_id , "university_name":university_name
+		},
         "major": profile.major if profile else None,
         "minor": profile.minor if profile else None,
-        "country": country_name,
         "county": country_name or "",
         "educationLevel": profile.edu_level if profile else None,
+        "educationLevel_details": (
+            {
+                "id": EducationLevel(profile.edu_level).id,
+                "edu_level": profile.edu_level,
+            }
+            if (profile and profile.edu_level)
+            else None
+        ),
         "bio": profile.bio if profile else None,
         "academicInterests": interests,
+        "academicInterests_details": interest_details,
         "graduationDate": profile.graduation_date.isoformat() if (profile and profile.graduation_date) else None,
         "location": profile.location_text if profile else None,
         "profileVisibility": profile_visibility,
@@ -141,9 +158,9 @@ async def build_user_base_response(
         "invitationDeepLinkUrl": None,
         "invitationWebUrl": None,
         "onlinePresence": profile.online_presence_visible if profile else False,
-        "welcomeMessage": profile.welcome_message if profile else None,
-        "postsCount": 0,
-        "connectionsCount": 0,
+        "posts_count": profile.posts_count if profile else 0,
+        "followers_count": profile.followers_count if profile else 0,
+        "following_count": profile.following_count if profile else 0,
         "createdAt": user.created_at.isoformat() if user.created_at else None,
         "updatedAt": user.updated_at.isoformat() if user.updated_at else None,
         "is_onboarding_completed": user.onboarding_status == OnboardingStatus.completed if hasattr(user, "onboarding_status") else False,
@@ -705,37 +722,18 @@ async def update_completeness_weights(payload, db: AsyncSession) -> dict:
 async def get_my_profile_service(user: User, db: AsyncSession) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
     from sqlmodel import select
-    from core.images import generate_download_url
 
     stmt = select(Profile).where(Profile.user_id == user.id)
     profile = (await db.execute(stmt)).scalar_one_or_none()
-    
-    first_name = profile.first_name if profile else ""
-    last_name = profile.last_name if profile else ""
-    major = profile.major if profile else ""
-    minor = profile.minor if profile else ""
-    bio = profile.bio if profile else ""
-    profile_photo_key = profile.profile_photo_url if profile else ""
-    banner_photo_key = profile.banner_photo_url if profile else ""
-    
-    profile_visibility = "public"
-    if profile and profile.profile_visibility:
-        profile_visibility = profile.profile_visibility.value if hasattr(profile.profile_visibility, "value") else str(profile.profile_visibility)
-    
-    return {
-        "id": str(user.id),
-        "email": user.email,
-        "firstName": first_name,
-        "lastName": last_name,
-        "major": major,
-        "minor": minor,
-        "bio": bio,
-        "profilePhotoKey": profile_photo_key,
-        "bannerPhotoKey": banner_photo_key,
-        "profileVisibility": profile_visibility,
-        "profilePhotoUrl": generate_download_url(profile_photo_key) if profile_photo_key else None,
-        "bannerPhotoUrl": generate_download_url(banner_photo_key) if banner_photo_key else None,
-    }
+
+    if not profile:
+        profile = Profile(user_id=user.id, first_name="", last_name="", completeness_score=0)
+        db.add(profile)
+        await db.commit()
+        await db.refresh(profile)
+
+    user_data = await build_user_base_response(user, profile, db)
+    return {"user": user_data}
 
 
 async def update_my_profile_service(user: User, payload: UpdateProfileRequest, db: AsyncSession) -> dict:
@@ -761,20 +759,31 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
         profile.minor = payload.minor
     if payload.bio is not None:
         profile.bio = payload.bio
-        
-    if payload.profilePhotoKey is not None:
-        if payload.profilePhotoKey:
-            if not file_exists(payload.profilePhotoKey):
-                raise HTTPException(status_code=400, detail="profilePhotoKey does not reference an uploaded file")
-            profile.profile_photo_url = normalize_image_name(payload.profilePhotoKey)
+
+    if payload.education_level_id is not None:
+        from common.enums import EducationLevel
+        try:
+            education_level = EducationLevel.from_id(payload.education_level_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid education_level_id") from exc
+        profile.edu_level = education_level.value
+
+    if payload.academic_interests is not None:
+        profile.profile_interests_id = await _resolve_academic_interest_ids(payload.academic_interests, db)
+
+    if payload.profile_photo_key is not None:
+        if payload.profile_photo_key:
+            if not file_exists(payload.profile_photo_key):
+                raise HTTPException(status_code=400, detail="profile_photo_key does not reference an uploaded file")
+            profile.profile_photo_url = normalize_image_name(payload.profile_photo_key)
         else:
             profile.profile_photo_url = None
             
-    if payload.bannerPhotoKey is not None:
-        if payload.bannerPhotoKey:
-            if not file_exists(payload.bannerPhotoKey):
-                raise HTTPException(status_code=400, detail="bannerPhotoKey does not reference an uploaded file")
-            profile.banner_photo_url = normalize_image_name(payload.bannerPhotoKey)
+    if payload.banner_photo_key is not None:
+        if payload.banner_photo_key:
+            if not file_exists(payload.banner_photo_key):
+                raise HTTPException(status_code=400, detail="banner_photo_key does not reference an uploaded file")
+            profile.banner_photo_url = normalize_image_name(payload.banner_photo_key)
         else:
             profile.banner_photo_url = None
 

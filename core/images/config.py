@@ -83,7 +83,7 @@ def generate_download_url(file_name: str, expiration: int = 3600) -> str:
     if not file_name:
         return ""
     # If it is a full HTTP URL or static path already, return it
-    if file_name.startswith("https://") or file_name.startswith("/static/"):
+    if file_name.startswith(("http://", "https://")) or file_name.startswith("/static/"):
         return file_name
     if not settings.aws_s3_bucket:
         return f"/static/uploads/{file_name}"

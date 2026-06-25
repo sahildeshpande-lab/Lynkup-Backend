@@ -20,8 +20,15 @@ async def universities(
     pagination: PaginationParams = Depends(),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
+    normalized_query = query.strip() if query else ""
+    if normalized_query and len(normalized_query) < 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Search query must be at least 3 characters",
+        )
+
     data = await services.search_universities(
-        UniversitySearchParams(query=query.strip() if query else "" , page=pagination.page, pageSize=pagination.pageSize),
+        UniversitySearchParams(query=normalized_query, page=pagination.page, pageSize=pagination.pageSize),
         db,
     )
     message=("No universities found" if data["totalItems"]==0 else "Universities fetched successfully")

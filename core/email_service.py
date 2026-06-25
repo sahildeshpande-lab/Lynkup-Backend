@@ -270,6 +270,27 @@ def build_account_created_email_html(full_name: str | None = None) -> str:
     return _render_email_layout("Account Created Successfully", body_html)
 
 
+def build_temporary_password_email_html(
+    temporary_password: str,
+    full_name: str | None = None,
+    role: str | None = None,
+) -> str:
+    greeting = f"Hi {full_name}," if full_name else "Hi,"
+    role_text = f" as a {role}" if role else ""
+    body_html = (
+        '<div style="font-size:16px;font-weight:700;margin-bottom:16px;">Welcome to KampuLynk</div>'
+        f'<p style="margin:0 0 14px;">{escape(greeting)}</p>'
+        f'<p style="margin:0 0 14px;">Your KampuLynk account{escape(role_text)} has been created by an administrator.</p>'
+        '<p style="margin:0 0 10px;">Use this temporary password to sign in:</p>'
+        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin:8px 0 16px;">'
+        '<tr><td align="center" style="padding:18px 16px;background-color:#F8FAFC;border:1px dashed #CBD5E1;">'
+        f'<span style="font-size:20px;font-weight:700;color:#071A35;font-family:\'Courier New\', Courier, monospace;">{escape(temporary_password)}</span>'
+        '</td></tr></table>'
+        '<p style="margin:0;">Please change this password after your first sign-in.</p>'
+    )
+    return _render_email_layout("KampuLynk Account Created", body_html)
+
+
 def build_password_changed_email_html(full_name: str | None = None) -> str:
     greeting = f"Hi {full_name}," if full_name else "Hi,"
     base_url = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
@@ -293,6 +314,45 @@ async def send_otp_email(to_email: str, otp: str, otp_purpose: str = "password_r
 
 async def send_account_created_email(to_email: str, full_name: str | None = None) -> bool:
     return await _send_email(to_email, "KampuLynk Account Created", build_account_created_email_html(full_name), purpose="Account Created")
+
+
+def build_lynkup_response_email_html(full_name: str | None = None, response_status: str = "accepted") -> str:
+    greeting = f"Hi {full_name}," if full_name else "Hi,"
+    base_url = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
+    # Capitalize first letter for display
+    display_status = response_status.capitalize()
+    body_html = _render_template(
+        "connections/lynkup_response_email.html", 
+        {"greeting": greeting, "base_url": base_url, "response_status": response_status, "response_status_title": display_status}
+    )
+    # Replaces `response_status|title` manually because _render_template might not support Jinja pipes
+    body_html = body_html.replace("{{response_status|title}}", display_status)
+    return _render_email_layout(f"Connection Request {display_status}", body_html)
+
+
+async def send_lynkup_response_email(to_email: str, response_status: str, full_name: str | None = None) -> bool:
+    """Queues a transactional email for connection response. Sent by cron."""
+    return await _send_email(
+        to_email, 
+        f"KampuLynk Connection {response_status.capitalize()}", 
+        build_lynkup_response_email_html(full_name, response_status), 
+        purpose="Connection Update"
+    )
+
+
+async def send_temporary_password_email(
+    to_email: str,
+    temporary_password: str,
+    full_name: str | None = None,
+    role: str | None = None,
+) -> bool:
+    return await _send_email(
+        to_email,
+        "KampuLynk Account Created",
+        build_temporary_password_email_html(temporary_password, full_name, role),
+        purpose="Account Created",
+        attachment=temporary_password,
+    )
 
 
 async def send_password_changed_email(to_email: str, full_name: str | None = None) -> bool:

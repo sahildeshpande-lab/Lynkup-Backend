@@ -52,13 +52,19 @@ class EducationLevel(str, Enum):
         raise ValueError(f"Unknown education level id: {value}")
 
 
-from typing import Literal
-
-Role = Literal["user", "moderator", "viewer", "superadmin"]
-SocialProvider = Literal["google", "apple"]
-
 
 class RegistrationType(str, Enum):
     email = "email"
     google = "google"
     apple = "apple"
+
+
+class LynkupResponse(str, Enum):
+    accepted = "accepted"
+    declined = "declined"
+
+
+from typing import Literal
+
+Role = Literal["user", "moderator", "viewer", "superadmin"]
+SocialProvider = Literal["google", "apple"]

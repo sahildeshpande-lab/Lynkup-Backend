@@ -203,23 +203,9 @@ async def test_get_me_completeness(monkeypatch) -> None:
             session.add(profile)
             await session.commit()
 
-        # Generate mock JWT
-        token_payload = {
-            "sub": str(user.id),
-            "type": "access",
-            "exp": datetime.now(timezone.utc) + timedelta(minutes=10)
-        }
-        token = jwt.encode(token_payload, auth_settings.jwt_secret, algorithm=auth_settings.jwt_algorithm)
-
         async with async_session_factory() as session:
-            res = await get_me_completeness(token, session)
+            res = await get_me_completeness(user.id, session)
             assert res["completeness_score"] == 75
-
-        # Test invalid token
-        async with async_session_factory() as session:
-            with pytest.raises(HTTPException) as exc:
-                await get_me_completeness("invalid-token", session)
-            assert exc.value.status_code == 401
     finally:
         await engine.dispose()
 

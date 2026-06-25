@@ -30,3 +30,18 @@ def enable_firebase_user(uid:str):
 def update_firebase_password(uid:str,password:str):
     initialize_firebase_app()
     auth.update_user(uid,password=password)
+
+
+def create_firebase_user(email: str, password: str, display_name: str | None = None):
+    initialize_firebase_app()
+    return auth.create_user(
+        email=email,
+        password=password,
+        display_name=display_name,
+        email_verified=True,
+    )
+
+
+def delete_firebase_user(uid: str):
+    initialize_firebase_app()
+    auth.delete_user(uid)

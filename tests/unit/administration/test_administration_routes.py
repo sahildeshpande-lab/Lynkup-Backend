@@ -259,3 +259,69 @@ def test_update_completeness_weights(monkeypatch) -> None:
     body = response.json()
     assert body["status"] is True
     assert body["data"]["weights"]["bio"] == 15.0
+
+
+def test_admin_create_user_route(monkeypatch) -> None:
+    async def _mock_admin_create_user(payload, db):
+        role_name = payload.role.value if hasattr(payload.role, "value") else str(payload.role)
+        return ApiResponse(
+            status=True,
+            message="User created successfully",
+            data={
+                "user": {
+                    "email": payload.email,
+                    "role": role_name,
+                    "firstName": payload.firstName,
+                    "lastName": payload.lastName,
+                },
+                "emailSent": True,
+                "authProvider": "firebase" if role_name == "user" else "local",
+            },
+        )
+
+    monkeypatch.setattr(admin_routes.services, "admin_create_user", _mock_admin_create_user)
+
+    # 1. Test Firebase account creation flow for "user" role
+    response_user = client.post(
+        "/api/v1/admin/users",
+        json={
+            "firstName": "John",
+            "lastName": "Doe",
+            "email": "john.doe@example.com",
+            "role": "user",
+        },
+    )
+    assert response_user.status_code == 201
+    body_user = response_user.json()
+    assert body_user["status"] is True
+    assert body_user["data"]["authProvider"] == "firebase"
+    assert body_user["data"]["user"]["role"] == "user"
+
+    # 2. Test Local account creation flow for "moderator" role
+    response_mod = client.post(
+        "/api/v1/admin/users",
+        json={
+            "firstName": "Jane",
+            "lastName": "Smith",
+            "email": "jane.smith@example.com",
+            "role": "moderator",
+        },
+    )
+    assert response_mod.status_code == 201
+    body_mod = response_mod.json()
+    assert body_mod["status"] is True
+    assert body_mod["data"]["authProvider"] == "local"
+    assert body_mod["data"]["user"]["role"] == "moderator"
+
+    # 3. Test validation errors (e.g. invalid role)
+    response_invalid_role = client.post(
+        "/api/v1/admin/users",
+        json={
+            "firstName": "Alice",
+            "lastName": "Brown",
+            "email": "alice@example.com",
+            "role": "superadmin",
+        },
+    )
+    assert response_invalid_role.status_code == 422
+

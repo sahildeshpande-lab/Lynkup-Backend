@@ -129,12 +129,9 @@ class AuthUserResponse(BaseModel):
     university: str | None = None
     major: str | None = None
     minor: str | None = None
-    county: str = ""
     educationLevel: str | None = None
     bio: str | None = None
     academicInterests: list[str] = Field(default_factory=list)
-    graduationDate: datetime | None = None
-    location: str | None = None
     profileVisibility: ProfileVisibility = ProfileVisibility.public
     completenessScore: int = 33
     notificationPreferences: NotificationPreferences = Field(default_factory=NotificationPreferences)
@@ -146,11 +143,11 @@ class AuthUserResponse(BaseModel):
     invitationDeepLinkUrl: str | None = None
     invitationWebUrl: str | None = None
     onlinePresence: bool = False
-    welcomeMessage: str | None = None
-    postsCount: int = 0
-    connectionsCount: int = 0
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
+    posts_count: int|None =None ,
+    followers_count: int|None =None ,
+    following_count: int|None =None,
     is_onboarding_completed: bool = False
     is_deleted: bool = False
 
@@ -168,12 +165,9 @@ class UserBaseResponse(BaseModel):
     university: str | None = None
     major: str | None = None
     minor: str | None = None
-    county: str = ""
     educationLevel: str | None = None
     bio: str | None = None
     academicInterests: list[str] = Field(default_factory=list)
-    graduationDate: datetime | None = None
-    location: str | None = None
     profileVisibility: str = ""
     completenessScore: int = 0
     notificationPreferences: NotificationPreferences = Field(default_factory=NotificationPreferences)
@@ -185,11 +179,11 @@ class UserBaseResponse(BaseModel):
     invitationDeepLinkUrl: str | None = None
     invitationWebUrl: str | None = None
     onlinePresence: bool = False
-    welcomeMessage: str | None = None
-    postsCount: int = 0
-    connectionsCount: int = 0
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
+    posts_count: int | None = None
+    followers_count: int | None = None
+    following_count: int | None = None
     is_onboarding_completed: bool = False
     is_deleted: bool = False
 

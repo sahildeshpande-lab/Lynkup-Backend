@@ -76,6 +76,9 @@ class UpdateProfileRequest(BaseModel):
     lastName: str | None = None
     major: str | None = None
     minor: str | None = None
-    profilePhotoKey: str | None = None
-    bannerPhotoKey: str | None = None
+    university_id: str | None = None
+    education_level_id: int | None = None
+    academic_interests: list[str] | None = None
+    profile_photo_key: str | None = None
+    banner_photo_key: str | None = None
     bio: str | None = None

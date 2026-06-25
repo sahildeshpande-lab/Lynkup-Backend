@@ -20,7 +20,6 @@ class AdminUserCreateRequest(BaseModel):
     lastName: str
     email: EmailStr
     role: Role
-    status: str | None = None
 
 
 class CamelModel(BaseModel):
@@ -30,6 +29,9 @@ class CamelModel(BaseModel):
 
 class AdminUserActionRequest(BaseModel):
     id: str
+
+class AdminDeleteUsersRequest(BaseModel):
+    userIds: list[str]
 
 
 class AdminUserStatusRequest(BaseModel):

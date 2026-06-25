@@ -15,6 +15,8 @@ from .schemas import (
     ApiResponse,
     ConnectionRequestCreate,
     ConnectionRequestRespond,
+    FollowRequest,
+    BlockRequest,
     ConnectionRequestResponse,
     FollowResponse,
     BlockResponse,
@@ -30,7 +32,7 @@ async def create_connection_request(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
-    return await services.send_connection_request(db, current_user.id, request.receiver_user_id)
+    return await services.send_connection_request(db, current_user.id, UUID(request.receiver_user_id))
 
 
 @router.post("/lynkupresponse", response_model=ApiResponse)
@@ -39,66 +41,53 @@ async def respond_connection_request(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
-    return await services.respond_connection_request(db, current_user.id, request.request_id, request.response)
+    return await services.respond_connection_request(db, current_user.id, UUID(request.receiver_user_id), request.response)
 
 
-@router.post("/follows/{user_id}", response_model=ApiResponse)
+@router.post("/follows", response_model=ApiResponse)
 async def follow_user(
-    user_id: UUID,
+    payload: FollowRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
-    return await services.follow_user(db, current_user.id, user_id)
+    return await services.follow_user(db, current_user.id, UUID(payload.following_user_id))
 
 
-@router.delete("/follows/{user_id}", response_model=ApiResponse)
+@router.delete("/follows", response_model=ApiResponse)
 async def unfollow_user(
-    user_id: UUID,
+    payload: FollowRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
-    return await services.unfollow_user(db, current_user.id, user_id)
+    return await services.unfollow_user(db, current_user.id, UUID(payload.following_user_id))
 
 
-@router.post("/block/{user_id}", response_model=ApiResponse)
+@router.post("/block", response_model=ApiResponse)
 async def block_user(
-    user_id: UUID,
+    payload: BlockRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
-    return await services.block_user(db, current_user.id, user_id)
+    return await services.block_user(db, current_user.id, UUID(payload.blocked_user_id))
 
 
-@router.delete("/block/{user_id}", response_model=ApiResponse)
+@router.delete("/block", response_model=ApiResponse)
 async def unblock_user(
-    user_id: UUID,
+    payload: BlockRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
-    return await services.unblock_user(db, current_user.id, user_id)
+    return await services.unblock_user(db, current_user.id, UUID(payload.blocked_user_id))
 
 
 @router.get("/recommendations/connections", response_model=ApiResponse)
 async def get_connection_recommendations(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
-    page: int = Query(default=1, ge=1),
-    pageSize: int = Query(default=20, ge=1, le=100),
 ):
     candidates = await services.get_recommendations(db, current_user.id)
-    if not candidates:
-        paginated = paginate_items([], page, pageSize)
-        return ApiResponse(data=paginated)
-        
-    paginated = paginate_items(candidates, page, pageSize)
-    
-    return ApiResponse(data=PaginatedResponse[RecommendedUserResponse](
-        items=[RecommendedUserResponse(**item) for item in paginated.items],
-        page=paginated.page,
-        pageSize=paginated.pageSize,
-        totalItems=paginated.totalItems,
-        totalPages=paginated.totalPages
-    ))
+    data = [RecommendedUserResponse(**item) for item in candidates]
+    return ApiResponse(data=data)
 
 
 @router.get("/lynkup", response_model=ApiResponse)

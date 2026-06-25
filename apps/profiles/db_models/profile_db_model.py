@@ -33,10 +33,13 @@ class Profile(SQLModel, table=True):
     profile_visibility: ProfileVisibility = Field(default=ProfileVisibility.public, index=True)
     online_presence_visible: bool = Field(default=True, nullable=False)
     completeness_score: int = Field(default=0, nullable=False)
+    posts_count: int = Field(default=0, nullable=False)
+    followers_count: int = Field(default=0, nullable=False)
+    following_count: int = Field(default=0, nullable=False)
     completeness_rubric_version: str = Field(default="v1", sa_column=Column(String(32), nullable=False))
     profile_photo_url: str | None = Field(default=None, sa_column=Column(String(2048)))
     banner_photo_url: str | None = Field(default=None, sa_column=Column(String(2048)))
-    welcome_message: str | None = Field(default=None, sa_column=Column(String(255)))
+
     updated_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
 
 

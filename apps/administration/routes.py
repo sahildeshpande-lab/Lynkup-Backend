@@ -12,6 +12,8 @@ from apps.accounts.db_models import User
 from . import services
 from .schemas import (
     AdminUserActionRequest,
+    AdminUserCreateRequest,
+    AdminDeleteUsersRequest,
     AdminEditProfileRequest,
     AdminUserStatusRequest,
     ApiResponse,
@@ -137,9 +139,38 @@ async def export_users(
     return ApiResponse(message="users exported", data=await services.export_users(page, pageSize, db))
 
 
-@router.post("/users", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
+@router.get("/moderators", response_model=ApiResponse)
+async def list_moderators(
+    page: int | None = Query(default=None, ge=1),
+    pageSize: int | None = Query(default=None, ge=1, le=200),
+    search: str | None = Query(default=None, description="Search across university, name, or email"),
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+) -> ApiResponse:
+    return ApiResponse(
+        message="moderators listed",
+        data=await services.list_moderators(page, pageSize, db, search=search)
+    )
+
+
+@router.get("/viewers", response_model=ApiResponse)
+async def list_viewers(
+    page: int | None = Query(default=None, ge=1),
+    pageSize: int | None = Query(default=None, ge=1, le=200),
+    search: str | None = Query(default=None, description="Search across university, name, or email"),
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+) -> ApiResponse:
+    return ApiResponse(
+        message="viewers listed",
+        data=await services.list_viewer(page, pageSize, db, search=search)
+    )
+
+
+
+@router.post("/admin/users", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
 async def create_user_by_admin(
-    payload: EmailSignupRequest,
+    payload: AdminUserCreateRequest,
     db: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_superadmin),
 ) -> ApiResponse:
@@ -156,13 +187,13 @@ async def get_user_by_admin(
     return ApiResponse(message="user fetched", data=await services.admin_get_user(userId, db))
 
 
-@router.delete("/users/{userId:uuid}", response_model=ApiResponse)
-async def delete_user_by_admin(
-    userId: UUID,
+@router.delete("/users/", response_model=ApiResponse)
+async def delete_users_by_admin(
+    payload: AdminDeleteUsersRequest,
     db: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_superadmin),
 ) -> ApiResponse:
-    return ApiResponse(message="user deletion scheduled", data=await services.admin_delete_user(userId, db))
+    return ApiResponse(message="users deletion scheduled", data=await services.admin_delete_users(payload.userIds, db))
 
 
 @router.patch("/users/{userId}/status", response_model=ApiResponse)

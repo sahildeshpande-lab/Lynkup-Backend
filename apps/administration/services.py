@@ -31,7 +31,19 @@ from apps.profiles.services import build_user_base_response
 from apps.profiles.db_models import Profile
 from sqlalchemy.orm import selectinload
 
+import secrets
+import string
+
 PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
+ADMIN_MANAGED_ROLES = ["user", "moderator", "viewer"]
+
+def _generate_temporary_password() -> str:
+    alphabet = string.ascii_letters + string.digits + "@#$%"
+    temp_password = "".join(
+        secrets.choice(alphabet)
+        for _ in range(12)
+    )
+    return temp_password
 
 
 def _generate_admin_tokens(user: User) -> tuple[str, str]:
@@ -273,7 +285,7 @@ async def admin_signin(payload: AdminLoginRequest, db: AsyncSession) -> ApiRespo
     if not user.password_hash or not PASSWORD_HASHER.verify(payload.password, user.password_hash):
         return ApiResponse(status=False, message="Invalid credentials", data=None)
 
-    if user.role != "superadmin":
+    if user.role == "user":
         return ApiResponse(status=False, message="Forbidden: Admin access required", data=None)
 
     profile = (await db.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one_or_none()
@@ -299,9 +311,8 @@ async def _fetch_users_with_details(
     db: AsyncSession,
     page: int | None = None,
     page_size: int | None = None,
-    university: str | None = None,
-    name: str | None = None,
-    email: str | None = None,
+    search: str | None = None,
+    role_name: str | None = "user",
 ) -> list[dict]:
     from apps.profiles.db_models.university_db_model import University
     from apps.profiles.db_models.country_db_model import Country
@@ -314,19 +325,21 @@ async def _fetch_users_with_details(
         .outerjoin(Profile, Profile.user_id == User.id)
         .outerjoin(University, University.id == Profile.university_id)
         .outerjoin(Country, Country.id == Profile.country_id)
-        .where(User.is_deleted.is_(False), Role.name == "user")
+        .where(User.is_deleted.is_(False))
     )
-    if university:
-        stmt = stmt.where(University.name.ilike(f"%{university}%"))
-    if name:
-        pattern = f"%{name}%"
+
+    if role_name:
+        stmt = stmt.where(Role.name == role_name)
+
+    if search:
+        pattern = f"%{search}%"
         stmt = stmt.where(
+            (University.name.ilike(pattern)) |
             (Profile.first_name.ilike(pattern)) |
             (Profile.last_name.ilike(pattern)) |
-            (func.concat(Profile.first_name, " ", Profile.last_name).ilike(pattern))
+            (func.concat(Profile.first_name, " ", Profile.last_name).ilike(pattern)) |
+            (User.email.ilike(pattern))
         )
-    if email:
-        stmt = stmt.where(User.email.ilike(f"%{email}%"))
 
     stmt = (
         stmt.options(selectinload(User.roles))
@@ -417,7 +430,75 @@ async def list_users(
             (User.email.ilike(pattern))
         )
     total_items = int((await db.execute(count_stmt)).scalar_one())
-    items = await _fetch_users_with_details(db, page, page_size, search=search)
+    items = await _fetch_users_with_details(db, page, page_size, search=search,role="user")
+    if page is None : 
+        page=1 
+    if page_size is None:
+        page_size=len(items)
+    
+    return build_paginated_response(items, page, page_size, total_items).model_dump()
+
+async def list_moderators(
+    page: int | None,
+    page_size: int | None,
+    db: AsyncSession,
+    search: str | None = None,
+) -> dict:
+    from apps.profiles.db_models.university_db_model import University
+
+    count_stmt = (
+        select(func.count(User.id))
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .outerjoin(Profile, Profile.user_id == User.id)
+        .outerjoin(University, University.id == Profile.university_id)
+        .where(User.is_deleted.is_(False), Role.name == "moderator")
+    )
+    if search:
+        pattern = f"%{search}%"
+        count_stmt = count_stmt.where(
+            (University.name.ilike(pattern)) |
+            (Profile.first_name.ilike(pattern)) |
+            (Profile.last_name.ilike(pattern)) |
+            (func.concat(Profile.first_name, " ", Profile.last_name).ilike(pattern)) |
+            (User.email.ilike(pattern))
+        )
+    total_items = int((await db.execute(count_stmt)).scalar_one())
+    items = await _fetch_users_with_details(db, page, page_size, search=search,role="moderator",)
+    if page is None : 
+        page=1 
+    if page_size is None:
+        page_size=len(items)
+    
+    return build_paginated_response(items, page, page_size, total_items).model_dump()
+
+async def list_viewer(
+    page: int | None,
+    page_size: int | None,
+    db: AsyncSession,
+    search: str | None = None,
+) -> dict:
+    from apps.profiles.db_models.university_db_model import University
+
+    count_stmt = (
+        select(func.count(User.id))
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .outerjoin(Profile, Profile.user_id == User.id)
+        .outerjoin(University, University.id == Profile.university_id)
+        .where(User.is_deleted.is_(False), Role.name == "viewer")
+    )
+    if search:
+        pattern = f"%{search}%"
+        count_stmt = count_stmt.where(
+            (University.name.ilike(pattern)) |
+            (Profile.first_name.ilike(pattern)) |
+            (Profile.last_name.ilike(pattern)) |
+            (func.concat(Profile.first_name, " ", Profile.last_name).ilike(pattern)) |
+            (User.email.ilike(pattern))
+        )
+    total_items = int((await db.execute(count_stmt)).scalar_one())
+    items = await _fetch_users_with_details(db, page, page_size, search=search, role="viewer",)
     if page is None : 
         page=1 
     if page_size is None:
@@ -430,6 +511,7 @@ async def _fetch_users_with_details(
     page: int | None = None,
     page_size: int | None = None,
     search: str | None = None,
+    role:str | None = None ,
 ) -> list[dict]:
     from apps.profiles.db_models.university_db_model import University
     from apps.profiles.db_models.country_db_model import Country
@@ -442,7 +524,7 @@ async def _fetch_users_with_details(
         .outerjoin(Profile, Profile.user_id == User.id)
         .outerjoin(University, University.id == Profile.university_id)
         .outerjoin(Country, Country.id == Profile.country_id)
-        .where(User.is_deleted.is_(False), Role.name == "user")
+        .where(User.is_deleted.is_(False), Role.name == role)
     )
     if search:
         pattern = f"%{search}%"
@@ -528,10 +610,121 @@ async def export_users(page: int | None, page_size: int | None, db: AsyncSession
         return build_paginated_response(items, 1, max(total_items, 1), total_items).model_dump()
 
 
-async def admin_create_user(payload: EmailSignupRequest, db: AsyncSession):
-    from apps.accounts.services import signup
+async def admin_create_user(payload: AdminUserCreateRequest, db: AsyncSession) -> ApiResponse:
+    from apps.accounts.services import assign_user_role
+    from core.auth.services import create_firebase_user, delete_firebase_user
+    from core.email_service import send_temporary_password_email
 
-    return await signup(payload, db)
+    email = payload.email.lower()
+    role_name = payload.role.value if hasattr(payload.role, "value") else str(payload.role)
+    if role_name not in ADMIN_MANAGED_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="role must be one of: user, moderator, viewer",
+        )
+
+    existing_user = (
+        await db.execute(select(User).where(User.email == email))
+    ).scalar_one_or_none()
+    if existing_user:
+        return ApiResponse(status=False, message="Email already registered", data=None)
+
+    temporary_password = _generate_temporary_password()
+    firebase_uid: str | None = None
+
+    if role_name == "user":
+        display_name = f"{payload.firstName} {payload.lastName}".strip()
+        try:
+            firebase_user = create_firebase_user(
+                email=email,
+                password=temporary_password,
+                display_name=display_name or None,
+            )
+            firebase_uid = getattr(firebase_user, "uid", None)
+            if not firebase_uid and isinstance(firebase_user, dict):
+                firebase_uid = firebase_user.get("uid")
+            if not firebase_uid:
+                raise RuntimeError("Firebase user response did not include uid")
+        except Exception as exc:
+            logger.exception("Failed to create Firebase user for %s", email)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to create Firebase user",
+            ) from exc
+
+    user_status = UserStatus.active if role_name in ("moderator", "viewer") else UserStatus.pending
+
+    now = datetime.now(timezone.utc)
+    user = User(
+        firebase_uid=firebase_uid,
+        email=email,
+        password_hash=PASSWORD_HASHER.hash(temporary_password),
+        registration_type=RegistrationType.email,
+        status=user_status,
+        onboarding_status=OnboardingStatus.not_started,
+        created_at=now,
+        updated_at=now,
+        email_verified_at=now,
+    )
+
+    try:
+        db.add(user)
+        await db.flush()
+
+        await assign_user_role(db, user, role_name)
+
+        profile = Profile(
+            user_id=user.id,
+            first_name=payload.firstName,
+            last_name=payload.lastName,
+            completeness_score=0,
+            updated_at=now,
+        )
+        db.add(profile)
+        await db.flush()
+
+        from apps.profiles.services import calculate_completeness_score
+
+        try:
+            profile.completeness_score = await calculate_completeness_score(user.id, db)
+            db.add(profile)
+        except Exception:
+            logger.exception("Failed to calculate profile completeness for admin-created user %s", user.id)
+
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        if firebase_uid:
+            try:
+                delete_firebase_user(firebase_uid)
+            except Exception:
+                logger.exception("Failed to roll back Firebase user %s after local create failure", firebase_uid)
+        raise
+
+    await db.refresh(user)
+    await db.refresh(profile)
+
+    stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
+    user = (await db.execute(stmt_user)).scalar_one()
+    user_data = await build_user_base_response(user, profile, db)
+
+    full_name = f"{payload.firstName} {payload.lastName}".strip()
+    email_sent = await send_temporary_password_email(
+        email,
+        temporary_password,
+        full_name=full_name or None,
+        role=role_name,
+    )
+
+    return ApiResponse(
+        status=True,
+        message="User created successfully",
+        data={
+            "user": user_data,
+            "emailSent": email_sent,
+            "authProvider": "firebase" if role_name == "user" else "local",
+        },
+    )
 
 
 async def admin_get_user(user_id: str, db: AsyncSession) -> dict:
@@ -543,34 +736,40 @@ async def admin_get_user(user_id: str, db: AsyncSession) -> dict:
     return {"user": await build_user_base_response(user, profile, db)}
 
 
-async def admin_delete_user(user_id: str, db: AsyncSession) -> dict:
+async def admin_delete_users(user_ids: list[str], db: AsyncSession) -> dict:
     from core.auth.services import revoke_firebase_tokens
-    user_uuid = _coerce_uuid(user_id)
-    user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    user.status = UserStatus.deleting
-    user.is_deleted = True
+    deleted_users = []
     now = datetime.now(timezone.utc)
-    user.deleted_at = now
-    user.purge_after = now + timedelta(days=1)
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
+    for user_id in user_ids:
         try:
-            revoke_firebase_tokens(user.firebase_uid)
+            user_uuid = _coerce_uuid(user_id)
         except Exception:
-            pass
-    profile = (await db.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one_or_none()
-    user_data = await build_user_base_response(user, profile, db)
-    return {
-        "deleted": True,
-        "status": user.status.value if hasattr(user.status, "value") else str(user.status),
-        "deleted_at": user.deleted_at,
-        "purge_after": user.purge_after,
-        "user": user_data,
-    }
+            continue
+        user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
+        if user is None:
+            continue
+        user.status = UserStatus.deleting
+        user.is_deleted = True
+        user.deleted_at = now
+        user.purge_after = now + timedelta(days=1)
+        db.add(user)
+        
+        if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
+            try:
+                revoke_firebase_tokens(user.firebase_uid)
+            except Exception:
+                pass
+        profile = (await db.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one_or_none()
+        user_data = await build_user_base_response(user, profile, db)
+        deleted_users.append({
+            "deleted": True,
+            "status": user.status.value if hasattr(user.status, "value") else str(user.status),
+            "deleted_at": user.deleted_at,
+            "purge_after": user.purge_after,
+            "user": user_data,
+        })
+    await db.commit()
+    return {"deleted_users": deleted_users}
 
 async def admin_edit_profile(
     user_id: str,

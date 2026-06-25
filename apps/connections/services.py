@@ -9,7 +9,8 @@ from sqlalchemy import or_, and_, select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, status
 
-from apps.connections.db_models import ConnectionRequest, Connection, Follow, Block, ConnectionRecommendationSnapshot
+from apps.profiles.db_models.profile_db_model import Profile
+from sqlalchemy import update
 from apps.profiles.db_models import Profile
 from common.enums import ProfileVisibility
 from apps.connections.schemas import ApiResponse
@@ -151,22 +152,22 @@ async def send_connection_request(db: AsyncSession, sender_id: UUID, receiver_id
     return ApiResponse(status=True, message="Connection request sent successfully.", data=request)
 
 
-async def respond_connection_request(db: AsyncSession, user_id: UUID, request_id: UUID, response: str) -> ApiResponse:
+async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user_id: UUID, response: str) -> ApiResponse:
     if response not in ["accepted", "declined"]:
         return ApiResponse(status=True, message="Invalid response.", data=[])
         
     stmt = select(ConnectionRequest).where(
-        ConnectionRequest.id == request_id, 
-        ConnectionRequest.status == "pending"
+        ConnectionRequest.status == "pending",
+        or_(
+            and_(ConnectionRequest.sender_user_id == other_user_id, ConnectionRequest.receiver_user_id == user_id),
+            and_(ConnectionRequest.sender_user_id == user_id, ConnectionRequest.receiver_user_id == other_user_id)
+        )
     )
     result = await db.execute(stmt)
     req = result.scalars().first()
     
     if not req:
         return ApiResponse(status=True, message="Pending request not found.", data=[])
-        
-    if req.receiver_user_id != user_id:
-        return ApiResponse(status=True, message="Not authorized to respond to this request.", data=[])
         
     req.status = response
     
@@ -185,48 +186,66 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, request_id
             
     await db.commit()
     await db.refresh(req)
+
+    # Queue email to the person who originally sent the request
+    from apps.accounts.db_models import User
+    from apps.profiles.db_models import Profile
+    from core.email_service import send_lynkup_response_email
+    
+    sender_stmt = select(User, Profile).join(Profile, Profile.user_id == User.id).where(User.id == req.sender_user_id)
+    sender_result = await db.execute(sender_stmt)
+    sender_row = sender_result.first()
+    if sender_row:
+        sender_user, sender_profile = sender_row
+        full_name = f"{sender_profile.first_name} {sender_profile.last_name}".strip() if sender_profile else None
+        await send_lynkup_response_email(sender_user.email, response, full_name)
+
     return ApiResponse(status=True, message=f"Request {response} successfully.", data=req)
 
 
 async def follow_user(db: AsyncSession, follower_id: UUID, following_id: UUID) -> ApiResponse:
     if follower_id == following_id:
         return ApiResponse(status=True, message="Cannot follow self.", data=[])
-        
     if await is_blocked(db, follower_id, following_id):
         return ApiResponse(status=True, message="Cannot follow blocked user.", data=[])
-        
+    # Check existing follow relationship
     stmt = select(Follow).where(Follow.follower_user_id == follower_id, Follow.following_user_id == following_id)
     result = await db.execute(stmt)
     existing_follow = result.scalars().first()
-    
-    if existing_follow:
-        if existing_follow.is_active:
-            return ApiResponse(status=True, message="Already following.", data=[])
-        existing_follow.is_active = True
-        follow = existing_follow
-    else:
-        follow = Follow(follower_user_id=follower_id, following_user_id=following_id)
-        db.add(follow)
-        
-    await db.commit()
+    async with db.begin():
+        if existing_follow:
+            if existing_follow.is_active:
+                return ApiResponse(status=True, message="Already following.", data=[])
+            existing_follow.is_active = True
+            follow = existing_follow
+            # Increment counts for reactivated follow
+            await db.execute(update(Profile).where(Profile.user_id == following_id).values(followers_count=Profile.followers_count + 1))
+            await db.execute(update(Profile).where(Profile.user_id == follower_id).values(following_count=Profile.following_count + 1))
+        else:
+            follow = Follow(follower_user_id=follower_id, following_user_id=following_id)
+            db.add(follow)
+            # Increment counts for new follow
+            await db.execute(update(Profile).where(Profile.user_id == following_id).values(followers_count=Profile.followers_count + 1))
+            await db.execute(update(Profile).where(Profile.user_id == follower_id).values(following_count=Profile.following_count + 1))
     await db.refresh(follow)
     return ApiResponse(status=True, message="Followed user successfully.", data=follow)
 
 
 async def unfollow_user(db: AsyncSession, follower_id: UUID, following_id: UUID) -> ApiResponse:
     stmt = select(Follow).where(
-        Follow.follower_user_id == follower_id, 
+        Follow.follower_user_id == follower_id,
         Follow.following_user_id == following_id,
         Follow.is_active == True
     )
     result = await db.execute(stmt)
     follow = result.scalars().first()
-    
     if not follow:
         return ApiResponse(status=True, message="Follow not found.", data=[])
-        
-    follow.is_active = False
-    await db.commit()
+    async with db.begin():
+        follow.is_active = False
+        # Decrement counts, ensuring they stay non‑negative
+        await db.execute(update(Profile).where(Profile.user_id == following_id).values(followers_count=Profile.followers_count - 1))
+        await db.execute(update(Profile).where(Profile.user_id == follower_id).values(following_count=Profile.following_count - 1))
     return ApiResponse(status=True, message="Unfollowed user successfully.", data=[])
 
 
@@ -349,15 +368,18 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
     excluded_ids.add(user_id) # self
     
     # 5. Fetch all potential profiles
-    profiles_stmt = select(Profile).where(
+    from apps.profiles.db_models.university_db_model import University
+    profiles_stmt = select(Profile, University.name).outerjoin(
+        University, Profile.university_id == University.id
+    ).where(
         Profile.user_id.notin_(excluded_ids)
     )
     profiles_res = await db.execute(profiles_stmt)
-    candidates = profiles_res.scalars().all()
+    candidates_with_uni = profiles_res.all()
     
     scored_candidates = []
     
-    for candidate in candidates:
+    for candidate, university_name in candidates_with_uni:
         if not validate_visibility(candidate):
             continue
             
@@ -369,7 +391,7 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
             "score": score,
             "first_name": candidate.first_name,
             "last_name": candidate.last_name,
-            "university_id": candidate.university_id,
+            "university": university_name,
             "major": candidate.major,
             "minor": candidate.minor,
             "edu_level": candidate.edu_level
@@ -386,5 +408,12 @@ async def get_pending_requests(db: AsyncSession, user_id: UUID) -> ApiResponse:
     )
     result = await db.execute(stmt)
     requests = result.scalars().all()
-    data = [ConnectionRequestResponse.model_validate(req) for req in requests]
-    return ApiResponse(status=True, message="Pending requests fetched successfully.", data=data)
+    data = [
+        {
+            "lynkup_id": str(req.id),
+            "user_id": str(req.sender_user_id),
+            "status": req.status
+        }
+        for req in requests
+    ]
+    return ApiResponse(status=True, message="Lynkup Request pending", data=data)

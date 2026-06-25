@@ -46,9 +46,16 @@ def teardown_module() -> None:
     app.dependency_overrides.pop(get_session, None)
 
 
-def test_update_visibility_returns_success() -> None:
+def test_update_visibility_returns_success(monkeypatch) -> None:
+    from apps.profiles import services as profiles_services
+
+    async def _mock_update_profile_visibility_service(user, payload, db):
+        return {"profileVisibility": payload.profileVisibility}
+
+    monkeypatch.setattr(profiles_services, "update_profile_visibility_service", _mock_update_profile_visibility_service)
+
     response = client.patch(
-        "/api/v1/users/me/visibility",
+        "/api/v1/profilevisibility",
         json={"profileVisibility": "public"},
         headers={"Authorization": "Bearer access_test-token"},
     )
@@ -62,13 +69,13 @@ def test_update_visibility_returns_success() -> None:
 def test_patch_me_turns_off_onboarding(monkeypatch) -> None:
     from apps.profiles import services as profiles_services
 
-    async def _mock_update_profile_me(current_user, payload, db):
+    async def _mock_update_my_profile_service(user, payload, db):
         return {"user": {"bio": payload.bio, "is_onboarding_completed": True}}
 
-    monkeypatch.setattr(profiles_services, "update_profile_me", _mock_update_profile_me)
+    monkeypatch.setattr(profiles_services, "update_my_profile_service", _mock_update_my_profile_service)
 
     response = client.patch(
-        "/api/v1/users/me",
+        "/api/v1/updateprofile",
         json={"bio": "updated bio"},
         headers={"Authorization": "Bearer access_test-token"},
     )
@@ -91,7 +98,7 @@ def test_get_public_profile_returns_success() -> None:
 def test_get_me_requires_bearer_token() -> None:
     override = app.dependency_overrides.pop(get_current_user, None)
     try:
-        response = client.get("/api/v1/users/me")
+        response = client.get("/api/v1/myprofile")
         assert response.status_code == 401
     finally:
         if override:
@@ -101,15 +108,15 @@ def test_get_me_requires_bearer_token() -> None:
 def test_get_me_returns_user_payload(monkeypatch) -> None:
     from apps.profiles import services as profiles_services
 
-    async def _mock_get_profile_me(user, db):
+    async def _mock_get_my_profile_service(user, db):
         return {"user": {
             "email": "jane@example.com",
             "is_onboarding_completed": False
         }}
 
-    monkeypatch.setattr(profiles_services, "get_profile_me", _mock_get_profile_me)
+    monkeypatch.setattr(profiles_services, "get_my_profile_service", _mock_get_my_profile_service)
 
-    response = client.get("/api/v1/users/me", headers={"Authorization": "Bearer access_jane@example.com"})
+    response = client.get("/api/v1/myprofile", headers={"Authorization": "Bearer access_jane@example.com"})
 
     assert response.status_code == 200
     body = response.json()
@@ -121,7 +128,7 @@ def test_get_me_returns_user_payload(monkeypatch) -> None:
 def test_get_me_completeness_returns_score(monkeypatch) -> None:
     from apps.profiles import services as profiles_services
 
-    async def _mock_get_me_completeness(token, db):
+    async def _mock_get_me_completeness(user_id, db):
         return {"completeness_score": 33}
 
     monkeypatch.setattr(profiles_services, "get_me_completeness", _mock_get_me_completeness)

@@ -27,6 +27,7 @@ def build_paginated_response(
     page_size: int,
     total_items: int,
 ) -> PaginatedResponse[T]:
+    page_size = max(page_size or 1, 1)
     total_pages = ceil(total_items / page_size) if total_items else 0
     return PaginatedResponse[T](
         items=list(items),

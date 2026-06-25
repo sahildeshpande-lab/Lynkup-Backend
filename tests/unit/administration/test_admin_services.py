@@ -18,6 +18,8 @@ from common.enums import UserStatus, OnboardingStatus, EducationLevel
 from apps.accounts.schemas import EmailSignupRequest, RefreshTokenRequest
 from apps.administration.schemas import (
     AdminUserActionRequest,
+    ChangePasswordRequest,
+    AdminUserCreateRequest,
     AdminSignupRequest,
     AdminLoginRequest,
 )
@@ -33,6 +35,7 @@ from apps.administration.services import (
     admin_get_user,
     admin_delete_user,
     admin_update_user_status,
+    change_password,
     PASSWORD_HASHER,
     _generate_admin_tokens,
 )
@@ -189,6 +192,158 @@ async def test_admin_create_user(monkeypatch) -> None:
             user = (await session.execute(stmt)).scalar_one_or_none()
             assert user is not None
             assert user.firebase_uid is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_admin_create_moderator_local_user(monkeypatch) -> None:
+    try:
+        await init_db()
+
+        async def _mock_temp_password_email(*_args, **_kwargs):
+            return True
+
+        monkeypatch.setattr("core.email_service.send_temporary_password_email", _mock_temp_password_email)
+
+        email = f"moderator_admin_create_{uuid.uuid4()}@example.com"
+        payload = AdminUserCreateRequest(
+            firstName="Mod",
+            lastName="User",
+            email=email,
+            role="moderator",
+        )
+
+        async with async_session_factory() as session:
+            res = await admin_create_user(payload, session)
+            assert res.status is True
+            assert res.data["authProvider"] == "local"
+            assert res.data["emailSent"] is True
+
+            stmt = select(User).options(selectinload(User.roles)).where(User.email == email)
+            user = (await session.execute(stmt)).scalar_one()
+            assert user.firebase_uid is None
+            assert user.password_hash is not None
+            assert user.role == "moderator"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_admin_create_user_creates_firebase_account(monkeypatch) -> None:
+    try:
+        await init_db()
+
+        firebase_uid = f"firebase-created-user-{uuid.uuid4()}"
+
+        class _FirebaseUser:
+            uid = firebase_uid
+
+        def _mock_create_firebase_user(**kwargs):
+            assert kwargs["email"].endswith("@example.com")
+            assert kwargs["password"]
+            return _FirebaseUser()
+
+        async def _mock_temp_password_email(*_args, **_kwargs):
+            return True
+
+        monkeypatch.setattr("core.auth.services.create_firebase_user", _mock_create_firebase_user)
+        monkeypatch.setattr("core.auth.services.delete_firebase_user", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("core.email_service.send_temporary_password_email", _mock_temp_password_email)
+
+        email = f"firebase_admin_create_{uuid.uuid4()}@example.com"
+        payload = AdminUserCreateRequest(
+            firstName="Firebase",
+            lastName="User",
+            email=email,
+            role="user",
+        )
+
+        async with async_session_factory() as session:
+            res = await admin_create_user(payload, session)
+            assert res.status is True
+            assert res.data["authProvider"] == "firebase"
+
+            stmt = select(User).options(selectinload(User.roles)).where(User.email == email)
+            user = (await session.execute(stmt)).scalar_one()
+            assert user.firebase_uid == firebase_uid
+            assert user.password_hash is not None
+            assert user.role == "user"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_admin_change_password_updates_firebase_for_firebase_user(monkeypatch) -> None:
+    try:
+        await init_db()
+
+        updated_passwords = []
+
+        def _mock_update_firebase_password(uid, password):
+            updated_passwords.append((uid, password))
+
+        monkeypatch.setattr("core.auth.services.update_firebase_password", _mock_update_firebase_password)
+
+        firebase_uid = f"firebase-password-user-{uuid.uuid4()}"
+        async with async_session_factory() as session:
+            user = User(
+                firebase_uid=firebase_uid,
+                email=f"firebase_password_{uuid.uuid4()}@example.com",
+                password_hash=PASSWORD_HASHER.hash("OldPassword123!"),
+                status=UserStatus.active,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+
+            res = await change_password(
+                ChangePasswordRequest(
+                    current_password="OldPassword123!",
+                    new_password="NewPassword123!",
+                ),
+                user,
+                session,
+            )
+
+            assert res.status is True
+            assert updated_passwords == [(firebase_uid, "NewPassword123!")]
+            assert PASSWORD_HASHER.verify("NewPassword123!", user.password_hash)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_admin_change_password_local_user_does_not_call_firebase(monkeypatch) -> None:
+    try:
+        await init_db()
+
+        def _raise_if_called(*_args, **_kwargs):
+            raise AssertionError("Firebase should not be called for local users")
+
+        monkeypatch.setattr("core.auth.services.update_firebase_password", _raise_if_called)
+
+        async with async_session_factory() as session:
+            user = User(
+                email=f"local_password_{uuid.uuid4()}@example.com",
+                password_hash=PASSWORD_HASHER.hash("OldPassword123!"),
+                status=UserStatus.active,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+
+            res = await change_password(
+                ChangePasswordRequest(
+                    current_password="OldPassword123!",
+                    new_password="NewPassword123!",
+                ),
+                user,
+                session,
+            )
+
+            assert res.status is True
+            assert PASSWORD_HASHER.verify("NewPassword123!", user.password_hash)
     finally:
         await engine.dispose()
 
