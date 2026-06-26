@@ -87,3 +87,16 @@ class RecommendedUserResponse(BaseModel):
     major: str | None = None
     minor: str | None = None
     edu_level: str | None = None
+    profile_photo_key: str | None = None
+
+
+class PendingLynkupRequestResponse(BaseModel):
+    lynkup_id: UUID
+    user_id: UUID
+    status: str
+    first_name: str | None = None
+    last_name: str | None = None
+    profile_photo_key: str | None = None
+
+    class Config:
+        from_attributes = True

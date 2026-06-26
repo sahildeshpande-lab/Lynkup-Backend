@@ -124,8 +124,9 @@ async def build_user_base_response(
         "bannerPhotoUrl": generate_download_url(profile.banner_photo_url) if (profile and profile.banner_photo_url) else None,
         "status": user.status.value if hasattr(user.status, "value") else str(user.status),
         "university": university_name if university_name is not None else (str(profile.university_id) if (profile and profile.university_id) else None),
-         "university_details":{
-			"id":profile.university_id , "university_name":university_name
+        "university_details": {
+			"id": profile.university_id if profile else None,
+			"university_name": university_name
 		},
         "major": profile.major if profile else None,
         "minor": profile.minor if profile else None,

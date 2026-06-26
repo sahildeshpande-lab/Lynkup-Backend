@@ -77,7 +77,7 @@ async def get_current_user(
         except AccountExistsException as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"User already registered via {exc.registration_type}")
         else:
-            user = user
+            user == user
 
     if user.deleted_at:
         raise HTTPException(
@@ -85,10 +85,32 @@ async def get_current_user(
             detail="Account deleted"
         )
 
+    # if user.status == UserStatus.suspended:
+    #     raise HTTPException(
+    #         status_code=status.HTTP_403_FORBIDDEN,
+    #         detail="Account is suspeded",
+    #     )
+    # if user.status == UserStatus.banned:
+    #     raise HTTPException(
+    #         status_code=status.HTTP_403_FORBIDDEN,
+    #         detail="Account is banned",
+    #     )
+    # if user.status == UserStatus.pending:
+    #     raise HTTPException(
+    #         status_code=status.HTTP_403_FORBIDDEN,
+    #         detail="Account is pending",
+    #     )
+    
+    messages = {
+    UserStatus.pending: "Account is pending",
+    UserStatus.suspended: "Account is suspended",
+    UserStatus.banned: "Account is banned",
+    }
+
     if user.status != UserStatus.active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is not active",
+            detail=messages.get(user.status, "Account is not active"),
         )
 
     return user

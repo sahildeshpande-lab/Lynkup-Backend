@@ -600,12 +600,12 @@ async def _fetch_users_with_details(
 
 async def export_users(page: int | None, page_size: int | None, db: AsyncSession) -> dict:
     if page is not None and page_size is not None:
-        total_items = int((await db.execute(select(func.count(User.id)).join(UserRole,UserRole.user_id == User.id).join(Role,Role.id == UserRole.role_id).where(User.is_deleted.is_(False),Role.name=="user"))).scalar_one())
-        items = await _fetch_users_with_details(db, page, page_size)
+        total_items = int((await db.execute(select(func.count(User.id)).join(UserRole,UserRole.user_id == User.id).join(Role,Role.id == UserRole.role_id).where(User.is_deleted.is_(False),Role.name=="users"))).scalar_one())
+        items = await _fetch_users_with_details(db, page, page_size,role="user")
         return build_paginated_response(items, page, page_size, total_items).model_dump()
     else:
         # Default case: list all users
-        items = await _fetch_users_with_details(db)
+        items = await _fetch_users_with_details(db,role="user")
         total_items = len(items)
         return build_paginated_response(items, 1, max(total_items, 1), total_items).model_dump()
 

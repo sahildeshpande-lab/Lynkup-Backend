@@ -331,13 +331,10 @@ def build_lynkup_response_email_html(full_name: str | None = None, response_stat
 
 
 async def send_lynkup_response_email(to_email: str, response_status: str, full_name: str | None = None) -> bool:
-    """Queues a transactional email for connection response. Sent by cron."""
-    return await _send_email(
-        to_email, 
-        f"KampuLynk Connection {response_status.capitalize()}", 
-        build_lynkup_response_email_html(full_name, response_status), 
-        purpose="Connection Update"
-    )
+    """Send Lynkup response email immediately (send first, then log)."""
+    subject = f"KampuLynk Connection {response_status.capitalize()}"
+    html_content = build_lynkup_response_email_html(full_name, response_status)
+    return await _send_email_immediately(to_email, subject, html_content, purpose="Connection Update")
 
 
 async def send_temporary_password_email(

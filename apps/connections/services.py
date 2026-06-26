@@ -9,6 +9,7 @@ from sqlalchemy import or_, and_, select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, status
 
+from apps.connections.db_models import Block,Connection,ConnectionRequest,ConnectionRecommendationSnapshot,Follow
 from apps.profiles.db_models.profile_db_model import Profile
 from sqlalchemy import update
 from apps.profiles.db_models import Profile
@@ -191,14 +192,22 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
     from apps.accounts.db_models import User
     from apps.profiles.db_models import Profile
     from core.email_service import send_lynkup_response_email
-    
-    sender_stmt = select(User, Profile).join(Profile, Profile.user_id == User.id).where(User.id == req.sender_user_id)
-    sender_result = await db.execute(sender_stmt)
-    sender_row = sender_result.first()
-    if sender_row:
-        sender_user, sender_profile = sender_row
-        full_name = f"{sender_profile.first_name} {sender_profile.last_name}".strip() if sender_profile else None
-        await send_lynkup_response_email(sender_user.email, response, full_name)
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info("Attempting to send Lynkup response email for request %s", req.id)
+    try:
+        sender_stmt = select(User, Profile).join(Profile, Profile.user_id == User.id).where(User.id == req.sender_user_id)
+        sender_result = await db.execute(sender_stmt)
+        sender_row = sender_result.first()
+        if sender_row:
+            sender_user, sender_profile = sender_row
+            full_name = f"{sender_profile.first_name} {sender_profile.last_name}".strip() if sender_profile else None
+            await send_lynkup_response_email(sender_user.email, response, full_name)
+            logger.info("Lynkup response email queued for %s", sender_user.email)
+        else:
+            logger.warning("Sender user not found for Lynkup response email, user_id=%s", req.sender_user_id)
+    except Exception as e:
+        logger.exception("Failed to queue Lynkup response email: %s", e)
 
     return ApiResponse(status=True, message=f"Request {response} successfully.", data=req)
 
@@ -394,26 +403,59 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
             "university": university_name,
             "major": candidate.major,
             "minor": candidate.minor,
-            "edu_level": candidate.edu_level
+            "edu_level": candidate.edu_level,
+            "profile_photo_key": candidate.profile_photo_url,
         })
         
     scored_candidates.sort(key=lambda x: x["score"], reverse=True)
     return scored_candidates
 
 
-async def get_pending_requests(db: AsyncSession, user_id: UUID) -> ApiResponse:
-    stmt = select(ConnectionRequest).where(
+async def get_pending_requests(
+    db: AsyncSession,
+    user_id: UUID,
+    page: int | None = None,
+    page_size: int | None = None,
+    search: str | None = None,
+) -> ApiResponse:
+    from common.pagination import paginate_items
+
+    stmt = select(ConnectionRequest, Profile).join(
+        Profile, Profile.user_id == ConnectionRequest.sender_user_id
+    ).where(
         ConnectionRequest.receiver_user_id == user_id,
         ConnectionRequest.status == "pending"
     )
+    
+    if search:
+        search_pattern = f"%{search.strip()}%"
+        stmt = stmt.where(
+            or_(
+                Profile.first_name.ilike(search_pattern),
+                Profile.last_name.ilike(search_pattern)
+            )
+        )
+        
     result = await db.execute(stmt)
-    requests = result.scalars().all()
+    rows = result.all()
+    
     data = [
         {
-            "lynkup_id": str(req.id),
-            "user_id": str(req.sender_user_id),
-            "status": req.status
+            "lynkup_id": req.id,
+            "user_id": req.sender_user_id,
+            "status": req.status,
+            "first_name": profile.first_name,
+            "last_name": profile.last_name,
+            "profile_photo_key": profile.profile_photo_url,
         }
-        for req in requests
+        for req, profile in rows
     ]
-    return ApiResponse(status=True, message="Lynkup Request pending", data=data)
+    
+    if page is None and page_size is None:
+        # if not provided: ALL
+        return ApiResponse(status=True, message="Lynkup Request pending", data=data)
+        
+    p = page or 1
+    ps = page_size or 20
+    paginated = paginate_items(data, page=p, page_size=ps)
+    return ApiResponse(status=True, message="Lynkup Request pending", data=paginated.model_dump())

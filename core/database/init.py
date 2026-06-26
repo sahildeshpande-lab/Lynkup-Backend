@@ -12,6 +12,30 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await conn.run_sync(SQLModel.metadata.create_all)
+
+    # Isolated transactions for ALTER TYPE ADD VALUE
+    for val in ["draft", "processing", "published", "flagged", "hidden", "deleted"]:
+        async with engine.begin() as conn:
+            try:
+                res = await conn.execute(text(
+                    "SELECT 1 FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid WHERE t.typname = 'poststate' AND e.enumlabel = :val"
+                ), {"val": val})
+                if not res.fetchone():
+                    await conn.execute(text(f"ALTER TYPE poststate ADD VALUE '{val}'"))
+            except Exception:
+                pass
+        
+        async with engine.begin() as conn:
+            try:
+                res = await conn.execute(text(
+                    "SELECT 1 FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid WHERE t.typname = 'mediaassetstate' AND e.enumlabel = :val"
+                ), {"val": val})
+                if not res.fetchone():
+                    await conn.execute(text(f"ALTER TYPE mediaassetstate ADD VALUE '{val}'"))
+            except Exception:
+                pass
+
+    async with engine.begin() as conn:
         try:
             await conn.execute(text("ALTER TYPE onboardingstatus ADD VALUE IF NOT EXISTS 'pending'"))
         except Exception:
@@ -25,7 +49,6 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE profiles DROP COLUMN IF EXISTS profile_photo_media_id"))
         await conn.execute(text("ALTER TABLE profiles DROP COLUMN IF EXISTS banner_media_id"))
         await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS welcome_message VARCHAR(255)"))
-        await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS academic_program_id UUID"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS registration_type VARCHAR(20) NOT NULL DEFAULT 'email'"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)"))
         await conn.execute(text("ALTER TABLE users ALTER COLUMN firebase_uid DROP NOT NULL"))
@@ -34,7 +57,6 @@ async def init_db() -> None:
         # Academic program table removal and field additions/removals
         await conn.execute(text("DROP TABLE IF EXISTS academic_programs CASCADE"))
         await conn.execute(text("DROP TABLE IF EXISTS user_identities CASCADE"))
-        await conn.execute(text("ALTER TABLE profiles DROP COLUMN IF EXISTS academic_program_id"))
         await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS profile_interests_id UUID"))
         await conn.execute(text("ALTER TABLE universities ADD COLUMN IF NOT EXISTS academic_program JSON"))
 

@@ -1,0 +1,553 @@
+from __future__ import annotations
+
+import io
+import uuid
+import pytest
+import pytest_asyncio
+from fastapi import UploadFile, HTTPException
+import httpx
+from httpx import AsyncClient
+from sqlmodel import select
+from sqlalchemy import text
+
+from entrypoints.api import app
+from core.database.session import async_session_factory
+from core.database.init import init_db
+from core.security.auth import get_current_user
+from apps.accounts.db_models import User
+from apps.feed.db_models import Post, MediaAsset, PostAttachment
+from common.enums import MediaType, MediaAssetState, PostState
+from apps.feed.schemas import CreatePostRequest, MediaItem, UpdatePostRequest
+from apps.feed.services import (
+    upload_post_media_service,
+    create_post_service,
+    update_post_service,
+    publish_post_service,
+    get_post_service,
+    delete_post_service,
+    list_user_posts_service,
+    get_feed_service,
+)
+
+
+async def clean_feed_pytest_data(session):
+    # Find test users
+    result = await session.execute(
+        select(User).where(User.email.in_(["pytest_feed_user@example.com", "pytest_feed_other@example.com"]))
+    )
+    users = result.scalars().all()
+    user_ids = [u.id for u in users]
+    
+    if user_ids:
+        # Delete dependencies using PostgreSQL = ANY(:user_ids) syntax
+        params = {"user_ids": list(user_ids)}
+        
+        await session.execute(text("""
+            DELETE FROM post_attachments 
+            WHERE media_asset_id IN (SELECT id FROM media_assets WHERE owner_user_id = ANY(:user_ids))
+               OR post_id IN (SELECT id FROM posts WHERE author_user_id = ANY(:user_ids))
+        """), params)
+        
+        await session.execute(text("""
+            DELETE FROM post_reactions 
+            WHERE user_id = ANY(:user_ids) 
+               OR post_id IN (SELECT id FROM posts WHERE author_user_id = ANY(:user_ids))
+        """), params)
+        
+        await session.execute(text("""
+            DELETE FROM post_revisions 
+            WHERE editor_user_id = ANY(:user_ids) 
+               OR post_id IN (SELECT id FROM posts WHERE author_user_id = ANY(:user_ids))
+        """), params)
+        
+        await session.execute(text("""
+            DELETE FROM post_hashtags 
+            WHERE post_id IN (SELECT id FROM posts WHERE author_user_id = ANY(:user_ids))
+        """), params)
+        
+        await session.execute(text("""
+            DELETE FROM post_topics 
+            WHERE post_id IN (SELECT id FROM posts WHERE author_user_id = ANY(:user_ids))
+        """), params)
+        
+        await session.execute(text("""
+            DELETE FROM link_previews 
+            WHERE post_id IN (SELECT id FROM posts WHERE author_user_id = ANY(:user_ids))
+        """), params)
+        
+        await session.execute(text("""
+            DELETE FROM posts 
+            WHERE author_user_id = ANY(:user_ids)
+        """), params)
+        
+        await session.execute(text("""
+            DELETE FROM media_assets 
+            WHERE owner_user_id = ANY(:user_ids)
+        """), params)
+        
+        await session.execute(text("""
+            DELETE FROM users 
+            WHERE id = ANY(:user_ids)
+        """), params)
+        
+        await session.commit()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def feed_db_cleanup():
+    async with async_session_factory() as session:
+        await clean_feed_pytest_data(session)
+    yield
+    async with async_session_factory() as session:
+        await clean_feed_pytest_data(session)
+
+
+@pytest_asyncio.fixture
+async def db_setup():
+    await init_db()
+
+
+@pytest_asyncio.fixture
+async def test_users(db_setup, feed_db_cleanup):
+    async with async_session_factory() as session:
+        user = User(
+            email="pytest_feed_user@example.com",
+            role="user",
+            firebase_uid=f"uid-feed-{uuid.uuid4()}",
+            status="active"
+        )
+        other = User(
+            email="pytest_feed_other@example.com",
+            role="user",
+            firebase_uid=f"uid-feed-{uuid.uuid4()}",
+            status="active"
+        )
+        session.add(user)
+        session.add(other)
+        await session.commit()
+        await session.refresh(user)
+        await session.refresh(other)
+    return user, other
+
+
+@pytest.mark.asyncio
+async def test_upload_post_media_service_success(test_users) -> None:
+    user, _ = test_users
+    file_content = b"fake image content"
+    file = UploadFile(
+        filename="test_image.png",
+        file=io.BytesIO(file_content),
+        headers={"content-type": "image/png"}
+    )
+
+    async with async_session_factory() as session:
+        res = await upload_post_media_service(
+            user_id=user.id,
+            file=file,
+            media_type=MediaType.image,
+            db=session
+        )
+
+        assert res["id"] is not None
+        assert "posts/" in res["key"]
+        assert res["key"].endswith(".png")
+        assert res["type"] == MediaType.image
+        assert "/static/uploads/" in res["url"]
+
+        # Verify database record
+        media_id = res["id"]
+        stmt = select(MediaAsset).where(MediaAsset.id == media_id)
+        db_media = (await session.execute(stmt)).scalar_one_or_none()
+
+        assert db_media is not None
+        assert db_media.owner_user_id == user.id
+        assert db_media.key == res["key"]
+        assert db_media.original_filename == "test_image.png"
+        assert db_media.mime_type == "image/png"
+        assert db_media.file_size == len(file_content)
+        assert db_media.state == MediaAssetState.published
+
+
+@pytest.mark.asyncio
+async def test_upload_post_media_service_validation_failures(test_users) -> None:
+    user, _ = test_users
+
+    # Empty file
+    file_empty = UploadFile(
+        filename="empty.png",
+        file=io.BytesIO(b""),
+        headers={"content-type": "image/png"}
+    )
+    async with async_session_factory() as session:
+        with pytest.raises(HTTPException) as exc_info:
+            await upload_post_media_service(user.id, file_empty, MediaType.image, session)
+        assert exc_info.value.status_code == 400
+        assert "empty" in exc_info.value.detail
+
+    # Mismatch media type
+    file_mismatch = UploadFile(
+        filename="video.mp4",
+        file=io.BytesIO(b"some video bytes"),
+        headers={"content-type": "video/mp4"}
+    )
+    async with async_session_factory() as session:
+        with pytest.raises(HTTPException) as exc_info:
+            await upload_post_media_service(user.id, file_mismatch, MediaType.image, session)
+        assert exc_info.value.status_code == 400
+        assert "Invalid file type" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_create_post_service_success(test_users) -> None:
+    user, _ = test_users
+
+    # First upload two media assets
+    async with async_session_factory() as session:
+        m1 = MediaAsset(
+            owner_user_id=user.id,
+            key=f"posts/{uuid.uuid4()}.jpg",
+            type=MediaType.image,
+            original_filename="img1.jpg",
+            mime_type="image/jpeg",
+            file_size=1234,
+            state=MediaAssetState.published
+        )
+        m2 = MediaAsset(
+            owner_user_id=user.id,
+            key=f"posts/{uuid.uuid4()}.mp4",
+            type=MediaType.video,
+            original_filename="vid1.mp4",
+            mime_type="video/mp4",
+            file_size=5678,
+            state=MediaAssetState.published
+        )
+        session.add(m1)
+        session.add(m2)
+        await session.commit()
+        await session.refresh(m1)
+        await session.refresh(m2)
+
+    # Create post with those media assets
+    payload = CreatePostRequest(
+        caption="A wonderful day",
+        text="<p>Enjoying the sunshine!</p>",
+        visibility="public",
+        media=[
+            MediaItem(id=m1.id, type=m1.type),
+            MediaItem(id=m2.id, type=m2.type)
+        ]
+    )
+
+    async with async_session_factory() as session:
+        post = await create_post_service(user.id, payload, session)
+
+        assert post.id is not None
+        assert post.author_user_id == user.id
+        assert post.caption == "A wonderful day"
+        assert post.content_html == "<p>Enjoying the sunshine!</p>"
+        assert post.state == PostState.draft  # public defaults to draft
+
+        # Check PostAttachment records
+        stmt = select(PostAttachment).where(PostAttachment.post_id == post.id)
+        attachments = (await session.execute(stmt)).scalars().all()
+        assert len(attachments) == 2
+        asset_ids = {a.media_asset_id for a in attachments}
+        assert m1.id in asset_ids
+        assert m2.id in asset_ids
+
+
+@pytest.mark.asyncio
+async def test_create_post_service_visibility_hidden(test_users) -> None:
+    user, _ = test_users
+
+    payload = CreatePostRequest(
+        caption="Hidden post",
+        text="Invisible",
+        visibility="hidden",
+        media=[]
+    )
+
+    async with async_session_factory() as session:
+        post = await create_post_service(user.id, payload, session)
+        assert post.state == PostState.hidden
+
+
+@pytest.mark.asyncio
+async def test_create_post_service_unauthorized_media(test_users) -> None:
+    user, other = test_users
+
+    # Upload media asset owned by other_user
+    async with async_session_factory() as session:
+        other_media = MediaAsset(
+            owner_user_id=other.id,
+            key=f"posts/{uuid.uuid4()}.jpg",
+            type=MediaType.image,
+            original_filename="other_img.jpg",
+            mime_type="image/jpeg",
+            file_size=1000,
+            state=MediaAssetState.published
+        )
+        session.add(other_media)
+        await session.commit()
+        await session.refresh(other_media)
+
+    payload = CreatePostRequest(
+        caption="Try to steal media",
+        text="testing",
+        visibility="public",
+        media=[MediaItem(id=other_media.id, type=other_media.type)]
+    )
+
+    async with async_session_factory() as session:
+        with pytest.raises(HTTPException) as exc_info:
+            await create_post_service(user.id, payload, session)
+        assert exc_info.value.status_code == 403
+        assert "does not belong to the authenticated user" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_create_post_service_nonexistent_media(test_users) -> None:
+    user, _ = test_users
+
+    payload = CreatePostRequest(
+        caption="Fake media ID",
+        text="testing",
+        visibility="public",
+        media=[MediaItem(id=uuid.uuid4(), type=MediaType.image)]
+    )
+
+    async with async_session_factory() as session:
+        with pytest.raises(HTTPException) as exc_info:
+            await create_post_service(user.id, payload, session)
+        assert exc_info.value.status_code == 404
+        assert "not found" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_routes_endpoints_via_test_client(test_users) -> None:
+    user, _ = test_users
+
+    async def _override_get_current_user():
+        return user
+
+    import httpx
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Test 1: POST /postupload
+            file_data = b"image content"
+            files = {
+                "file": ("test.jpg", io.BytesIO(file_data), "image/jpeg")
+            }
+            data = {
+                "type": "image"
+            }
+            response = await ac.post("/api/v1/postupload", files=files, data=data)
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] is True
+            assert body["message"] == "image uploaded"
+            media_id = body["data"]["id"]
+
+            # Test 2: POST /post
+            post_payload = {
+                "caption": "Test Post via Client",
+                "text": "Hello world!",
+                "visibility": "public",
+                "media": [
+                    {
+                        "id": media_id,
+                        "type": "image"
+                    }
+                ]
+            }
+            response_post = await ac.post("/api/v1/post", json=post_payload)
+            assert response_post.status_code == 200
+            body_post = response_post.json()
+            assert body_post["status"] is True
+            assert body_post["message"] == "Post created successfully"
+            assert "id" in body_post["data"]
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_update_post_service_success(test_users) -> None:
+    user, _ = test_users
+    payload = CreatePostRequest(caption="Original", text="Original text", visibility="public")
+    async with async_session_factory() as session:
+        post = await create_post_service(user.id, payload, session)
+        post_id = post.id
+        assert post.state == PostState.draft
+
+    update_payload = UpdatePostRequest(caption="Updated Caption", text="Updated text", visibility="hidden")
+    async with async_session_factory() as session:
+        post = await update_post_service(post_id, user.id, update_payload, force_draft=False, db=session)
+        assert post.caption == "Updated Caption"
+        assert post.content_html == "Updated text"
+        assert post.state == PostState.hidden
+
+    update_payload_draft = UpdatePostRequest(caption="Draft Caption", text="Draft text", visibility="public")
+    async with async_session_factory() as session:
+        post = await update_post_service(post_id, user.id, update_payload_draft, force_draft=True, db=session)
+        assert post.caption == "Draft Caption"
+        assert post.content_html == "Draft text"
+        assert post.state == PostState.draft
+
+
+@pytest.mark.asyncio
+async def test_publish_post_service_success(test_users) -> None:
+    user, _ = test_users
+    payload = CreatePostRequest(caption="Original", text="Original text", visibility="public")
+    async with async_session_factory() as session:
+        post = await create_post_service(user.id, payload, session)
+        post_id = post.id
+
+    async with async_session_factory() as session:
+        post = await publish_post_service(post_id, user.id, session)
+        assert post.state == PostState.processing
+
+
+@pytest.mark.asyncio
+async def test_get_post_service_visibility(test_users) -> None:
+    user, other = test_users
+    payload = CreatePostRequest(caption="Draft", text="Original text", visibility="public")
+    async with async_session_factory() as session:
+        post = await create_post_service(user.id, payload, session)
+        post_id = post.id
+
+    async with async_session_factory() as session:
+        p = await get_post_service(post_id, user.id, session)
+        assert p.id == post_id
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_post_service(post_id, other.id, session)
+        assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_delete_post_service_success(test_users) -> None:
+    user, _ = test_users
+    payload = CreatePostRequest(caption="Delete me", text="Bye", visibility="public")
+    async with async_session_factory() as session:
+        post = await create_post_service(user.id, payload, session)
+        post_id = post.id
+
+    async with async_session_factory() as session:
+        await delete_post_service(post_id, user.id, session)
+
+    async with async_session_factory() as session:
+        with pytest.raises(HTTPException) as exc_info:
+            await get_post_service(post_id, user.id, session)
+        assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_user_posts_service_privacy(test_users) -> None:
+    user, other = test_users
+    
+    async with async_session_factory() as session:
+        p1 = Post(author_user_id=user.id, caption="Draft Post", state=PostState.draft)
+        p2 = Post(author_user_id=user.id, caption="Published Post", state=PostState.published)
+        session.add(p1)
+        session.add(p2)
+        await session.commit()
+    
+    async with async_session_factory() as session:
+        posts_owner = await list_user_posts_service(user.id, user.id, session)
+        assert len(posts_owner) == 2
+        
+        posts_other = await list_user_posts_service(user.id, other.id, session)
+        assert len(posts_other) == 1
+        assert posts_other[0].caption == "Published Post"
+
+
+@pytest.mark.asyncio
+async def test_get_feed_service_success(test_users) -> None:
+    user, other = test_users
+    
+    async with async_session_factory() as session:
+        p1 = Post(author_user_id=user.id, caption="Draft Post", state=PostState.draft)
+        p2 = Post(author_user_id=user.id, caption="Published Post 1", state=PostState.published)
+        p3 = Post(author_user_id=other.id, caption="Published Post 2", state=PostState.published)
+        p4 = Post(author_user_id=other.id, caption="Hidden Post", state=PostState.hidden)
+        session.add_all([p1, p2, p3, p4])
+        await session.commit()
+        
+    async with async_session_factory() as session:
+        feed = await get_feed_service(user.id, session)
+        assert len(feed) == 2
+        captions = {f.caption for f in feed}
+        assert "Published Post 1" in captions
+        assert "Published Post 2" in captions
+
+
+@pytest.mark.asyncio
+async def test_routes_post_management_flow(test_users) -> None:
+    user, other = test_users
+
+    async def _override_get_current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            # 1. Create a post
+            create_res = await ac.post("/api/v1/post", json={
+                "caption": "Init Caption",
+                "text": "Init text",
+                "visibility": "public"
+            })
+            assert create_res.status_code == 200
+            post_id = create_res.json()["data"]["id"]
+
+            # 2. PATCH /posts/{id}/draft
+            draft_res = await ac.patch(f"/api/v1/posts/{post_id}/draft", json={
+                "caption": "Draft Updated Caption",
+                "text": "Draft updated text",
+                "visibility": "public"
+            })
+            assert draft_res.status_code == 200
+            assert draft_res.json()["data"]["state"] == "draft"
+            assert draft_res.json()["data"]["caption"] == "Draft Updated Caption"
+
+            # 3. POST /posts/{id}/publish
+            publish_res = await ac.post(f"/api/v1/posts/{post_id}/publish")
+            assert publish_res.status_code == 200
+            assert publish_res.json()["data"]["state"] == "processing"
+
+            # 4. GET /posts/{id}
+            get_res = await ac.get(f"/api/v1/posts/{post_id}")
+            assert get_res.status_code == 200
+            assert get_res.json()["data"]["caption"] == "Draft Updated Caption"
+
+            # 5. PATCH /posts/{id}
+            patch_res = await ac.patch(f"/api/v1/posts/{post_id}", json={
+                "caption": "General Updated Caption",
+                "text": "General updated text",
+                "visibility": "hidden"
+            })
+            assert patch_res.status_code == 200
+            assert patch_res.json()["data"]["state"] == "hidden"
+
+            # 6. GET /posts (user posts)
+            list_res = await ac.get("/api/v1/posts")
+            assert list_res.status_code == 200
+            assert len(list_res.json()["data"]) >= 1
+
+            # 7. GET /feed
+            feed_res = await ac.get("/api/v1/feed")
+            assert feed_res.status_code == 200
+
+            # 8. DELETE /posts/{id}
+            delete_res = await ac.delete(f"/api/v1/posts/{post_id}")
+            assert delete_res.status_code == 200
+
+            # Verify deleted
+            get_deleted = await ac.get(f"/api/v1/posts/{post_id}")
+            assert get_deleted.status_code == 404
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+

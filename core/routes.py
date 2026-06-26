@@ -7,6 +7,7 @@ from apps.profiles.routes import router as profiles_router
 from apps.search.routes import router as search_router
 from apps.uploads.routes import router as uploads_router
 from apps.connections.routes import router as connections_router
+from apps.feed.routes import router as feed_router
 
 
 def build_router() -> APIRouter:
@@ -17,4 +18,5 @@ def build_router() -> APIRouter:
     router.include_router(search_router, dependencies=[Depends(get_current_user)])
     router.include_router(uploads_router, dependencies=[Depends(get_current_user)])
     router.include_router(connections_router, dependencies=[Depends(get_current_user)])
+    router.include_router(feed_router, dependencies=[Depends(get_current_user)])
     return router

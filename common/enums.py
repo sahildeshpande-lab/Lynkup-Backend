@@ -64,6 +64,41 @@ class LynkupResponse(str, Enum):
     declined = "declined"
 
 
+class PostState(str, Enum):
+    draft = "draft"
+    processing = "processing"
+    published = "published"
+    flagged = "flagged"
+    hidden = "hidden"
+    deleted = "deleted"
+
+
+class MediaAssetState(str, Enum):
+    draft = "draft"
+    processing = "processing"
+    published = "published"
+    flagged = "flagged"
+    hidden = "hidden"
+    deleted = "deleted"
+
+
+class MediaType(str, Enum):
+    image = "image"
+    video = "video"
+    audio = "audio"
+    document = "document"
+    gif = "gif"
+    other = "other"
+
+
+class ReactionType(str, Enum):
+    like = "like"
+    love = "love"
+    celebrate = "celebrate"
+    insightful = "insightful"
+    curious = "curious"
+
+
 from typing import Literal
 
 Role = Literal["user", "moderator", "viewer", "superadmin"]

@@ -115,45 +115,4 @@ def get_public_profile(email: str) -> ApiResponse:
     return ApiResponse(message="public profile fetched", data=services.get_public_profile(email))
 
 
-# @router.post("/users/{userId}/follow", response_model=ApiResponse)
-# def follow_user(userId: str) -> ApiResponse:
-#     return ApiResponse(message="user followed", data=services.follow_user(userId))
-
-
-# @router.delete("/users/{userId}/follow", response_model=ApiResponse)
-# def unfollow_user(userId: str) -> ApiResponse:
-#     return ApiResponse(message="user unfollowed", data=services.unfollow_user(userId))
-
-
-# @router.post("/users/{userId}/block", response_model=ApiResponse)
-# def block_user(userId: str) -> ApiResponse:
-#     return ApiResponse(message="user blocked", data=services.block_user(userId))
-
-
-# @router.delete("/users/{userId}/block", response_model=ApiResponse)
-# def unblock_user(userId: str) -> ApiResponse:
-#     return ApiResponse(message="user unblocked", data=services.unblock_user(userId))
-
-
-# @router.patch("/users/{userId}/report", response_model=ApiResponse)
-# def report_user(userId: str, payload: ReportUserRequest) -> ApiResponse:
-#     return ApiResponse(message="user reported", data=services.report_user(userId, payload))
-
-
-# @router.post("/users/{userId}/lynkup/request", response_model=ApiResponse)
-# def request_lynkup(userId: str) -> ApiResponse:
-#     return ApiResponse(message="lynkup requested", data=services.request_lynkup(userId))
-
-
-# @router.post("/users/{userId}/lynkup/accept", response_model=ApiResponse)
-# def accept_lynkup(userId: str) -> ApiResponse:
-#     return ApiResponse(message="lynkup accepted", data=services.accept_lynkup(userId))
-
-
-# @router.delete("/users/{userId}/lynkup", response_model=ApiResponse)
-# def remove_lynkup(userId: str) -> ApiResponse:
-#     return ApiResponse(message="lynkup removed", data=services.remove_lynkup(userId))
-
-
-
 

@@ -84,15 +84,34 @@ async def unblock_user(
 async def get_connection_recommendations(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
+    page: int | None = Query(None, ge=1),
+    pageSize: int | None = Query(None, ge=1, le=200),
 ):
     candidates = await services.get_recommendations(db, current_user.id)
-    data = [RecommendedUserResponse(**item) for item in candidates]
-    return ApiResponse(data=data)
+    items = [RecommendedUserResponse(**item) for item in candidates]
+    
+    if page is None and pageSize is None:
+        # if not provided: ALL
+        return ApiResponse(data=items)
+        
+    p = page or 1
+    ps = pageSize or 20
+    paginated = paginate_items(items, page=p, page_size=ps)
+    return ApiResponse(data=paginated.model_dump())
 
 
 @router.get("/lynkup", response_model=ApiResponse)
 async def get_pending_requests(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
+    page: int | None = Query(None, ge=1),
+    pageSize: int | None = Query(None, ge=1, le=200),
+    search: str | None = Query(None),
 ):
-    return await services.get_pending_requests(db, current_user.id)
+    return await services.get_pending_requests(
+        db,
+        current_user.id,
+        page=page,
+        page_size=pageSize,
+        search=search
+    )

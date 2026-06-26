@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI,HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from core.lifespan import lifespan
 from core.routes import build_router
 from core.security.auth import bearer_scheme
@@ -16,6 +17,7 @@ USER_TAG = "2] User Management"
 DISCOVERY_TAG = "3] Search & Discovery"
 ADMIN_TAG = "4] Admin Management"
 CONNECTION_TAG = "5] Connection Managements" 
+
 
 
 app = FastAPI(
@@ -50,19 +52,51 @@ import time
 import logging
 
 logger=logging.getLogger(__name__)
-@app.middleware("http")
-async def log_requests(request,call_next):
-    start=time.time()
-    logger.info(f"START{request.method} {request.url}")
-    response=await call_next(request)
-    logger.info(
-        f"END {request.method} {request.url.path}"
-        f"Status = {response.status_code}"
-        f"Time ={time.time()-start:.2f}s"
+# @app.middleware("http")
+# async def log_requests(request,call_next):
+#     start=time.time()
+#     logger.info(f"START{request.method} {request.url}")
+#     response=await call_next(request)
+#     logger.info(
+#         f"END {request.method} {request.url.path}"
+#         f"Status = {response.status_code}"
+#         f"Time ={time.time()-start:.2f}s"
 
+#     )
+#     return response
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "status": False,
+            "message": exc.detail,
+            "data": []
+        },
     )
-    return response
 
+def make_json_serializable(obj):
+    if isinstance(obj, dict):
+        return {k: make_json_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [make_json_serializable(item) for item in obj]
+    elif isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    else:
+        return str(obj)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=422,
+        content={
+            "status": False,
+            "message": "Validation failed",
+            "data": make_json_serializable(exc.errors()),
+        },
+    )
 
 BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")

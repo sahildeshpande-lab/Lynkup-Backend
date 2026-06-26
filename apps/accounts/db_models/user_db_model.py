@@ -69,6 +69,7 @@ class User(SQLModel, table=True):
         sa_relationship=relationship("UserRole", back_populates="user", cascade="all, delete-orphan", lazy="selectin")
     )
 
+
     @property
     def role(self) -> str:
         if hasattr(self, "roles") and self.roles:
@@ -104,6 +105,7 @@ class Role(SQLModel, table=True):
     permissions: List[RolePermission] = Relationship(
         sa_relationship=relationship("RolePermission", back_populates="role", cascade="all, delete-orphan", lazy="selectin")
     )
+    
 
 
 class Permission(SQLModel, table=True):
@@ -130,9 +132,9 @@ class PasswordResetToken(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
 
 
-UserRole.model_rebuild()
-RolePermission.model_rebuild()
-User.model_rebuild()
-Role.model_rebuild()
-Permission.model_rebuild()
-PasswordResetToken.model_rebuild()
+# UserRole.model_rebuild()
+# RolePermission.model_rebuild()
+# User.model_rebuild()
+# Role.model_rebuild()
+# Permission.model_rebuild()
+# PasswordResetToken.model_rebuild()

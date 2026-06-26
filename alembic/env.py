@@ -5,6 +5,7 @@ from sqlalchemy import pool
 from sqlmodel import SQLModel 
 from apps.accounts.db_models import *
 from apps.profiles.db_models import *
+from apps.feed.db_models import *
 
 from alembic import context
 
