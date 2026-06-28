@@ -8,11 +8,11 @@ from core.database.session import get_session
 from core.security.auth import get_current_user
 from apps.accounts.db_models import User
 from common.enums import MediaType
-from apps.feed.schemas import ApiResponse, CreatePostRequest, UpdatePostRequest
+from apps.feed.schemas import ApiResponse, SavePostRequest, DeletePostRequest, EditPostRequest
 from apps.feed.services import (
     upload_post_media_service,
-    create_post_service,
-    update_post_service,
+    save_post_service,
+    edit_post_service,
     publish_post_service,
     get_post_service,
     delete_post_service,
@@ -48,49 +48,23 @@ async def upload_post_media(
 
 
 @router.post("/post", response_model=ApiResponse)
-async def create_post(
-    payload: CreatePostRequest,
+async def save_post(
+    payload: SavePostRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """
-    Create a new post.
-    """
-    post = await create_post_service(
+    post = await save_post_service(
         user_id=current_user.id,
         payload=payload,
         db=db
     )
     return ApiResponse(
         status=True,
-        message="Post created successfully",
+        message="Post created successfully" if payload.id is None else "Post updated and saved as draft",
         data={
-            "id": post.id
+            "id": post.id,
+            "revision_number": post.revision_number
         }
-    )
-
-
-@router.patch("/posts/{id}/draft", response_model=ApiResponse)
-async def update_post_as_draft(
-    id: UUID,
-    payload: UpdatePostRequest,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_session),
-) -> ApiResponse:
-    """
-    Update a post and transition state to draft/hidden.
-    """
-    post = await update_post_service(
-        post_id=id,
-        user_id=current_user.id,
-        payload=payload,
-        force_draft=True,
-        db=db
-    )
-    return ApiResponse(
-        status=True,
-        message="Post updated and saved as draft",
-        data=format_post_detail(post)
     )
 
 
@@ -101,7 +75,7 @@ async def publish_post(
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """
-    Publish a post, updating state to processing.
+    Publish a post.
     """
     post = await publish_post_service(
         post_id=id,
@@ -110,7 +84,7 @@ async def publish_post(
     )
     return ApiResponse(
         status=True,
-        message="Post state updated to processing",
+        message="Post published",
         data=format_post_detail(post)
     )
 
@@ -136,21 +110,18 @@ async def get_post(
     )
 
 
-@router.patch("/posts/{id}", response_model=ApiResponse)
-async def update_post(
-    id: UUID,
-    payload: UpdatePostRequest,
+@router.patch("/posts", response_model=ApiResponse)
+async def edit_post(
+    payload: EditPostRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """
-    Update post fields.
+    Edit/update an existing post. All fields (caption, content_html, visibility, media) are optional.
     """
-    post = await update_post_service(
-        post_id=id,
+    post = await edit_post_service(
         user_id=current_user.id,
         payload=payload,
-        force_draft=False,
         db=db
     )
     return ApiResponse(
@@ -160,9 +131,9 @@ async def update_post(
     )
 
 
-@router.delete("/posts/{id}", response_model=ApiResponse)
+@router.delete("/posts", response_model=ApiResponse)
 async def delete_post(
-    id: UUID,
+    payload: DeletePostRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
@@ -170,7 +141,7 @@ async def delete_post(
     Hard delete a post.
     """
     await delete_post_service(
-        post_id=id,
+        post_id=payload.id,
         user_id=current_user.id,
         db=db
     )

@@ -17,11 +17,11 @@ from core.security.auth import get_current_user
 from apps.accounts.db_models import User
 from apps.feed.db_models import Post, MediaAsset, PostAttachment
 from common.enums import MediaType, MediaAssetState, PostState
-from apps.feed.schemas import CreatePostRequest, MediaItem, UpdatePostRequest
+from apps.feed.schemas import SavePostRequest, EditPostRequest, MediaItem, PostContentPayload, EditPostContentPayload, DeletePostRequest
 from apps.feed.services import (
     upload_post_media_service,
-    create_post_service,
-    update_post_service,
+    save_post_service,
+    edit_post_service,
     publish_post_service,
     get_post_service,
     delete_post_service,
@@ -228,10 +228,12 @@ async def test_create_post_service_success(test_users) -> None:
         await session.refresh(m2)
 
     # Create post with those media assets
-    payload = CreatePostRequest(
-        caption="A wonderful day",
-        text="<p>Enjoying the sunshine!</p>",
-        visibility="public",
+    payload = SavePostRequest(
+        content=PostContentPayload(
+            caption="A wonderful day",
+            content_html="<p>Enjoying the sunshine!</p>",
+            visibility="public"
+        ),
         media=[
             MediaItem(id=m1.id, type=m1.type),
             MediaItem(id=m2.id, type=m2.type)
@@ -239,7 +241,7 @@ async def test_create_post_service_success(test_users) -> None:
     )
 
     async with async_session_factory() as session:
-        post = await create_post_service(user.id, payload, session)
+        post = await save_post_service(user.id, payload, session)
 
         assert post.id is not None
         assert post.author_user_id == user.id
@@ -260,15 +262,17 @@ async def test_create_post_service_success(test_users) -> None:
 async def test_create_post_service_visibility_hidden(test_users) -> None:
     user, _ = test_users
 
-    payload = CreatePostRequest(
-        caption="Hidden post",
-        text="Invisible",
-        visibility="hidden",
+    payload = SavePostRequest(
+        content=PostContentPayload(
+            caption="Hidden post",
+            content_html="Invisible",
+            visibility="hidden"
+        ),
         media=[]
     )
 
     async with async_session_factory() as session:
-        post = await create_post_service(user.id, payload, session)
+        post = await save_post_service(user.id, payload, session)
         assert post.state == PostState.hidden
 
 
@@ -291,16 +295,18 @@ async def test_create_post_service_unauthorized_media(test_users) -> None:
         await session.commit()
         await session.refresh(other_media)
 
-    payload = CreatePostRequest(
-        caption="Try to steal media",
-        text="testing",
-        visibility="public",
+    payload = SavePostRequest(
+        content=PostContentPayload(
+            caption="Try to steal media",
+            content_html="testing",
+            visibility="public"
+        ),
         media=[MediaItem(id=other_media.id, type=other_media.type)]
     )
 
     async with async_session_factory() as session:
         with pytest.raises(HTTPException) as exc_info:
-            await create_post_service(user.id, payload, session)
+            await save_post_service(user.id, payload, session)
         assert exc_info.value.status_code == 403
         assert "does not belong to the authenticated user" in exc_info.value.detail
 
@@ -309,16 +315,18 @@ async def test_create_post_service_unauthorized_media(test_users) -> None:
 async def test_create_post_service_nonexistent_media(test_users) -> None:
     user, _ = test_users
 
-    payload = CreatePostRequest(
-        caption="Fake media ID",
-        text="testing",
-        visibility="public",
+    payload = SavePostRequest(
+        content=PostContentPayload(
+            caption="Fake media ID",
+            content_html="testing",
+            visibility="public"
+        ),
         media=[MediaItem(id=uuid.uuid4(), type=MediaType.image)]
     )
 
     async with async_session_factory() as session:
         with pytest.raises(HTTPException) as exc_info:
-            await create_post_service(user.id, payload, session)
+            await save_post_service(user.id, payload, session)
         assert exc_info.value.status_code == 404
         assert "not found" in exc_info.value.detail
 
@@ -352,9 +360,11 @@ async def test_routes_endpoints_via_test_client(test_users) -> None:
 
             # Test 2: POST /post
             post_payload = {
-                "caption": "Test Post via Client",
-                "text": "Hello world!",
-                "visibility": "public",
+                "content": {
+                    "caption": "Test Post via Client",
+                    "content_html": "Hello world!",
+                    "visibility": "public"
+                },
                 "media": [
                     {
                         "id": media_id,
@@ -375,22 +385,32 @@ async def test_routes_endpoints_via_test_client(test_users) -> None:
 @pytest.mark.asyncio
 async def test_update_post_service_success(test_users) -> None:
     user, _ = test_users
-    payload = CreatePostRequest(caption="Original", text="Original text", visibility="public")
+    payload = SavePostRequest(
+        content=PostContentPayload(caption="Original", content_html="Original text", visibility="public")
+    )
     async with async_session_factory() as session:
-        post = await create_post_service(user.id, payload, session)
+        post = await save_post_service(user.id, payload, session)
         post_id = post.id
         assert post.state == PostState.draft
 
-    update_payload = UpdatePostRequest(caption="Updated Caption", text="Updated text", visibility="hidden")
+    # Edit via general edit service (edit_post_service)
+    edit_payload = EditPostRequest(
+        id=post_id,
+        content=EditPostContentPayload(caption="Updated Caption", content_html="Updated text", visibility="hidden")
+    )
     async with async_session_factory() as session:
-        post = await update_post_service(post_id, user.id, update_payload, force_draft=False, db=session)
+        post = await edit_post_service(user.id, edit_payload, session)
         assert post.caption == "Updated Caption"
         assert post.content_html == "Updated text"
         assert post.state == PostState.hidden
 
-    update_payload_draft = UpdatePostRequest(caption="Draft Caption", text="Draft text", visibility="public")
+    # Update draft via save_post_service with id
+    update_payload_draft = SavePostRequest(
+        id=post_id,
+        content=PostContentPayload(caption="Draft Caption", content_html="Draft text", visibility="public")
+    )
     async with async_session_factory() as session:
-        post = await update_post_service(post_id, user.id, update_payload_draft, force_draft=True, db=session)
+        post = await save_post_service(user.id, update_payload_draft, session)
         assert post.caption == "Draft Caption"
         assert post.content_html == "Draft text"
         assert post.state == PostState.draft
@@ -399,22 +419,26 @@ async def test_update_post_service_success(test_users) -> None:
 @pytest.mark.asyncio
 async def test_publish_post_service_success(test_users) -> None:
     user, _ = test_users
-    payload = CreatePostRequest(caption="Original", text="Original text", visibility="public")
+    payload = SavePostRequest(
+        content=PostContentPayload(caption="Original", content_html="Original text", visibility="public")
+    )
     async with async_session_factory() as session:
-        post = await create_post_service(user.id, payload, session)
+        post = await save_post_service(user.id, payload, session)
         post_id = post.id
 
     async with async_session_factory() as session:
         post = await publish_post_service(post_id, user.id, session)
-        assert post.state == PostState.processing
+        assert post.state == PostState.published
 
 
 @pytest.mark.asyncio
 async def test_get_post_service_visibility(test_users) -> None:
     user, other = test_users
-    payload = CreatePostRequest(caption="Draft", text="Original text", visibility="public")
+    payload = SavePostRequest(
+        content=PostContentPayload(caption="Draft", content_html="Original text", visibility="public")
+    )
     async with async_session_factory() as session:
-        post = await create_post_service(user.id, payload, session)
+        post = await save_post_service(user.id, payload, session)
         post_id = post.id
 
     async with async_session_factory() as session:
@@ -429,9 +453,11 @@ async def test_get_post_service_visibility(test_users) -> None:
 @pytest.mark.asyncio
 async def test_delete_post_service_success(test_users) -> None:
     user, _ = test_users
-    payload = CreatePostRequest(caption="Delete me", text="Bye", visibility="public")
+    payload = SavePostRequest(
+        content=PostContentPayload(caption="Delete me", content_html="Bye", visibility="public")
+    )
     async with async_session_factory() as session:
-        post = await create_post_service(user.id, payload, session)
+        post = await save_post_service(user.id, payload, session)
         post_id = post.id
 
     async with async_session_factory() as session:
@@ -448,8 +474,8 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
     user, other = test_users
     
     async with async_session_factory() as session:
-        p1 = Post(author_user_id=user.id, caption="Draft Post", state=PostState.draft)
-        p2 = Post(author_user_id=user.id, caption="Published Post", state=PostState.published)
+        p1 = Post(author_user_id=user.id, content={"caption": "Draft Post"}, state=PostState.draft)
+        p2 = Post(author_user_id=user.id, content={"caption": "Published Post"}, state=PostState.published)
         session.add(p1)
         session.add(p2)
         await session.commit()
@@ -468,10 +494,10 @@ async def test_get_feed_service_success(test_users) -> None:
     user, other = test_users
     
     async with async_session_factory() as session:
-        p1 = Post(author_user_id=user.id, caption="Draft Post", state=PostState.draft)
-        p2 = Post(author_user_id=user.id, caption="Published Post 1", state=PostState.published)
-        p3 = Post(author_user_id=other.id, caption="Published Post 2", state=PostState.published)
-        p4 = Post(author_user_id=other.id, caption="Hidden Post", state=PostState.hidden)
+        p1 = Post(author_user_id=user.id, content={"caption": "Draft Post"}, state=PostState.draft)
+        p2 = Post(author_user_id=user.id, content={"caption": "Published Post 1"}, state=PostState.published)
+        p3 = Post(author_user_id=other.id, content={"caption": "Published Post 2"}, state=PostState.published)
+        p4 = Post(author_user_id=other.id, content={"caption": "Hidden Post"}, state=PostState.hidden)
         session.add_all([p1, p2, p3, p4])
         await session.commit()
         
@@ -496,38 +522,47 @@ async def test_routes_post_management_flow(test_users) -> None:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
             # 1. Create a post
             create_res = await ac.post("/api/v1/post", json={
-                "caption": "Init Caption",
-                "text": "Init text",
-                "visibility": "public"
+                "content": {
+                    "caption": "Init Caption",
+                    "content_html": "Init text",
+                    "visibility": "public"
+                }
             })
             assert create_res.status_code == 200
             post_id = create_res.json()["data"]["id"]
 
-            # 2. PATCH /posts/{id}/draft
-            draft_res = await ac.patch(f"/api/v1/posts/{post_id}/draft", json={
-                "caption": "Draft Updated Caption",
-                "text": "Draft updated text",
-                "visibility": "public"
+            # 2. POST /post with id (update draft)
+            draft_res = await ac.post("/api/v1/post", json={
+                "id": post_id,
+                "content": {
+                    "caption": "Draft Updated Caption",
+                    "content_html": "Draft updated text",
+                    "visibility": "public"
+                }
             })
             assert draft_res.status_code == 200
-            assert draft_res.json()["data"]["state"] == "draft"
-            assert draft_res.json()["data"]["caption"] == "Draft Updated Caption"
+            # save_post endpoint returns SavePostData (id, revision_number)
+            assert draft_res.json()["data"]["revision_number"] == 2
 
             # 3. POST /posts/{id}/publish
             publish_res = await ac.post(f"/api/v1/posts/{post_id}/publish")
             assert publish_res.status_code == 200
-            assert publish_res.json()["data"]["state"] == "processing"
+            assert publish_res.json()["message"] == "Post published"
+            assert publish_res.json()["data"]["state"] == "published"
 
             # 4. GET /posts/{id}
             get_res = await ac.get(f"/api/v1/posts/{post_id}")
             assert get_res.status_code == 200
-            assert get_res.json()["data"]["caption"] == "Draft Updated Caption"
+            assert get_res.json()["data"]["content"]["caption"] == "Draft Updated Caption"
 
-            # 5. PATCH /posts/{id}
-            patch_res = await ac.patch(f"/api/v1/posts/{post_id}", json={
-                "caption": "General Updated Caption",
-                "text": "General updated text",
-                "visibility": "hidden"
+            # 5. PATCH /posts
+            patch_res = await ac.patch("/api/v1/posts", json={
+                "id": post_id,
+                "content": {
+                    "caption": "General Updated Caption",
+                    "content_html": "General updated text",
+                    "visibility": "hidden"
+                }
             })
             assert patch_res.status_code == 200
             assert patch_res.json()["data"]["state"] == "hidden"
@@ -541,8 +576,8 @@ async def test_routes_post_management_flow(test_users) -> None:
             feed_res = await ac.get("/api/v1/feed")
             assert feed_res.status_code == 200
 
-            # 8. DELETE /posts/{id}
-            delete_res = await ac.delete(f"/api/v1/posts/{post_id}")
+            # 8. DELETE /posts
+            delete_res = await ac.request("DELETE", "/api/v1/posts", json={"id": post_id})
             assert delete_res.status_code == 200
 
             # Verify deleted
@@ -550,4 +585,3 @@ async def test_routes_post_management_flow(test_users) -> None:
             assert get_deleted.status_code == 404
     finally:
         app.dependency_overrides.pop(get_current_user, None)
-

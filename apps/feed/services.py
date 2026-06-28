@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 from fastapi import UploadFile, HTTPException, status
@@ -9,10 +10,25 @@ from sqlalchemy import select, text
 
 from common.enums import MediaType, MediaAssetState, PostState
 from apps.accounts.db_models import User
-from apps.feed.db_models import Post, MediaAsset, PostAttachment
-from apps.feed.schemas import CreatePostRequest, UpdatePostRequest
+from apps.feed.db_models import Post, MediaAsset, PostAttachment, Hashtag, PostHashtag, PostRevision
+from apps.feed.schemas import SavePostRequest, EditPostRequest
+from apps.feed.content_utils import (
+    sanitize_html,
+    extract_hashtags,
+    validate_content,
+    validate_media_count,
+    validate_media_asset,
+)
 from core.images import save_image, generate_download_url
 
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Response formatting
+# ---------------------------------------------------------------------------
 
 def format_post_detail(post: Post) -> dict:
     """
@@ -32,17 +48,27 @@ def format_post_detail(post: Post) -> dict:
                     "mime_type": asset.mime_type,
                     "file_size": asset.file_size
                 })
+
+    content = post.content or {}
     return {
         "id": post.id,
         "author_user_id": post.author_user_id,
-        "caption": post.caption,
-        "content_html": post.content_html,
         "state": post.state.value if hasattr(post.state, "value") else str(post.state),
+        "revision_number": post.revision_number,
+        "content": {
+            "caption": content.get("caption"),
+            "content_html": content.get("content_html"),
+            "visibility": content.get("visibility", "public"),
+        },
         "created_at": post.created_at,
         "updated_at": post.updated_at,
         "media": media_data
     }
 
+
+# ---------------------------------------------------------------------------
+# Media upload (unchanged)
+# ---------------------------------------------------------------------------
 
 async def upload_post_media_service(
     user_id: UUID,
@@ -145,79 +171,248 @@ async def upload_post_media_service(
     }
 
 
-async def create_post_service(
-    user_id: UUID,
-    payload: CreatePostRequest,
-    db: AsyncSession
-) -> Post:
-    """
-    Create a new post in the database.
-    Verifies media assets belong to the authenticated user.
-    """
-    post_state = PostState.hidden if payload.visibility == "hidden" else PostState.draft
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
-    post = Post(
-        author_user_id=user_id,
-        caption=payload.caption,
-        content_html=payload.text,
-        state=post_state
+def _build_content_dict(payload_content) -> dict:
+    """
+    Build the content JSONB dict from a PostContentPayload,
+    sanitizing HTML before storage.
+    """
+    content_dict: dict = {
+        "caption": payload_content.caption,
+        "visibility": payload_content.visibility,
+    }
+    if payload_content.content_html is not None:
+        content_dict["content_html"] = sanitize_html(payload_content.content_html)
+    return content_dict
+
+
+async def _build_media_snapshot(
+    post_id: UUID,
+    db: AsyncSession,
+) -> list[dict]:
+    """
+    Build a JSON-serialisable snapshot of the post's current media attachments
+    for the revision audit trail.
+    """
+    stmt = (
+        select(PostAttachment, MediaAsset)
+        .join(MediaAsset, PostAttachment.media_asset_id == MediaAsset.id)
+        .where(PostAttachment.post_id == post_id)
     )
-    db.add(post)
 
-    try:
-        # Flush to obtain post.id before creating attachments
-        await db.flush()
+    result = await db.execute(stmt)
 
-        if payload.media:
-            for media_item in payload.media:
-                # Query and verify media asset ownership
-                result = await db.execute(select(MediaAsset).where(MediaAsset.id == media_item.id))
-                media_asset = result.scalar_one_or_none()
-                if not media_asset:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=f"Media asset with ID {media_item.id} not found"
-                    )
-                if media_asset.owner_user_id != user_id:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=f"Media asset with ID {media_item.id} does not belong to the authenticated user"
-                    )
+    snapshot = []
+    for attachment, asset in result.all():
+        snapshot.append({
+            "id": str(asset.id),
+            "key": asset.key,
+            "type": asset.type.value if hasattr(asset.type, "value") else str(asset.type),
+            "original_filename": asset.original_filename,
+            "mime_type": asset.mime_type,
+            "file_size": asset.file_size,
+        })
 
-                # Link Post and MediaAsset
-                attachment = PostAttachment(
-                    post_id=post.id,
-                    media_asset_id=media_asset.id
-                )
-                db.add(attachment)
+    return snapshot
 
-        await db.commit()
-        await db.refresh(post)
-    except HTTPException:
-        await db.rollback()
-        raise
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create post: {str(e)}"
+
+async def _create_revision(
+    post: Post,
+    editor_user_id: UUID,
+    db: AsyncSession,
+) -> None:
+    """
+    Create an immutable PostRevision audit record capturing the current
+    state of the post's content and media.
+    """
+    media_snapshot = await _build_media_snapshot(post.id, db)
+
+    revision = PostRevision(
+        post_id=post.id,
+        editor_user_id=editor_user_id,
+        content=post.content,
+        media=media_snapshot,
+    )
+
+    db.add(revision)
+
+
+async def _sync_hashtags(
+    post_id: UUID,
+    content_html: str | None,
+    db: AsyncSession,
+) -> None:
+    """
+    Extract hashtags from ``content_html`` and synchronise the
+    ``PostHashtag`` join table.
+
+    - New hashtags are inserted into the ``hashtags`` table (get-or-create).
+    - All existing ``PostHashtag`` rows for this post are replaced.
+    """
+    # Delete existing mappings
+    await db.execute(
+        text("DELETE FROM post_hashtags WHERE post_id = :post_id").bindparams(post_id=post_id)
+    )
+
+    if not content_html:
+        return
+
+    tags = extract_hashtags(content_html)
+    if not tags:
+        return
+
+    for tag_text in tags:
+        # Get or create the Hashtag record
+        result = await db.execute(select(Hashtag).where(Hashtag.tag == tag_text))
+        hashtag = result.scalar_one_or_none()
+        if not hashtag:
+            hashtag = Hashtag(tag=tag_text)
+            db.add(hashtag)
+            await db.flush()
+
+        post_hashtag = PostHashtag(
+            post_id=post_id,
+            hashtag_id=hashtag.id,
         )
+        db.add(post_hashtag)
 
-    return post
 
-
-async def update_post_service(
+async def _verify_and_attach_media(
     post_id: UUID,
     user_id: UUID,
-    payload: UpdatePostRequest,
-    force_draft: bool,
+    media_items: list,
+    db: AsyncSession,
+    replace: bool = False,
+) -> None:
+    """
+    Verify ownership of each media asset and create PostAttachment records.
+
+    If ``replace`` is True, existing attachments for the post are deleted first.
+    """
+    if replace:
+        await db.execute(
+            text("DELETE FROM post_attachments WHERE post_id = :post_id").bindparams(post_id=post_id)
+        )
+
+    for media_item in media_items:
+        result = await db.execute(select(MediaAsset).where(MediaAsset.id == media_item.id))
+        media_asset = result.scalar_one_or_none()
+        if not media_asset:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Media asset with ID {media_item.id} not found"
+            )
+        if media_asset.owner_user_id != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Media asset with ID {media_item.id} does not belong to the authenticated user"
+            )
+
+        # Validate attachment rules (document/audio size and type)
+        media_type_str = media_item.type.value if hasattr(media_item.type, "value") else str(media_item.type)
+        try:
+            validate_media_asset(media_asset, media_type_str)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc)
+            )
+
+        attachment = PostAttachment(
+            post_id=post_id,
+            media_asset_id=media_asset.id
+        )
+        db.add(attachment)
+
+
+# ---------------------------------------------------------------------------
+# Save post (unified create / update draft)
+# ---------------------------------------------------------------------------
+
+async def save_post_service(
+    user_id: UUID,
+    payload: SavePostRequest,
     db: AsyncSession
 ) -> Post:
     """
-    Update an existing post.
-    Validates ownership, updates caption, text, visibility, and attachments.
+    Unified create-or-update draft service.
+
+    - If ``payload.id`` is ``None``: create a new draft (revision_number = 1).
+    - If ``payload.id`` is provided: update the existing draft (revision_number += 1).
+
+    In both paths the service validates content, sanitises HTML, manages
+    attachment mappings, synchronises hashtags, and writes an immutable
+    PostRevision audit snapshot.
     """
-    result = await db.execute(select(Post).where(Post.id == post_id))
+    # Validate media count
+    try:
+        validate_media_count(payload.media)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc)
+        )
+
+    # Build content dict (includes HTML sanitization)
+    content_dict = _build_content_dict(payload.content)
+
+    # Validate content
+    has_media = bool(payload.media)
+    try:
+        validate_content(content_dict, has_media)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc)
+        )
+
+    # Determine state from visibility
+    post_state = PostState.hidden if payload.content.visibility == "hidden" else PostState.draft
+
+    # ----- CREATE -----
+    if payload.id is None:
+        post = Post(
+            author_user_id=user_id,
+            content=content_dict,
+            state=post_state,
+            revision_number=1,
+        )
+        db.add(post)
+
+        try:
+            await db.flush()
+
+            if payload.media:
+                await _verify_and_attach_media(
+                    post_id=post.id,
+                    user_id=user_id,
+                    media_items=payload.media,
+                    db=db,
+                    replace=False,
+                )
+
+            await _sync_hashtags(post.id, content_dict.get("content_html"), db)
+            await _create_revision(post, user_id, db)
+
+            await db.commit()
+            await db.refresh(post)
+        except HTTPException:
+            await db.rollback()
+            raise
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create post: {str(e)}"
+            )
+
+        return post
+
+    # ----- UPDATE -----
+    result = await db.execute(select(Post).where(Post.id == payload.id))
     post = result.scalar_one_or_none()
 
     if not post:
@@ -231,50 +426,30 @@ async def update_post_service(
             detail="Post does not belong to the authenticated user"
         )
 
-    # Mandatory caption update
-    post.caption = payload.caption
+    # Only drafts and hidden posts are editable through this endpoint
+    if post.state not in (PostState.draft, PostState.hidden):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Post is in '{post.state.value}' state and cannot be edited as draft"
+        )
 
-    # Optional text update
-    if payload.text is not None:
-        post.content_html = payload.text
-
-    # Visibility / state updates
-    if force_draft:
-        post.state = PostState.hidden if payload.visibility == "hidden" else PostState.draft
-    else:
-        if payload.visibility == "hidden":
-            post.state = PostState.hidden
-        elif payload.visibility == "public" and post.state == PostState.hidden:
-            post.state = PostState.draft
+    post.content = content_dict
+    post.state = post_state
+    post.revision_number += 1
+    post.updated_at = utc_now()
 
     try:
-        # Manage media attachments if passed
         if payload.media is not None:
-            # Delete existing attachments
-            await db.execute(
-                text("DELETE FROM post_attachments WHERE post_id = :post_id").bindparams(post_id=post.id)
+            await _verify_and_attach_media(
+                post_id=post.id,
+                user_id=user_id,
+                media_items=payload.media,
+                db=db,
+                replace=True,
             )
 
-            # Create new ones
-            for media_item in payload.media:
-                res_media = await db.execute(select(MediaAsset).where(MediaAsset.id == media_item.id))
-                media_asset = res_media.scalar_one_or_none()
-                if not media_asset:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=f"Media asset with ID {media_item.id} not found"
-                    )
-                if media_asset.owner_user_id != user_id:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=f"Media asset with ID {media_item.id} does not belong to the authenticated user"
-                    )
-
-                attachment = PostAttachment(
-                    post_id=post.id,
-                    media_asset_id=media_asset.id
-                )
-                db.add(attachment)
+        await _sync_hashtags(post.id, content_dict.get("content_html"), db)
+        await _create_revision(post, user_id, db)
 
         await db.commit()
         await db.refresh(post)
@@ -291,13 +466,129 @@ async def update_post_service(
     return post
 
 
+# ---------------------------------------------------------------------------
+# Edit post (PATCH /posts/)
+# ---------------------------------------------------------------------------
+
+async def edit_post_service(
+    user_id: UUID,
+    payload: EditPostRequest,
+    db: AsyncSession
+) -> Post:
+    """
+    Edit/update fields of an existing post. All fields (and content fields) are optional.
+    """
+    result = await db.execute(select(Post).where(Post.id == payload.id))
+    post = result.scalar_one_or_none()
+
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Post not found"
+        )
+    if post.author_user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Post does not belong to the authenticated user"
+        )
+
+    # Validate media count if media payload is provided
+    if payload.media is not None:
+        try:
+            validate_media_count(payload.media)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc)
+            )
+
+    # Build updated/merged content dict
+    merged_content = dict(post.content or {})
+    if payload.content is not None:
+        if payload.content.caption is not None:
+            merged_content["caption"] = payload.content.caption
+        if payload.content.content_html is not None:
+            merged_content["content_html"] = sanitize_html(payload.content.content_html)
+        if payload.content.visibility is not None:
+            merged_content["visibility"] = payload.content.visibility
+
+    # Validate final merged content against final media state
+    if payload.media is not None:
+        has_media = len(payload.media) > 0
+    else:
+        has_media = len(post.attachments) > 0
+
+    try:
+        validate_content(merged_content, has_media)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc)
+        )
+
+    # Apply changes to model
+    post.content = merged_content
+
+    # Determine state from visibility if provided
+    if payload.content is not None and payload.content.visibility is not None:
+        if payload.content.visibility == "hidden":
+            post.state = PostState.hidden
+        elif payload.content.visibility == "public" and post.state == PostState.hidden:
+            post.state = PostState.draft
+
+    post.revision_number += 1
+    post.updated_at = utc_now()
+
+    try:
+        # Manage media attachments if provided
+        if payload.media is not None:
+            await _verify_and_attach_media(
+                post_id=post.id,
+                user_id=user_id,
+                media_items=payload.media,
+                db=db,
+                replace=True,
+            )
+
+        # Re-sync hashtags from current content_html
+        content_html = merged_content.get("content_html")
+        await _sync_hashtags(post.id, content_html, db)
+
+        # Create revision audit record
+        await _create_revision(post, user_id, db)
+
+        await db.commit()
+        await db.refresh(post)
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to edit post: {str(e)}"
+        )
+
+    return post
+
+
+# ---------------------------------------------------------------------------
+# Publish post
+# ---------------------------------------------------------------------------
+
 async def publish_post_service(
     post_id: UUID,
     user_id: UUID,
     db: AsyncSession
 ) -> Post:
     """
-    Publish a post, transitioning state to processing.
+    Publish a post.
+
+    State transitions:
+    - draft   → published
+    - hidden  → hidden  (stays hidden)
+
+    If visibility inside content is ``"hidden"`` the post stays ``PostState.hidden``.
     """
     result = await db.execute(select(Post).where(Post.id == post_id))
     post = result.scalar_one_or_none()
@@ -313,9 +604,28 @@ async def publish_post_service(
             detail="Post does not belong to the authenticated user"
         )
 
-    post.state = PostState.processing
+    # Only draft or hidden posts can be published
+    if post.state not in (PostState.draft, PostState.hidden):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Post is in '{post.state.value}' state and cannot be published"
+        )
+
+    # State transition: respect visibility stored in content
+    visibility = (post.content or {}).get("visibility", "public")
+    if visibility == "hidden" or post.state == PostState.hidden:
+        post.state = PostState.hidden
+    else:
+        post.state = PostState.published
+
+    # Increment revision number and update timestamp
+    post.revision_number += 1
+    post.updated_at = utc_now()
 
     try:
+        # Create revision audit record
+        await _create_revision(post, user_id, db)
+
         await db.commit()
         await db.refresh(post)
     except Exception as e:
@@ -327,6 +637,10 @@ async def publish_post_service(
 
     return post
 
+
+# ---------------------------------------------------------------------------
+# Get post
+# ---------------------------------------------------------------------------
 
 async def get_post_service(
     post_id: UUID,
@@ -356,6 +670,10 @@ async def get_post_service(
 
     return post
 
+
+# ---------------------------------------------------------------------------
+# Delete post
+# ---------------------------------------------------------------------------
 
 async def delete_post_service(
     post_id: UUID,
@@ -390,6 +708,10 @@ async def delete_post_service(
         )
 
 
+# ---------------------------------------------------------------------------
+# List user posts
+# ---------------------------------------------------------------------------
+
 async def list_user_posts_service(
     target_user_id: UUID,
     current_user_id: UUID,
@@ -415,6 +737,10 @@ async def list_user_posts_service(
     result = await db.execute(stmt)
     return list(result.scalars().all())
 
+
+# ---------------------------------------------------------------------------
+# Feed
+# ---------------------------------------------------------------------------
 
 async def get_feed_service(
     current_user_id: UUID,

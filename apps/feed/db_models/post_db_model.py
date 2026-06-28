@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from typing import List
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, Integer, String, Text, Enum
+from sqlalchemy import Column, DateTime, Integer, Enum
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel, Relationship
 
@@ -23,8 +24,7 @@ class Post(SQLModel, table=True):
     state: PostState = Field(
         sa_column=Column(Enum(PostState, name="poststate"), nullable=False, default=PostState.draft, index=True),
     )
-    content_html: str | None = Field(default=None, sa_column=Column(Text))
-    caption: str | None = Field(default=None, sa_column=Column(String(255)))
+    content: dict | None = Field(default_factory=dict, sa_column=Column(JSONB, nullable=True, default={}))
     revision_number: int = Field(default=1, sa_column=Column(Integer, nullable=False, default=1))
     created_at: datetime = Field(
         default_factory=utc_now,
@@ -53,3 +53,26 @@ class Post(SQLModel, table=True):
     link_previews: List["LinkPreview"] = Relationship(
         sa_relationship=relationship("LinkPreview", back_populates="post", cascade="all, delete-orphan", lazy="selectin")
     )
+
+    # ---- Convenience properties for backward-compatible access ----
+
+    @property
+    def caption(self) -> str | None:
+        """Read caption from the content JSONB."""
+        if self.content:
+            return self.content.get("caption")
+        return None
+
+    @property
+    def content_html(self) -> str | None:
+        """Read content_html from the content JSONB."""
+        if self.content:
+            return self.content.get("content_html")
+        return None
+
+    @property
+    def visibility(self) -> str:
+        """Read visibility from the content JSONB, defaulting to 'public'."""
+        if self.content:
+            return self.content.get("visibility", "public")
+        return "public"

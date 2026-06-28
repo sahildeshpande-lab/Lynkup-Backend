@@ -30,26 +30,59 @@ class MediaItem(BaseModel):
     type: MediaType
 
 
-class CreatePostRequest(BaseModel):
+# ---- Content payload (nested inside request bodies) ----
+
+class PostContentPayload(BaseModel):
+    """Content payload for creating or updating a post."""
+    caption: str = Field(..., max_length=255)
+    content_html: Optional[str] = None
+    visibility: Literal["public", "hidden"] = "public"
+
+
+# ---- Request schemas ----
+
+class EditPostContentPayload(BaseModel):
+    """Payload for editing existing post fields, where all fields are optional."""
     caption: Optional[str] = Field(default=None, max_length=255)
-    text: Optional[str] = None
+    content_html: Optional[str] = None
+    visibility: Optional[Literal["public", "hidden"]] = None
+
+
+class EditPostRequest(BaseModel):
+    """Request schema for PATCH /posts/."""
+    id: UUID
+    content: Optional[EditPostContentPayload] = None
+    media: Optional[List[MediaItem]] = None
+
+
+class SavePostRequest(BaseModel):
+    """
+    Unified create / update-draft request.
+
+    - If ``id`` is omitted or null → create a new draft.
+    - If ``id`` is provided → update the existing draft.
+
+    ``revision_number`` is never sent by the frontend;
+    the backend manages it entirely.
+    """
+    id: Optional[UUID] = None
+    content: PostContentPayload
     media: Optional[List[MediaItem]] = Field(default_factory=list)
-    visibility: Literal["public", "hidden"]
 
 
-class CreatePostData(BaseModel):
+class DeletePostRequest(BaseModel):
     id: UUID
 
 
-class CreatePostResponse(ApiResponse):
-    data: CreatePostData
+# ---- Response data schemas ----
+
+class SavePostData(BaseModel):
+    id: UUID
+    revision_number: int
 
 
-class UpdatePostRequest(BaseModel):
-    caption: str = Field(..., max_length=255)  # Mandatory
-    text: Optional[str] = None
-    media: Optional[List[MediaItem]] = Field(default_factory=list)
-    visibility: Optional[Literal["public", "hidden"]] = None
+class SavePostResponse(ApiResponse):
+    data: SavePostData
 
 
 class PostMediaData(BaseModel):
@@ -62,12 +95,19 @@ class PostMediaData(BaseModel):
     file_size: Optional[int] = None
 
 
+class PostContentData(BaseModel):
+    """Content data as returned in API responses."""
+    caption: Optional[str] = None
+    content_html: Optional[str] = None
+    visibility: str = "public"
+
+
 class PostDetailData(BaseModel):
     id: UUID
     author_user_id: UUID
-    caption: Optional[str] = None
-    content_html: Optional[str] = None
     state: str
+    revision_number: int
+    content: PostContentData
     created_at: datetime
     updated_at: datetime
     media: List[PostMediaData] = Field(default_factory=list)
