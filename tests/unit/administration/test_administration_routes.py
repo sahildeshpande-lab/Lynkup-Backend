@@ -325,3 +325,88 @@ def test_admin_create_user_route(monkeypatch) -> None:
     )
     assert response_invalid_role.status_code == 422
 
+
+def test_admin_edit_profile_route(monkeypatch) -> None:
+    async def _mock_admin_edit_profile(user_id, payload, db):
+        return ApiResponse(
+            status=True,
+            message="Profile updated successfully",
+            data={
+                "profile_photo_key": payload.profile_photo_key,
+                "banner_photo_key": payload.banner_photo_key,
+                "firstName": payload.firstName,
+                "lastName": payload.lastName,
+            },
+        )
+
+    monkeypatch.setattr(admin_routes.services, "admin_edit_profile", _mock_admin_edit_profile)
+
+    response = client.patch(
+        "/api/v1/update-profile",
+        json={
+            "firstName": "Super",
+            "lastName": "Admin",
+            "profile_photo_key": "new_profile.png",
+            "banner_photo_key": "new_banner.png",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is True
+    assert body["data"]["firstName"] == "Super"
+    assert body["data"]["profile_photo_key"] == "new_profile.png"
+    assert body["data"]["banner_photo_key"] == "new_banner.png"
+
+
+def test_update_user_profile_route(monkeypatch) -> None:
+    from apps.profiles import services as profiles_services
+
+    async def _mock_update_user_profile_by_admin_service(user_id, payload, db):
+        return {
+            "userId": str(user_id),
+            "firstName": payload.firstName,
+            "lastName": payload.lastName,
+            "major": payload.major,
+            "minor": payload.minor,
+            "university_id": payload.university_id,
+            "education_level_id": payload.education_level_id,
+            "academic_interests": payload.academic_interests,
+            "profile_photo_key": payload.profile_photo_key,
+            "banner_photo_key": payload.banner_photo_key,
+            "bio": payload.bio,
+        }
+
+    monkeypatch.setattr(
+        profiles_services,
+        "update_user_profile_by_admin_service",
+        _mock_update_user_profile_by_admin_service,
+    )
+
+    user_id = "22222222-2222-2222-2222-222222222222"
+    response = client.patch(
+        f"/api/v1/updateuserprofile?id={user_id}",
+        json={
+            "firstName": "Bob",
+            "lastName": "Smith",
+            "major": "Computer Science",
+            "minor": "Math",
+            "university_id": "33333333-3333-3333-3333-333333333333",
+            "education_level_id": 1,
+            "academic_interests": ["AI", "Programming"],
+            "profile_photo_key": "bob_photo.png",
+            "banner_photo_key": "bob_banner.png",
+            "bio": "Hello world",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is True
+    assert body["data"]["userId"] == user_id
+    assert body["data"]["firstName"] == "Bob"
+    assert body["data"]["major"] == "Computer Science"
+    assert body["data"]["profile_photo_key"] == "bob_photo.png"
+    assert body["data"]["banner_photo_key"] == "bob_banner.png"
+
+

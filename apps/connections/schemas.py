@@ -15,6 +15,7 @@ class ApiResponse(BaseModel):
     status: bool = True
     message: str = "success"
     data: Any | None = None
+    flags: dict[str, bool] | None = None
 
 
 class ConnectionRequestCreate(BaseModel):

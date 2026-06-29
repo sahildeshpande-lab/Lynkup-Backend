@@ -1,34 +1,21 @@
 from __future__ import annotations
-
-import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from uuid import UUID
-from fastapi import UploadFile, HTTPException, status
+from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text
-
-from common.enums import MediaType, MediaAssetState, PostState
+from sqlalchemy import select
+from common.enums import PostState
 from apps.accounts.db_models import User
-from apps.feed.db_models import Post, MediaAsset, PostAttachment, Hashtag, PostHashtag, PostRevision
+from apps.feed.db_models import Post
 from apps.feed.schemas import SavePostRequest, EditPostRequest
-from apps.feed.content_utils import (
-    sanitize_html,
-    extract_hashtags,
-    validate_content,
-    validate_media_count,
-    validate_media_asset,
-)
-from core.images import save_image, generate_download_url
+from apps.feed.content_utils import sanitize_html, validate_content, validate_media_count
+from core.images import generate_download_url
 
+from .media_service import _verify_and_attach_media
+from .revision_service import _build_content_dict, _create_revision, _sync_hashtags
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-# ---------------------------------------------------------------------------
-# Response formatting
-# ---------------------------------------------------------------------------
 
 def format_post_detail(post: Post) -> dict:
     """
@@ -64,273 +51,6 @@ def format_post_detail(post: Post) -> dict:
         "updated_at": post.updated_at,
         "media": media_data
     }
-
-
-# ---------------------------------------------------------------------------
-# Media upload (unchanged)
-# ---------------------------------------------------------------------------
-
-async def upload_post_media_service(
-    user_id: UUID,
-    file: UploadFile,
-    media_type: MediaType,
-    db: AsyncSession
-) -> dict:
-    """
-    Validate uploaded file, save it using the storage utility,
-    and persist metadata in the MediaAsset table.
-    """
-    content = await file.read()
-    file_size = len(content)
-
-    if file_size == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot upload an empty file"
-        )
-
-    # Simple content type validation based on MediaType
-    content_type = file.content_type or ""
-    if media_type == MediaType.image and not content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type for image media asset"
-        )
-    elif media_type == MediaType.video and not content_type.startswith("video/"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type for video media asset"
-        )
-    elif media_type == MediaType.audio and not content_type.startswith("audio/"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type for audio media asset"
-        )
-
-    # Extract extension
-    ext = Path(file.filename).suffix if file.filename else ""
-    if not ext:
-        if "jpeg" in content_type or "jpg" in content_type:
-            ext = ".jpg"
-        elif "png" in content_type:
-            ext = ".png"
-        elif "gif" in content_type:
-            ext = ".gif"
-        elif "mp4" in content_type:
-            ext = ".mp4"
-        elif "pdf" in content_type:
-            ext = ".pdf"
-        else:
-            ext = ".bin"
-
-    ext = ext.lower()
-    if not ext.startswith("."):
-        ext = f".{ext}"
-
-    # Generate storage key: posts/<uuid>.<ext>
-    file_uuid = uuid.uuid4()
-    filename = f"{file_uuid}{ext}"
-    key = f"posts/{filename}"
-
-    # Save to storage (S3 or local depending on settings)
-    try:
-        save_image(file_name=key, content=content, content_type=content_type)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Storage upload failed: {str(e)}"
-        )
-
-    # Save media metadata in the database
-    media_asset = MediaAsset(
-        owner_user_id=user_id,
-        key=key,
-        type=media_type,
-        original_filename=file.filename,
-        mime_type=content_type,
-        file_size=file_size,
-        state=MediaAssetState.published,
-    )
-    db.add(media_asset)
-
-    try:
-        await db.commit()
-        await db.refresh(media_asset)
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database error saving media metadata: {str(e)}"
-        )
-
-    return {
-        "id": media_asset.id,
-        "key": media_asset.key,
-        "type": media_asset.type,
-        "url": generate_download_url(key)
-    }
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _build_content_dict(payload_content) -> dict:
-    """
-    Build the content JSONB dict from a PostContentPayload,
-    sanitizing HTML before storage.
-    """
-    content_dict: dict = {
-        "caption": payload_content.caption,
-        "visibility": payload_content.visibility,
-    }
-    if payload_content.content_html is not None:
-        content_dict["content_html"] = sanitize_html(payload_content.content_html)
-    return content_dict
-
-
-async def _build_media_snapshot(
-    post_id: UUID,
-    db: AsyncSession,
-) -> list[dict]:
-    """
-    Build a JSON-serialisable snapshot of the post's current media attachments
-    for the revision audit trail.
-    """
-    stmt = (
-        select(PostAttachment, MediaAsset)
-        .join(MediaAsset, PostAttachment.media_asset_id == MediaAsset.id)
-        .where(PostAttachment.post_id == post_id)
-    )
-
-    result = await db.execute(stmt)
-
-    snapshot = []
-    for attachment, asset in result.all():
-        snapshot.append({
-            "id": str(asset.id),
-            "key": asset.key,
-            "type": asset.type.value if hasattr(asset.type, "value") else str(asset.type),
-            "original_filename": asset.original_filename,
-            "mime_type": asset.mime_type,
-            "file_size": asset.file_size,
-        })
-
-    return snapshot
-
-
-async def _create_revision(
-    post: Post,
-    editor_user_id: UUID,
-    db: AsyncSession,
-) -> None:
-    """
-    Create an immutable PostRevision audit record capturing the current
-    state of the post's content and media.
-    """
-    media_snapshot = await _build_media_snapshot(post.id, db)
-
-    revision = PostRevision(
-        post_id=post.id,
-        editor_user_id=editor_user_id,
-        content=post.content,
-        media=media_snapshot,
-    )
-
-    db.add(revision)
-
-
-async def _sync_hashtags(
-    post_id: UUID,
-    content_html: str | None,
-    db: AsyncSession,
-) -> None:
-    """
-    Extract hashtags from ``content_html`` and synchronise the
-    ``PostHashtag`` join table.
-
-    - New hashtags are inserted into the ``hashtags`` table (get-or-create).
-    - All existing ``PostHashtag`` rows for this post are replaced.
-    """
-    # Delete existing mappings
-    await db.execute(
-        text("DELETE FROM post_hashtags WHERE post_id = :post_id").bindparams(post_id=post_id)
-    )
-
-    if not content_html:
-        return
-
-    tags = extract_hashtags(content_html)
-    if not tags:
-        return
-
-    for tag_text in tags:
-        # Get or create the Hashtag record
-        result = await db.execute(select(Hashtag).where(Hashtag.tag == tag_text))
-        hashtag = result.scalar_one_or_none()
-        if not hashtag:
-            hashtag = Hashtag(tag=tag_text)
-            db.add(hashtag)
-            await db.flush()
-
-        post_hashtag = PostHashtag(
-            post_id=post_id,
-            hashtag_id=hashtag.id,
-        )
-        db.add(post_hashtag)
-
-
-async def _verify_and_attach_media(
-    post_id: UUID,
-    user_id: UUID,
-    media_items: list,
-    db: AsyncSession,
-    replace: bool = False,
-) -> None:
-    """
-    Verify ownership of each media asset and create PostAttachment records.
-
-    If ``replace`` is True, existing attachments for the post are deleted first.
-    """
-    if replace:
-        await db.execute(
-            text("DELETE FROM post_attachments WHERE post_id = :post_id").bindparams(post_id=post_id)
-        )
-
-    for media_item in media_items:
-        result = await db.execute(select(MediaAsset).where(MediaAsset.id == media_item.id))
-        media_asset = result.scalar_one_or_none()
-        if not media_asset:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Media asset with ID {media_item.id} not found"
-            )
-        if media_asset.owner_user_id != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Media asset with ID {media_item.id} does not belong to the authenticated user"
-            )
-
-        # Validate attachment rules (document/audio size and type)
-        media_type_str = media_item.type.value if hasattr(media_item.type, "value") else str(media_item.type)
-        try:
-            validate_media_asset(media_asset, media_type_str)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(exc)
-            )
-
-        attachment = PostAttachment(
-            post_id=post_id,
-            media_asset_id=media_asset.id
-        )
-        db.add(attachment)
-
-
-# ---------------------------------------------------------------------------
-# Save post (unified create / update draft)
-# ---------------------------------------------------------------------------
 
 async def save_post_service(
     user_id: UUID,
@@ -465,11 +185,6 @@ async def save_post_service(
 
     return post
 
-
-# ---------------------------------------------------------------------------
-# Edit post (PATCH /posts/)
-# ---------------------------------------------------------------------------
-
 async def edit_post_service(
     user_id: UUID,
     payload: EditPostRequest,
@@ -571,11 +286,6 @@ async def edit_post_service(
 
     return post
 
-
-# ---------------------------------------------------------------------------
-# Publish post
-# ---------------------------------------------------------------------------
-
 async def publish_post_service(
     post_id: UUID,
     user_id: UUID,
@@ -637,11 +347,6 @@ async def publish_post_service(
 
     return post
 
-
-# ---------------------------------------------------------------------------
-# Get post
-# ---------------------------------------------------------------------------
-
 async def get_post_service(
     post_id: UUID,
     user_id: UUID,
@@ -669,11 +374,6 @@ async def get_post_service(
             )
 
     return post
-
-
-# ---------------------------------------------------------------------------
-# Delete post
-# ---------------------------------------------------------------------------
 
 async def delete_post_service(
     post_id: UUID,
@@ -707,11 +407,6 @@ async def delete_post_service(
             detail=f"Failed to delete post: {str(e)}"
         )
 
-
-# ---------------------------------------------------------------------------
-# List user posts
-# ---------------------------------------------------------------------------
-
 async def list_user_posts_service(
     target_user_id: UUID,
     current_user_id: UUID,
@@ -734,22 +429,5 @@ async def list_user_posts_service(
         stmt = stmt.where(Post.state == PostState.published)
 
     stmt = stmt.order_by(Post.created_at.desc())
-    result = await db.execute(stmt)
-    return list(result.scalars().all())
-
-
-# ---------------------------------------------------------------------------
-# Feed
-# ---------------------------------------------------------------------------
-
-async def get_feed_service(
-    current_user_id: UUID,
-    db: AsyncSession
-) -> list[Post]:
-    """
-    Get public feed posts ordered by latest first.
-    """
-    # Shows published posts from all users
-    stmt = select(Post).where(Post.state == PostState.published).order_by(Post.created_at.desc())
     result = await db.execute(stmt)
     return list(result.scalars().all())

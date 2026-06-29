@@ -270,3 +270,51 @@ async def test_update_completeness_weights() -> None:
             assert res["weights"]["location"] == 5.0
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_update_user_profile_by_admin_service(monkeypatch) -> None:
+    from apps.profiles.services import update_user_profile_by_admin_service
+    from apps.profiles.schemas import UpdateProfileRequest
+
+    # Mock file_exists to return True
+    monkeypatch.setattr("core.images.file_exists", lambda key: True)
+    # Mock normalize_image_name
+    monkeypatch.setattr("core.images.normalize_image_name", lambda key: f"normalized/{key}")
+
+    try:
+        await init_db()
+        async with async_session_factory() as session:
+            # Create user
+            db_user = User(
+                email="admin_edit_user@example.com",
+                role="user",
+                firebase_uid="uid_admin_edit_user",
+            )
+            session.add(db_user)
+            await session.commit()
+            await session.refresh(db_user)
+            user_id = db_user.id
+
+        async with async_session_factory() as session:
+            payload = UpdateProfileRequest(
+                firstName="Alice",
+                lastName="Smith",
+                bio="Bio updated by admin",
+                profile_photo_key="admin_photo.png",
+                banner_photo_key="admin_banner.png",
+            )
+            res = await update_user_profile_by_admin_service(
+                user_id=user_id,
+                payload=payload,
+                db=session,
+            )
+            assert res["user"]["firstName"] == "Alice"
+            assert res["user"]["lastName"] == "Smith"
+            assert res["user"]["bio"] == "Bio updated by admin"
+            assert "admin_photo.png" in res["user"]["profilePhoto_url"]
+            assert "admin_banner.png" in res["user"]["bannerPhotoUrl"]
+
+    finally:
+        await engine.dispose()
+

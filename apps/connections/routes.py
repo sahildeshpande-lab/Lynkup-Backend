@@ -3,14 +3,23 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.accounts.db_models import User
 from core.database import get_session
 from core.security.auth import get_current_user
-from common.pagination import paginate_items, PaginatedResponse
-from . import services
+from common.pagination import paginate_items
+from apps.connections.services import (
+    block_user as block_user_service,
+    follow_user as follow_user_service,
+    get_pending_requests as get_pending_requests_service,
+    get_recommendations,
+    respond_connection_request as respond_connection_request_service,
+    send_connection_request,
+    unblock_user as unblock_user_service,
+    unfollow_user as unfollow_user_service,
+)
 from .schemas import (
     ApiResponse,
     ConnectionRequestCreate,
@@ -32,7 +41,7 @@ async def create_connection_request(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
-    return await services.send_connection_request(db, current_user.id, UUID(request.receiver_user_id))
+    return await send_connection_request(db, current_user.id, UUID(request.receiver_user_id))
 
 
 @router.post("/lynkupresponse", response_model=ApiResponse)
@@ -41,25 +50,25 @@ async def respond_connection_request(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
-    return await services.respond_connection_request(db, current_user.id, UUID(request.receiver_user_id), request.response)
+    return await respond_connection_request_service(db, current_user.id, UUID(request.receiver_user_id), request.response)
 
 
-@router.post("/follows", response_model=ApiResponse)
+@router.post("/follow", response_model=ApiResponse)
 async def follow_user(
     payload: FollowRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
-    return await services.follow_user(db, current_user.id, UUID(payload.following_user_id))
+    return await follow_user_service(db, current_user.id, UUID(payload.following_user_id))
 
 
-@router.delete("/follows", response_model=ApiResponse)
+@router.delete("/follow", response_model=ApiResponse)
 async def unfollow_user(
     payload: FollowRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
-    return await services.unfollow_user(db, current_user.id, UUID(payload.following_user_id))
+    return await unfollow_user_service(db, current_user.id, UUID(payload.following_user_id))
 
 
 @router.post("/block", response_model=ApiResponse)
@@ -68,7 +77,7 @@ async def block_user(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
-    return await services.block_user(db, current_user.id, UUID(payload.blocked_user_id))
+    return await block_user_service(db, current_user.id, UUID(payload.blocked_user_id))
 
 
 @router.delete("/block", response_model=ApiResponse)
@@ -77,7 +86,7 @@ async def unblock_user(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
-    return await services.unblock_user(db, current_user.id, UUID(payload.blocked_user_id))
+    return await unblock_user_service(db, current_user.id, UUID(payload.blocked_user_id))
 
 
 @router.get("/recommendations/connections", response_model=ApiResponse)
@@ -87,7 +96,7 @@ async def get_connection_recommendations(
     page: int | None = Query(None, ge=1),
     pageSize: int | None = Query(None, ge=1, le=200),
 ):
-    candidates = await services.get_recommendations(db, current_user.id)
+    candidates = await get_recommendations(db, current_user.id)
     items = [RecommendedUserResponse(**item) for item in candidates]
     
     if page is None and pageSize is None:
@@ -108,7 +117,7 @@ async def get_pending_requests(
     pageSize: int | None = Query(None, ge=1, le=200),
     search: str | None = Query(None),
 ):
-    return await services.get_pending_requests(
+    return await get_pending_requests_service(
         db,
         current_user.id,
         page=page,

@@ -24,7 +24,7 @@ from .schemas import (
     AdminResetPasswordRequest,
 )
 from apps.accounts.schemas import EmailSignupRequest, RefreshTokenRequest, AdminAuthResponse
-from apps.profiles.schemas import CompletenessWeightsUpdateRequest
+from apps.profiles.schemas import CompletenessWeightsUpdateRequest, UpdateProfileRequest
 
 
 router = APIRouter(tags=["4] Admin Management"])
@@ -187,6 +187,15 @@ async def get_user_by_admin(
     return ApiResponse(message="user fetched", data=await services.admin_get_user(userId, db))
 
 
+# @router.delete("/users/{userId:uuid}", response_model=ApiResponse)
+# async def delete_user_by_admin(
+#     userId: UUID,
+#     db: AsyncSession = Depends(get_session),
+#     current_user=Depends(get_current_superadmin),
+# ) -> ApiResponse:
+#     return ApiResponse(message="user deleted", data=await services.admin_delete_user(str(userId), db))
+
+
 @router.delete("/users/", response_model=ApiResponse)
 async def delete_users_by_admin(
     payload: AdminDeleteUsersRequest,
@@ -239,3 +248,20 @@ async def update_completeness_weights(
     from apps.profiles import services as profiles_services
     data = await profiles_services.update_completeness_weights(payload, db)
     return ApiResponse(message="Completeness weights updated", data=data)
+
+
+@router.patch("/updateuserprofile", response_model=ApiResponse)
+async def update_user_profile(
+    payload: UpdateProfileRequest,
+    id: UUID = Query(...),
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+) -> ApiResponse:
+    from apps.profiles import services as profiles_services
+    data = await profiles_services.update_user_profile_by_admin_service(
+        id,
+        payload,
+        db
+    )
+    return ApiResponse(message="Profile updated successfully", data=data)
+

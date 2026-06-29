@@ -19,7 +19,7 @@ class AdminUserCreateRequest(BaseModel):
     firstName: str
     lastName: str
     email: EmailStr
-    role: Role
+    role: Literal["user", "moderator", "viewer"]
 
 
 class CamelModel(BaseModel):
@@ -120,7 +120,7 @@ class ChangePasswordRequest(BaseModel):
 
 class AdminEditProfileRequest(BaseModel):
     profile_photo_key: str | None = None
-    profilePhotoKey: str | None = None
+    banner_photo_key: str | None = None
     firstName: str
     lastName: str
 

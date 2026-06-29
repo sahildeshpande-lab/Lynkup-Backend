@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import logging
-import os
 from html import escape
 from pathlib import Path
+from datetime import datetime, timezone
+
+from fastapi import BackgroundTasks
+from uuid import UUID
+
+from core.email.config import _PLACEHOLDER_FROM_EMAIL, settings as email_settings
 
 logger = logging.getLogger(__name__)
 
@@ -19,32 +24,55 @@ BRAND_COLORS = {
 
 
 def _sender_is_placeholder(from_email: str) -> bool:
-    return from_email.strip().lower() == "no-reply@yourdomain.com"
+    return from_email.strip().lower() == _PLACEHOLDER_FROM_EMAIL
 
 
 async def _should_send_to_user(to_email: str) -> bool:
     return True
 
 
-async def _log_transactional_email(to_email: str, subject: str, html_body: str, purpose: str, attachment: str | None = None, is_sent: bool = False) -> None:
+def _from_email() -> str:
+    return email_settings.sendgrid_from_email
+
+
+async def _log_transactional_email(
+    to_email: str,
+    subject: str,
+    html_body: str | None = None,
+    purpose: str = "",
+    attachment: str | None = None,
+    is_sent: bool | None = None,
+    *,
+    content: str | None = None,
+    is_send: bool | None = None,
+    sent_at: datetime | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Create one transactional email log entry.
+
+    ``attachment`` is accepted for backward compatibility but intentionally not
+    persisted; logs store only rendered content and metadata.
+    """
     try:
         from apps.accounts.db_models import TransactionalEmailLog
         from core.database.session import async_session_factory
-        from sqlmodel import select
-        from sqlalchemy import desc
-        from datetime import datetime, timezone
 
-        from_email = os.getenv("SENDGRID_FROM_EMAIL", "no-reply@yourdomain.com")
+        rendered_content = content if content is not None else html_body
+        if rendered_content is None:
+            rendered_content = ""
+        send_status = is_send if is_send is not None else bool(is_sent)
 
         async with async_session_factory() as session:
             log_entry = TransactionalEmailLog(
-                to=to_email,
-                from_email=os.getenv("SENDGRID_FROM_EMAIL"),
-                body=html_body,
-                attachment=attachment,
+                to_email=to_email,
+                from_email=_from_email(),
+                content=rendered_content,
                 purpose=purpose,
                 subject=subject,
-                is_sent=is_sent,
+                is_send=send_status,
+                sent_at=sent_at,
+                error_message=error_message,
+                attachment=attachment,
                 updated_at=datetime.now(timezone.utc),
             )
             session.add(log_entry)
@@ -55,18 +83,19 @@ async def _log_transactional_email(to_email: str, subject: str, html_body: str, 
         logger.exception("Failed to log transactional email: %s", e)
 
 
-async def _actually_send_email_via_sendgrid(to_email: str, subject: str, html_body: str, from_email: str) -> bool:
-    api_key = os.getenv("SENDGRID_API_KEY")
+async def _deliver_email_via_sendgrid(to_email: str, subject: str, html_body: str, from_email: str) -> tuple[bool, str | None]:
+    api_key = email_settings.sendgrid_api_key
     if not api_key or not from_email or _sender_is_placeholder(from_email or ""):
         logger.warning("Email send simulated: SendGrid is not fully configured for %s", to_email)
-        return True
+        return True, None
 
     try:
         from sendgrid import SendGridAPIClient
         from sendgrid.helpers.mail import Mail
     except Exception:
-        logger.exception("Email send skipped: SendGrid client could not be imported")
-        return False
+        message = "SendGrid client could not be imported"
+        logger.exception("Email send skipped: %s", message)
+        return False, message
 
     try:
         message = Mail(
@@ -79,11 +108,121 @@ async def _actually_send_email_via_sendgrid(to_email: str, subject: str, html_bo
         response = client.send(message)
         success = 200 <= response.status_code < 300
         if not success:
-            logger.error("SendGrid rejected email to %s with status %s", to_email, getattr(response, "status_code", None))
-        return success
-    except Exception:
+            message = f"SendGrid rejected email with status {getattr(response, 'status_code', None)}"
+            logger.error("%s for %s", message, to_email)
+            return False, message
+        return True, None
+    except Exception as exc:
+        message = str(exc)
         logger.exception("Email send failed while delivering to %s", to_email)
+        return False, message
+
+
+async def _actually_send_email_via_sendgrid(to_email: str, subject: str, html_body: str, from_email: str) -> bool:
+    success, _ = await _deliver_email_via_sendgrid(to_email, subject, html_body, from_email)
+    return success
+
+
+async def _send_and_log_email(
+    to_email: str,
+    subject: str,
+    html_body: str,
+    purpose: str,
+    from_email: str | None = None,
+    log_id: UUID | None = None,
+) -> bool:
+    """Core function to actually deliver an email and log/update its transaction status.
+    
+    If `log_id` is provided, it updates the existing log record (used by cron).
+    Otherwise, it creates a new successful/failed log record (used by immediate).
+    """
+    from_email = from_email or _from_email()
+    if not await _should_send_to_user(to_email):
+        logger.info("Email send skipped: is_send flag is false for %s", to_email)
         return False
+
+    success = await _actually_send_email_via_sendgrid(to_email, subject, html_body, from_email)
+    error_message = None if success else "Failed to send email"
+
+    try:
+        from apps.accounts.db_models import TransactionalEmailLog
+        from core.database.session import async_session_factory
+        from sqlmodel import select
+        
+        async with async_session_factory() as session:
+            if log_id:
+                # Update existing log
+                stmt = select(TransactionalEmailLog).where(TransactionalEmailLog.id == log_id).with_for_update()
+                db_log = (await session.execute(stmt)).scalars().first()
+                if db_log:
+                    db_log.is_send = success
+                    db_log.sent_at = datetime.now(timezone.utc) if success else None
+                    db_log.error_message = error_message
+                    db_log.updated_at = datetime.now(timezone.utc)
+                    session.add(db_log)
+                    await session.commit()
+                    if success:
+                        logger.info("Email ID %s successfully sent to %s.", log_id, to_email)
+                    else:
+                        logger.warning("Email ID %s failed to send to %s: %s", log_id, to_email, error_message)
+            else:
+                # Create a new log entry
+                log_entry = TransactionalEmailLog(
+                    to_email=to_email,
+                    from_email=from_email,
+                    content=html_body,
+                    purpose=purpose,
+                    subject=subject,
+                    is_send=success,
+                    sent_at=datetime.now(timezone.utc) if success else None,
+                    error_message=error_message,
+                    updated_at=datetime.now(timezone.utc),
+                )
+                session.add(log_entry)
+                await session.commit()
+                if success:
+                    logger.info("Immediate email successfully sent and logged for %s", to_email)
+                else:
+                    logger.error("Immediate email failed to send and logged for %s: %s", to_email, error_message)
+    except Exception as e:
+        logger.exception("Failed to write/update transactional email log: %s", e)
+
+    return success
+
+
+def send_email_in_background(
+    background_tasks: BackgroundTasks | None,
+    to_email: str,
+    subject: str,
+    html_body: str,
+    purpose: str,
+    from_email: str | None = None,
+) -> None:
+    """Helper to run the send_and_log function in background if background_tasks is provided,
+    otherwise executes in a non-blocking asyncio task.
+    """
+    if background_tasks:
+        background_tasks.add_task(
+            _send_and_log_email,
+            to_email=to_email,
+            subject=subject,
+            html_body=html_body,
+            purpose=purpose,
+            from_email=from_email,
+        )
+        logger.info("Email queued via FastAPI BackgroundTasks for %s", to_email)
+    else:
+        import asyncio
+        asyncio.create_task(
+            _send_and_log_email(
+                to_email=to_email,
+                subject=subject,
+                html_body=html_body,
+                purpose=purpose,
+                from_email=from_email,
+            )
+        )
+        logger.info("Email queued via asyncio background task for %s", to_email)
 
 
 async def _send_email(to_email: str, subject: str, html_body: str, purpose: str, attachment: str | None = None) -> bool:
@@ -91,74 +230,112 @@ async def _send_email(to_email: str, subject: str, html_body: str, purpose: str,
         logger.info("Email send skipped: is_send flag is false for %s", to_email)
         return False
 
-    # Queue the email by inserting with is_sent=False
-    await _log_transactional_email(to_email, subject, html_body, purpose, attachment, is_sent=False)
+    await _queue_email(to_email, subject, html_body, purpose, attachment)
     logger.info("Email queued for %s", to_email)
     return True
 
 
-async def _send_email_immediately(to_email: str, subject: str, html_body: str, purpose: str, attachment: str | None = None) -> bool:
-    """Send the email synchronously via SendGrid first, then log the result to the DB.
-
-    Use this for time-sensitive transactional emails (OTP, password reset, verification)
-    where the user is actively waiting. Logging happens AFTER delivery so `is_sent`
-    always reflects the actual send outcome.
-    """
+async def _queue_email(to_email: str, subject: str, html_body: str, purpose: str, attachment: str | None = None) -> bool:
     if not await _should_send_to_user(to_email):
-        logger.info("Email send skipped: is_send flag is false for %s", to_email)
+        logger.info("Email queue skipped: is_send flag is false for %s", to_email)
         return False
-
-    from_email = os.getenv("SENDGRID_FROM_EMAIL", "no-reply@yourdomain.com")
-    success = await _actually_send_email_via_sendgrid(to_email, subject, html_body, from_email)
-
-    # Log the attempt to DB with the actual send outcome
-    await _log_transactional_email(to_email, subject, html_body, purpose, attachment, is_sent=success)
-
-    if success:
-        logger.info("Email sent and logged for %s (purpose: %s)", to_email, purpose)
-    else:
-        logger.error("Email failed to send for %s (purpose: %s) — logged with is_sent=False", to_email, purpose)
-
-    return success
+    await _log_transactional_email(
+        to_email=to_email,
+        subject=subject,
+        content=html_body,
+        purpose=purpose,
+        is_send=False,
+        attachment=attachment,
+    )
+    return True
 
 
-async def cron_send_emails() -> None:
-    """Cron task to process and send unsent emails in the transactional email log (limit 20)."""
-    import asyncio
+async def _send_email_immediately(to_email: str, subject: str, html_body: str, purpose: str, attachment: str | None = None) -> bool:
+    """Legacy synchronous email send compatibility method."""
+    return await _send_and_log_email(to_email, subject, html_body, purpose)
+
+
+async def process_pending_emails(limit: int = 10) -> int:
     from apps.accounts.db_models import TransactionalEmailLog
     from core.database.session import async_session_factory
     from sqlmodel import select
-    from datetime import datetime, timezone
+
+    logger.info("Cron started: processing pending emails (limit: %d)...", limit)
+
+    async with async_session_factory() as session:
+        stmt = (
+            select(TransactionalEmailLog)
+            .where(TransactionalEmailLog.is_send == False)
+            .order_by(TransactionalEmailLog.created_at.asc())
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        pending_emails = (await session.execute(stmt)).scalars().all()
+        email_ids = [email.id for email in pending_emails]
+
+    if not pending_emails:
+        logger.info("Cron finished: no pending emails to process.")
+        return 0
+
+    logger.info("Cron processing %d emails: %s", len(email_ids), email_ids)
+
+    processed = 0
+    success_count = 0
+    failure_count = 0
+
+    for email_log in pending_emails:
+        try:
+            logger.info("Processing queued email ID %s to %s", email_log.id, email_log.to_email)
+            success = await _send_and_log_email(
+                to_email=email_log.to_email,
+                subject=email_log.subject,
+                html_body=email_log.content,
+                purpose=email_log.purpose,
+                from_email=email_log.from_email or _from_email(),
+                log_id=email_log.id,
+            )
+            processed += 1
+            if success:
+                success_count += 1
+            else:
+                failure_count += 1
+        except Exception as e:
+            failure_count += 1
+            logger.exception("Unexpected failure processing email ID %s: %s", email_log.id, e)
+            try:
+                async with async_session_factory() as fail_session:
+                    stmt = select(TransactionalEmailLog).where(TransactionalEmailLog.id == email_log.id).with_for_update()
+                    db_log = (await fail_session.execute(stmt)).scalars().first()
+                    if db_log:
+                        db_log.error_message = f"Unexpected error: {str(e)}"
+                        db_log.updated_at = datetime.now(timezone.utc)
+                        fail_session.add(db_log)
+                        await fail_session.commit()
+            except Exception as db_exc:
+                logger.error("Failed to log unexpected error for email ID %s to database: %s", email_log.id, db_exc)
+
+    logger.info(
+        "Cron finished: processed %d emails. Successes: %d, Failures: %d.",
+        processed,
+        success_count,
+        failure_count,
+    )
+    return processed
+
+
+async def cron_send_emails() -> None:
+    """Cron task to process unsent transactional emails once per minute."""
+    import asyncio
 
     logger.info("Starting email cron task...")
     try:
         while True:
-            async with async_session_factory() as session:
-                # Query unsent emails with a limit of 20
-                stmt = select(TransactionalEmailLog).where(TransactionalEmailLog.is_sent == False).limit(20)
-                unsent_emails = (await session.execute(stmt)).scalars().all()
-                
-                for email_log in unsent_emails:
-                    logger.info("Processing queued email ID %s to %s", email_log.id, email_log.to)
-                    success = await _actually_send_email_via_sendgrid(
-                        to_email=email_log.to,
-                        subject=email_log.subject,
-                        html_body=email_log.body,
-                        from_email=os.getenv("SENDGRID_FROM_EMAIL"),
-                    )
-                    if success:
-                        email_log.is_sent = True
-                        email_log.updated_at = datetime.now(timezone.utc)
-                        session.add(email_log)
-                        logger.info("Email ID %s successfully sent.", email_log.id)
-                
-                await session.commit()
+            await process_pending_emails(limit=10)
             await asyncio.sleep(60)
     except asyncio.CancelledError:
         logger.info("Email cron task cancelled.")
     except Exception as e:
         logger.exception("Failed running email cron task: %s", e)
-
 
 def _load_template(template_name: str) -> str:
     return (TEMPLATE_DIR / template_name).read_text(encoding="utf-8")
@@ -174,8 +351,8 @@ def _render_template(template_name: str, context: dict[str, object], raw_keys: s
 
 
 def _render_email_layout(title: str, body_html: str) -> str:
-    base_url = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
-    logo_path = os.getenv("LOGO_URL", "/static/images/logo.png")
+    base_url = email_settings.base_url.rstrip("/")
+    logo_path = email_settings.logo_url
     logo_url = f"{base_url}{logo_path}"
     return _render_template(
         "layouts/base_email.html",
@@ -216,7 +393,7 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
 
 def build_otp_email_html(otp: str, otp_purpose: str = "email_verification") -> str:
     title, header, body_text = _otp_template_details(otp_purpose)
-    otp_expire_minutes =int(os.getenv("OTP_EXPIRE_MINUTES","10"))
+    otp_expire_minutes = email_settings.otp_expire_minutes
     
     brand_blue = str(BRAND_COLORS.get("brand_blue", "#0B5FA5"))
     otp_display_html = _build_otp_display_html(otp, brand_blue)
@@ -265,7 +442,7 @@ def build_notification_email_html(
 
 def build_account_created_email_html(full_name: str | None = None) -> str:
     greeting = f"Hi {full_name}," if full_name else "Hi,"
-    base_url = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
+    base_url = email_settings.base_url.rstrip("/")
     body_html = _render_template("auth/account_created_email.html", {"greeting": greeting, "base_url": base_url})
     return _render_email_layout("Account Created Successfully", body_html)
 
@@ -293,23 +470,29 @@ def build_temporary_password_email_html(
 
 def build_password_changed_email_html(full_name: str | None = None) -> str:
     greeting = f"Hi {full_name}," if full_name else "Hi,"
-    base_url = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
+
+
+def build_password_changed_email_html(full_name: str | None = None) -> str:
+    greeting = f"Hi {full_name}," if full_name else "Hi,"
+    base_url = email_settings.base_url.rstrip("/")
     body_html = _render_template("auth/password_changed_email.html", {"greeting": greeting, "base_url": base_url})
     return _render_email_layout("Password Changed Successfully", body_html)
 
 
-async def send_otp_email(to_email: str, otp: str, otp_purpose: str = "password_reset") -> bool:
-    """Send OTP immediately (send first, then log). Users are actively waiting for this."""
+async def send_otp_email(
+    to_email: str,
+    otp: str,
+    otp_purpose: str = "password_reset",
+    background_tasks: BackgroundTasks | None = None,
+) -> bool:
+    """Send OTP in the background. Users are actively waiting for this."""
     title, _, _ = _otp_template_details(otp_purpose)
     purpose = f"OTP: {otp_purpose}"
     subject = f"KampuLynk {title}"
-    return await _send_email_immediately(
-        to_email,
-        subject,
-        build_otp_email_html(otp, otp_purpose),
-        purpose=purpose,
-        attachment=otp,
-    )
+    html_content = build_otp_email_html(otp, otp_purpose)
+    
+    send_email_in_background(background_tasks, to_email, subject, html_content, purpose)
+    return True
 
 
 async def send_account_created_email(to_email: str, full_name: str | None = None) -> bool:
@@ -318,7 +501,7 @@ async def send_account_created_email(to_email: str, full_name: str | None = None
 
 def build_lynkup_response_email_html(full_name: str | None = None, response_status: str = "accepted") -> str:
     greeting = f"Hi {full_name}," if full_name else "Hi,"
-    base_url = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
+    base_url = email_settings.base_url.rstrip("/")
     # Capitalize first letter for display
     display_status = response_status.capitalize()
     body_html = _render_template(
@@ -331,10 +514,11 @@ def build_lynkup_response_email_html(full_name: str | None = None, response_stat
 
 
 async def send_lynkup_response_email(to_email: str, response_status: str, full_name: str | None = None) -> bool:
-    """Send Lynkup response email immediately (send first, then log)."""
+    """Queue Lynkup response email for cron delivery."""
     subject = f"KampuLynk Connection {response_status.capitalize()}"
     html_content = build_lynkup_response_email_html(full_name, response_status)
-    return await _send_email_immediately(to_email, subject, html_content, purpose="Connection Update")
+    purpose = f"Connection{response_status.capitalize()}"
+    return await _queue_email(to_email, subject, html_content, purpose=purpose)
 
 
 async def send_temporary_password_email(
@@ -357,13 +541,18 @@ async def send_password_changed_email(to_email: str, full_name: str | None = Non
 
 
 # New function to send email verification success notification
-async def send_verification_success_email(to_email: str, full_name: str | None = None) -> bool:
-    """Send email-verified confirmation immediately (send first, then log).
+async def send_verification_success_email(
+    to_email: str,
+    full_name: str | None = None,
+    background_tasks: BackgroundTasks | None = None,
+) -> bool:
+    """Send email-verified confirmation in the background.
     Uses the HTML template built by `build_email_verified_success_html`.
     """
     subject = "KampuLynk Email Verified"
     html_content = build_email_verified_success_html(full_name)
-    return await _send_email_immediately(to_email, subject, html_content, purpose="Email Verified")
+    send_email_in_background(background_tasks, to_email, subject, html_content, purpose="Email Verified")
+    return True
 
 
 def build_email_verified_success_html(full_name: str | None = None) -> str:
@@ -395,14 +584,38 @@ async def send_notification_email(
     )
 
 
-async def send_reset_password_email(to_email: str, reset_link: str) -> bool:
-    """Send password reset link immediately (send first, then log). Users are actively waiting for this."""
+async def send_reset_password_email(
+    to_email: str,
+    reset_link: str,
+    background_tasks: BackgroundTasks | None = None,
+) -> bool:
+    """Send password reset link in the background. Users are actively waiting for this."""
     subject = "Reset Your Password"
-    password_reset_expire_minutes=int(os.getenv("PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "60"))
+    password_reset_expire_minutes = email_settings.password_reset_token_expire_minutes
     body_html = _render_template(
         "auth/password_reset_email.html",
         {"reset_link": reset_link, "subject": subject , "password_reset_expire_minutes":password_reset_expire_minutes} ,
         raw_keys={"reset_link"},
     )
     html_content = _render_email_layout(subject, body_html)
-    return await _send_email_immediately(to_email, subject, html_content, "forget password", attachment=reset_link)
+    send_email_in_background(background_tasks, to_email, subject, html_content, "forget password")
+    return True
+
+
+def build_profile_updated_email_html(full_name: str | None = None) -> str:
+    greeting = f"Hi {full_name}," if full_name else "Hi,"
+    body_html = (
+        f'<div style="font-size:16px;font-weight:700;margin-bottom:16px;">Profile Updated Successfully</div>'
+        f'<p style="margin:0 0 14px;">{greeting}</p>'
+        f'<p style="margin:0 0 14px;">Your KampuLynk profile has been successfully updated.</p>'
+        f'<p style="margin:0;">If you did not perform this change, please contact support immediately.</p>'
+    )
+    return _render_email_layout("Profile Updated", body_html)
+
+
+async def send_profile_updated_email(to_email: str, full_name: str | None = None) -> bool:
+    """Queue Profile Updated email for cron delivery."""
+    subject = "KampuLynk Profile Updated"
+    html_content = build_profile_updated_email_html(full_name)
+    purpose = "Profile Updated"
+    return await _queue_email(to_email, subject, html_content, purpose=purpose)

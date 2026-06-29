@@ -44,6 +44,9 @@ async def init_db() -> None:
 
         await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS subject VARCHAR(256) NOT NULL DEFAULT ''"))
         await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS is_sent BOOLEAN NOT NULL DEFAULT FALSE"))
+        await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP WITH TIME ZONE"))
+        await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS error_message TEXT"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_transactional_email_log_is_sent_created_at ON transactional_email_log (is_sent, created_at)"))
         await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS profile_photo_url VARCHAR(2048)"))
         await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS banner_photo_url VARCHAR(2048)"))
         await conn.execute(text("ALTER TABLE profiles DROP COLUMN IF EXISTS profile_photo_media_id"))

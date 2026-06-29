@@ -1,0 +1,33 @@
+from __future__ import annotations
+from sqlalchemy.ext.asyncio import AsyncSession
+
+async def _resolve_academic_interest_ids(values: list[str | int], db: AsyncSession) -> list[int]:
+    from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
+    from sqlmodel import select
+
+    resolved_ids: list[int] = []
+    for value in values:
+        if value is None:
+            continue
+        tag_clean = str(value).strip()
+        if not tag_clean:
+            continue
+
+        if tag_clean.isdigit():
+            interest_id = int(tag_clean)
+            stmt_interest = select(AcademicInterest).where(AcademicInterest.id == interest_id)
+            interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
+            if interest_rec:
+                resolved_ids.append(interest_id)
+            continue
+
+        stmt_interest = select(AcademicInterest).where(AcademicInterest.name.ilike(tag_clean))
+        interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
+        if not interest_rec:
+            interest_rec = AcademicInterest(name=tag_clean, is_active=True)
+            db.add(interest_rec)
+            await db.flush()
+        if interest_rec.id is not None:
+            resolved_ids.append(int(interest_rec.id))
+
+    return resolved_ids

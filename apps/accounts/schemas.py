@@ -34,6 +34,14 @@ class EmailSignupRequest(BaseModel):
     firebaseId: str
     device_id: str
 
+    @field_validator("device_id")
+    @classmethod
+    def normalize_device_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("device_id cannot be blank")
+        return normalized
+
     @field_validator("firstName", "lastName")
     @classmethod
     def validate_names(cls, value: str) -> str:
@@ -65,6 +73,14 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=8)
     firebaseId: str
     device_id: str
+
+    @field_validator("device_id")
+    @classmethod
+    def normalize_device_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("device_id cannot be blank")
+        return normalized
 
     @field_validator("email")
     @classmethod
@@ -108,6 +124,14 @@ class RefreshTokenRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     device_id: str = Field(min_length=1)
+
+    @field_validator("device_id")
+    @classmethod
+    def normalize_device_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("device_id cannot be blank")
+        return normalized
 
 
 class NotificationPreferences(BaseModel):

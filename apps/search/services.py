@@ -124,3 +124,170 @@ async def get_academics_info(
         "educationLevels": edu_levels,
         "interests": interests_data,
     }
+
+
+async def search_users(
+    current_user: User,
+    db: AsyncSession,
+    query: Optional[str] = None,
+    page: Optional[int] = None,
+    page_size: Optional[int] = None,
+) -> dict:
+    from uuid import UUID
+    from sqlmodel import select
+    from sqlalchemy import func, and_, or_, exists, distinct
+    from apps.accounts.db_models import User, UserRole, Role
+    from apps.profiles.db_models.profile_db_model import Profile, ProfileVisibility
+    from apps.profiles.db_models.university_db_model import University
+    from apps.connections.db_models.block import Block
+    from apps.connections.db_models.connection import Connection
+    from common.enums import UserStatus
+    from apps.profiles.services import build_user_base_response
+
+    # Base stmt
+    stmt = (
+        select(User, Profile)
+        .join(Profile, Profile.user_id == User.id)
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .outerjoin(University, University.id == Profile.university_id)
+    )
+
+    # Exclude admins/superadmins/moderators/viewers
+    stmt = stmt.where(Role.name.notin_(["moderator", "viewer", "superadmin"]))
+
+    # Account status & not deleted
+    stmt = stmt.where(
+        User.status == UserStatus.active,
+        User.is_deleted == False,
+        User.deleted_at.is_(None)
+    )
+
+    # Exclude current user
+    stmt = stmt.where(User.id != current_user.id)
+
+    # Blocks filter
+    blocked_ids_stmt = select(Block.blocked_user_id).where(Block.blocker_user_id == current_user.id, Block.is_active == True)
+    blocker_ids_stmt = select(Block.blocker_user_id).where(Block.blocked_user_id == current_user.id, Block.is_active == True)
+    stmt = stmt.where(User.id.notin_(blocked_ids_stmt))
+    stmt = stmt.where(User.id.notin_(blocker_ids_stmt))
+
+    # Connection visibility subquery
+    is_connected_expr = exists(
+        select(1).where(
+            Connection.is_active == True,
+            or_(
+                and_(Connection.user_low_id == current_user.id, Connection.user_high_id == User.id),
+                and_(Connection.user_low_id == User.id, Connection.user_high_id == current_user.id)
+            )
+        )
+    )
+
+    visibility_condition = or_(
+        Profile.profile_visibility == ProfileVisibility.public,
+        and_(
+            Profile.profile_visibility == ProfileVisibility.connections_only,
+            is_connected_expr
+        )
+    )
+    stmt = stmt.where(visibility_condition)
+
+    # Fuzzy search query (pg_trgm)
+    if query and query.strip():
+        normalized_query = query.strip()
+        search_terms = normalized_query.split()
+        conditions = []
+        for term in search_terms:
+            conditions.append(
+                or_(
+                    Profile.first_name.ilike(f"%{term}%"),
+                    Profile.last_name.ilike(f"%{term}%"),
+                    User.email.ilike(f"%{term}%"),
+                    University.name.ilike(f"%{term}%"),
+                    Profile.major.ilike(f"%{term}%"),
+                    Profile.minor.ilike(f"%{term}%"),
+                    Profile.edu_level.ilike(f"%{term}%")
+                )
+            )
+        stmt = stmt.where(and_(*conditions))
+
+        full_name_expr = func.concat(Profile.first_name, " ", Profile.last_name)
+        similarity_score = func.greatest(
+            func.similarity(full_name_expr, normalized_query),
+            func.similarity(User.email, normalized_query),
+            func.coalesce(func.similarity(University.name, normalized_query), 0.0),
+            func.coalesce(func.similarity(Profile.major, normalized_query), 0.0),
+            func.coalesce(func.similarity(Profile.minor, normalized_query), 0.0),
+            func.coalesce(func.similarity(Profile.edu_level, normalized_query), 0.0)
+        )
+        stmt = stmt.order_by(similarity_score.desc())
+    else:
+        stmt = stmt.order_by(Profile.first_name.asc(), Profile.last_name.asc())
+
+    # Build count query for totalItems
+    count_stmt = (
+        select(func.count(distinct(User.id)))
+        .join(Profile, Profile.user_id == User.id)
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .outerjoin(University, University.id == Profile.university_id)
+    )
+    count_stmt = count_stmt.where(Role.name.notin_(["moderator", "viewer", "superadmin"]))
+    count_stmt = count_stmt.where(
+        User.status == UserStatus.active,
+        User.is_deleted == False,
+        User.deleted_at.is_(None)
+    )
+    count_stmt = count_stmt.where(User.id != current_user.id)
+    count_stmt = count_stmt.where(User.id.notin_(blocked_ids_stmt))
+    count_stmt = count_stmt.where(User.id.notin_(blocker_ids_stmt))
+    count_stmt = count_stmt.where(visibility_condition)
+
+    if query and query.strip():
+        normalized_query = query.strip()
+        search_terms = normalized_query.split()
+        conditions = []
+        for term in search_terms:
+            conditions.append(
+                or_(
+                    Profile.first_name.ilike(f"%{term}%"),
+                    Profile.last_name.ilike(f"%{term}%"),
+                    User.email.ilike(f"%{term}%"),
+                    University.name.ilike(f"%{term}%"),
+                    Profile.major.ilike(f"%{term}%"),
+                    Profile.minor.ilike(f"%{term}%"),
+                    Profile.edu_level.ilike(f"%{term}%")
+                )
+            )
+        count_stmt = count_stmt.where(and_(*conditions))
+
+    # Pagination logic
+    if page is not None and page_size is not None:
+        total_items = int((await db.execute(count_stmt)).scalar_one())
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+        result = await db.execute(stmt)
+        rows = result.all()
+
+        items = []
+        for user, profile in rows:
+            items.append(await build_user_base_response(user, profile, db))
+
+        from common.pagination import build_paginated_response
+        paginated = build_paginated_response(items, page, page_size, total_items)
+        return paginated.model_dump()
+    else:
+        result = await db.execute(stmt)
+        rows = result.all()
+
+        items = []
+        for user, profile in rows:
+            items.append(await build_user_base_response(user, profile, db))
+
+        return {
+            "items": items,
+            "page": 1,
+            "pageSize": len(items),
+            "totalItems": len(items),
+            "totalPages": 1
+        }
+

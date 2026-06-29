@@ -82,7 +82,7 @@ async def test_login_active_user(db_session: AsyncSession):
 
 @pytest.mark.asyncio
 async def test_login_active_user_new_device(db_session: AsyncSession, monkeypatch):
-    # Test login from a new device (requires OTP, sets user status to pending)
+    # Verified user on a new device still gets OTP but account status stays active.
     from apps.accounts.services import _hash_password
     from apps.accounts.schemas import LoginRequest
     sent_emails = []
@@ -120,9 +120,9 @@ async def test_login_active_user_new_device(db_session: AsyncSession, monkeypatc
     assert response.message == "Verification email sent. Please verify your OTP."
     assert response.data["emailSent"] is True
 
-    # Verify user status is now pending in DB
+    # Verified users must not be reverted to pending for device OTP.
     refreshed = await db_session.get(User, user.id)
-    assert refreshed.status == UserStatus.pending
+    assert refreshed.status == UserStatus.active
     assert refreshed.email_otp is not None
 
     # Verify a UserInstallation was created for the new device
@@ -132,6 +132,132 @@ async def test_login_active_user_new_device(db_session: AsyncSession, monkeypatc
     inst = (await db_session.execute(stmt)).scalar_one_or_none()
     assert inst is not None
     assert inst.platform is None
+
+
+@pytest.mark.asyncio
+async def test_login_same_device_strips_device_id(db_session: AsyncSession):
+    from apps.accounts.services import _hash_password
+    from apps.accounts.schemas import LoginRequest
+    from apps.accounts.db_models import UserInstallation
+
+    uid = str(uuid.uuid4())
+    email = f"strip_{uid[:8]}@example.com"
+    user = User(
+        firebase_uid=uid,
+        email=email,
+        password_hash=_hash_password("ValidPassword123"),
+        status=UserStatus.active,
+        onboarding_status="not_started",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        email_verified_at=datetime.now(timezone.utc),
+    )
+    db_session.add(user)
+    await db_session.flush()
+
+    db_session.add(
+        UserInstallation(
+            user_id=user.id,
+            device_id="known-device-id",
+            platform=None,
+            app_version=None,
+            installed_at=datetime.now(timezone.utc),
+            last_active_at=datetime.now(timezone.utc),
+        )
+    )
+    await db_session.commit()
+
+    payload = LoginRequest(
+        email=email,
+        password="ValidPassword123",
+        firebaseId="valid-id-token",
+        device_id="  known-device-id  ",
+    )
+    response = await login(
+        payload=payload,
+        firebase_user={"uid": uid, "email": email},
+        db=db_session,
+    )
+
+    assert response.status is True
+    assert response.message == "Login successful"
+    assert response.data["user"]["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_login_after_verify_otp_does_not_revert_to_pending(db_session: AsyncSession, monkeypatch):
+    from apps.accounts.services import _hash_password, verify_otp
+    from apps.accounts.schemas import LoginRequest, OtpVerifyRequest
+    from apps.accounts.db_models import UserInstallation
+
+    sent_emails = []
+
+    async def mock_send_otp_email(to_email, otp, otp_purpose):
+        sent_emails.append((to_email, otp, otp_purpose))
+        return True
+
+    monkeypatch.setattr("apps.accounts.services.send_otp_email", mock_send_otp_email)
+    monkeypatch.setattr(
+        "apps.accounts.services.auth_service.send_verification_success_email",
+        lambda *args, **kwargs: None,
+    )
+
+    uid = str(uuid.uuid4())
+    email = f"race_{uid[:8]}@example.com"
+    user = User(
+        firebase_uid=uid,
+        email=email,
+        password_hash=_hash_password("ValidPassword123"),
+        status=UserStatus.pending,
+        onboarding_status="not_started",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        email_otp="1234",
+        email_otp_created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(
+        UserInstallation(
+            user_id=user.id,
+            device_id="device-1",
+            platform=None,
+            app_version=None,
+            installed_at=datetime.now(timezone.utc),
+            last_active_at=datetime.now(timezone.utc),
+        )
+    )
+    await db_session.commit()
+
+    login_payload = LoginRequest(
+        email=email,
+        password="ValidPassword123",
+        firebaseId="valid-id-token",
+        device_id="device-1",
+    )
+    firebase_claims = {"uid": uid, "email": email}
+
+    login_response = await login(payload=login_payload, firebase_user=firebase_claims, db=db_session)
+    assert login_response.status is True
+    assert login_response.data["emailSent"] is True
+
+    refreshed = await db_session.get(User, user.id)
+    current_otp = refreshed.email_otp
+
+    verify_response = await verify_otp(
+        payload=OtpVerifyRequest(email=email, otp=current_otp, firebaseId="valid-id-token"),
+        firebase_user=firebase_claims,
+        db=db_session,
+    )
+    assert verify_response.status is True
+
+    login_after_verify = await login(payload=login_payload, firebase_user=firebase_claims, db=db_session)
+    assert login_after_verify.status is True
+    assert login_after_verify.data["user"]["status"] == "active"
+
+    final_user = await db_session.get(User, user.id)
+    assert final_user.status == UserStatus.active
+    assert final_user.email_verified_at is not None
 
 
 @pytest.mark.asyncio
@@ -234,9 +360,8 @@ async def test_logout_all_sets_pending(db_session: AsyncSession):
 
     assert response == {"logged_out_all": True}
 
-    # Verify status changed to pending
     refreshed = await db_session.get(User, user.id)
-    assert refreshed.status == UserStatus.pending
+    assert refreshed.status == UserStatus.active
 
 @pytest.mark.asyncio
 async def test_email_queue_and_cron_worker(db_session: AsyncSession, monkeypatch):
