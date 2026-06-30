@@ -11,7 +11,7 @@ from .session import async_session_factory, engine
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
-        await conn.run_sync(SQLModel.metadata.create_all)
+        # await conn.run_sync(SQLModel.metadata.create_all)
 
     # Isolated transactions for ALTER TYPE ADD VALUE
     for val in ["draft", "processing", "published", "flagged", "hidden", "deleted"]:
@@ -56,6 +56,7 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)"))
         await conn.execute(text("ALTER TABLE users ALTER COLUMN firebase_uid DROP NOT NULL"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE"))
+        await conn.execute(text("ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_admin_reviewed BOOLEAN NOT NULL DEFAULT FALSE"))
         
         # Academic program table removal and field additions/removals
         await conn.execute(text("DROP TABLE IF EXISTS academic_programs CASCADE"))

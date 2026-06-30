@@ -344,3 +344,38 @@ def test_update_user_profile_route(monkeypatch) -> None:
     assert body["data"]["banner_photo_key"] == "bob_banner.png"
 
 
+def test_list_processing_posts_route(monkeypatch) -> None:
+    async def _mock_list_processing_posts(_db, page=None, page_size=None):
+        return {
+            "items": [
+                {
+                    "user_id": "11111111-1111-1111-1111-111111111111",
+                    "first_name": "Jane",
+                    "last_name": "Doe",
+                    "profile_photo_url": "/static/uploads/profiles/jane.jpg",
+                    "post_id": "22222222-2222-2222-2222-222222222222",
+                    "caption": "Hello",
+                    "content_html": "<p>Hello</p>",
+                    "media": [],
+                    "is_admin_reviewed": False,
+                }
+            ],
+            "page": 1,
+            "pageSize": 1,
+            "totalItems": 1,
+            "totalPages": 1,
+        }
+
+    import apps.feed.services as feed_services
+    monkeypatch.setattr(feed_services, "list_processing_posts_service", _mock_list_processing_posts)
+
+    response = client.get("/api/v1/posts/processing", params={"page": 1, "pageSize": 10})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is True
+    assert body["message"] == "Processing posts fetched successfully"
+    assert body["data"]["items"][0]["first_name"] == "Jane"
+    assert body["data"]["items"][0]["post_id"] == "22222222-2222-2222-2222-222222222222"
+    assert body["data"]["items"][0]["is_admin_reviewed"] is False
+

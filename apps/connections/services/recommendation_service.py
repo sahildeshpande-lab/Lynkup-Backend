@@ -166,13 +166,9 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
     from apps.connections.services import get_relationship_flags
     flags_map = await get_relationship_flags(db, user_id, target_user_ids)
 
+    from apps.connections.services.connection_service import apply_relationship_flags
+
     for c in scored_candidates:
-        c["flags"] = flags_map.get(c["user_id"], {
-            "is_connected": False,
-            "is_followed": False,
-            "is_blocked": False,
-            "request_sent": False,
-            "request_received": False
-        })
+        apply_relationship_flags(c, flags_map, c["user_id"])
 
     return scored_candidates

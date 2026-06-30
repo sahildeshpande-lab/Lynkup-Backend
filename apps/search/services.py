@@ -276,6 +276,7 @@ async def search_users(
 
         target_user_ids = [user.id for user, profile, _university_name in rows]
         from apps.connections.services import get_relationship_flags
+        from apps.connections.services.connection_service import apply_relationship_flags
         flags_map = await get_relationship_flags(db, current_user.id, target_user_ids)
 
         items = []
@@ -283,13 +284,7 @@ async def search_users(
             user_data = await build_user_base_response(
                 user, profile, db, university_name=university_name
             )
-            user_data["flags"] = flags_map.get(user.id, {
-                "is_connected": False,
-                "is_followed": False,
-                "is_blocked": False,
-                "request_sent": False,
-                "request_received": False
-            })
+            apply_relationship_flags(user_data, flags_map, user.id)
             items.append(user_data)
 
         from common.pagination import build_paginated_response
@@ -301,6 +296,7 @@ async def search_users(
 
         target_user_ids = [user.id for user, profile, _university_name in rows]
         from apps.connections.services import get_relationship_flags
+        from apps.connections.services.connection_service import apply_relationship_flags
         flags_map = await get_relationship_flags(db, current_user.id, target_user_ids)
 
         items = []
@@ -308,13 +304,7 @@ async def search_users(
             user_data = await build_user_base_response(
                 user, profile, db, university_name=university_name
             )
-            user_data["flags"] = flags_map.get(user.id, {
-                "is_connected": False,
-                "is_followed": False,
-                "is_blocked": False,
-                "request_sent": False,
-                "request_received": False
-            })
+            apply_relationship_flags(user_data, flags_map, user.id)
             items.append(user_data)
 
         return {

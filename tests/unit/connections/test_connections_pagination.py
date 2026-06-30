@@ -151,8 +151,13 @@ async def test_get_recommendations_no_pagination(test_users) -> None:
             assert body["status"] is True
             # Recommend Eve (5) because she has no pending connection request
             data = body["data"]
-            assert isinstance(data, list)
-            eve_recommendation = next((item for item in data if item["first_name"] == "Eve"), None)
+            assert isinstance(data, dict)
+            assert "items" in data
+            assert data["page"] == 1
+            assert data["pageSize"] >= 1
+            assert data["totalItems"] >= 1
+            assert data["totalPages"] == 1
+            eve_recommendation = next((item for item in data["items"] if item["first_name"] == "Eve"), None)
             assert eve_recommendation is not None
             assert eve_recommendation["profile_photo_key"] == "photo_eve.png"
             assert eve_recommendation["first_name"] == "Eve"

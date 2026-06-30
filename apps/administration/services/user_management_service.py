@@ -431,8 +431,11 @@ async def admin_edit_profile(
             detail="Profile not found"
         )
 
-    profile.first_name = payload.firstName
-    profile.last_name = payload.lastName
+    if payload.firstName is not None:
+        profile.first_name = payload.firstName
+
+    if payload.lastName is not None:
+        profile.last_name = payload.lastName
 
     if payload.profile_photo_key is not None:
         if payload.profile_photo_key:

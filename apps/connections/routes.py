@@ -99,15 +99,22 @@ async def get_connection_recommendations(
 ):
     candidates = await get_recommendations(db, current_user.id)
     items = [RecommendedUserResponse(**item) for item in candidates]
-    
+
     if page is None and pageSize is None:
-        # if not provided: ALL
-        return success_response("Connection recommendations fetched", items, response_cls=ApiResponse)
-        
-    p = page or 1
-    ps = pageSize or 20
-    paginated = paginate_items(items, page=p, page_size=ps)
-    return success_response("Connection recommendations fetched", paginated.model_dump(), response_cls=ApiResponse)
+        data = {
+            "items": items,
+            "page": 1,
+            "pageSize": len(items),
+            "totalItems": len(items),
+            "totalPages": 1,
+        }
+    else:
+        p = page or 1
+        ps = pageSize or 20
+        paginated = paginate_items(items, page=p, page_size=ps)
+        data = paginated.model_dump()
+
+    return success_response("Connection recommendations fetched", data, response_cls=ApiResponse)
 
 
 @router.get("/lynkup", response_model=ApiResponse)

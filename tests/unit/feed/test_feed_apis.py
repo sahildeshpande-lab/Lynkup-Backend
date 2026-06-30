@@ -500,9 +500,8 @@ async def test_delete_post_service_success(test_users) -> None:
         await delete_post_service(post_id, user.id, session)
 
     async with async_session_factory() as session:
-        with pytest.raises(HTTPException) as exc_info:
-            await get_post_service(post_id, user.id, session)
-        assert exc_info.value.status_code == 404
+        post = await get_post_service(post_id, user.id, session)
+        assert post.state == PostState.deleted
 
 
 @pytest.mark.asyncio
@@ -512,13 +511,19 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
     async with async_session_factory() as session:
         p1 = Post(author_user_id=user.id, content={"caption": "Draft Post"}, state=PostState.draft)
         p2 = Post(author_user_id=user.id, content={"caption": "Published Post"}, state=PostState.published)
+        p3 = Post(author_user_id=user.id, content={"caption": "Flagged Post"}, state=PostState.flagged)
+        p4 = Post(author_user_id=user.id, content={"caption": "Deleted Post"}, state=PostState.deleted)
         session.add(p1)
         session.add(p2)
+        session.add(p3)
+        session.add(p4)
         await session.commit()
     
     async with async_session_factory() as session:
         posts_owner = await list_user_posts_service(user.id, user.id, session)
-        assert len(posts_owner) == 2
+        assert len(posts_owner) == 4
+        captions = {p.caption for p in posts_owner}
+        assert captions == {"Draft Post", "Published Post", "Flagged Post", "Deleted Post"}
         
         posts_other = await list_user_posts_service(user.id, other.id, session)
         assert len(posts_other) == 1
@@ -671,7 +676,7 @@ async def test_routes_post_management_flow(test_users) -> None:
             # Verify deleted
             get_deleted = await ac.get(f"/api/v1/posts/{post_id}")
             assert get_deleted.status_code == 200
-            assert get_deleted.json()["status"] is False
+            assert get_deleted.json()["data"]["state"] == "deleted"
     finally:
         app.dependency_overrides.pop(get_current_user, None)
         app.dependency_overrides.pop(get_current_admin, None)

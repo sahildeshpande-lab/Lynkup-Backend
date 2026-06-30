@@ -272,3 +272,20 @@ async def get_relationship_flags(
         }
     return result
 
+
+DEFAULT_RELATIONSHIP_FLAGS: dict[str, bool] = {
+    "is_connected": False,
+    "is_followed": False,
+    "is_blocked": False,
+    "request_sent": False,
+    "request_received": False,
+}
+
+
+def apply_relationship_flags(
+    item: dict,
+    flags_map: dict[UUID, dict[str, bool]],
+    user_id: UUID,
+) -> None:
+    item.update(flags_map.get(user_id, DEFAULT_RELATIONSHIP_FLAGS))
+

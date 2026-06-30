@@ -19,10 +19,7 @@ from .revision_service import _build_content_dict, _create_revision, _sync_hasht
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
-def format_post_detail(post: Post) -> dict:
-    """
-    Format a Post model and its attachments into a dictionary matching PostDetailData schema.
-    """
+def _extract_post_media(post: Post) -> list[dict]:
     media_data = []
     if post.attachments:
         for attachment in post.attachments:
@@ -35,8 +32,15 @@ def format_post_detail(post: Post) -> dict:
                     "url": generate_download_url(asset.key),
                     "original_filename": asset.original_filename,
                     "mime_type": asset.mime_type,
-                    "file_size": asset.file_size
+                    "file_size": asset.file_size,
                 })
+    return media_data
+
+def format_post_detail(post: Post) -> dict:
+    """
+    Format a Post model and its attachments into a dictionary matching PostDetailData schema.
+    """
+    media_data = _extract_post_media(post)
 
     content = post.content or {}
     return {
@@ -386,6 +390,8 @@ async def admin_publish_post_service(
             detail=f"Invalid action: {action}"
         )
 
+    post.is_admin_reviewed = True
+
     # Increment revision number and update timestamp
     post.revision_number += 1
     post.updated_at = utc_now()
@@ -422,6 +428,14 @@ async def get_post_service(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Post not found"
         )
+
+    if post.state == PostState.deleted:
+        if post.author_user_id != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Post not found"
+            )
+        return post
 
     if post.state == PostState.flagged and post.author_user_id != user_id:
         raise HTTPException(
@@ -464,9 +478,9 @@ async def delete_post_service(
     post_id: UUID,
     user_id: UUID,
     db: AsyncSession
-) -> None:
+) -> Post:
     """
-    Hard delete a post from the database.
+    Soft-delete a post by marking its state as deleted.
     """
     result = await db.execute(select(Post).where(Post.id == post_id))
     post = result.scalar_one_or_none()
@@ -482,9 +496,12 @@ async def delete_post_service(
             detail="Post does not belong to the authenticated user"
         )
 
+    post.state = PostState.deleted
+    post.updated_at = utc_now()
+
     try:
-        await db.delete(post)
         await db.commit()
+        await db.refresh(post)
     except Exception as e:
         await db.rollback()
         raise HTTPException(
@@ -492,14 +509,26 @@ async def delete_post_service(
             detail=f"Failed to delete post: {str(e)}"
         )
 
+    return post
+
+_OWNER_POST_STATES = (
+    PostState.draft,
+    PostState.processing,
+    PostState.published,
+    PostState.flagged,
+    PostState.hidden,
+    PostState.deleted,
+)
+
 async def list_user_posts_service(
     target_user_id: UUID,
     current_user_id: UUID,
     db: AsyncSession
 ) -> list[Post]:
     """
-    List all posts of a specific user.
-    Owner gets all posts, other users get only published posts.
+    List posts for a user.
+    Owners see draft, processing, published, flagged, hidden, and deleted posts.
+    Other users see only published posts.
     """
     # Verify user exists
     user_result = await db.execute(select(User).where(User.id == target_user_id))
@@ -510,9 +539,62 @@ async def list_user_posts_service(
         )
 
     stmt = select(Post).where(Post.author_user_id == target_user_id)
-    if target_user_id != current_user_id:
+    if target_user_id == current_user_id:
+        stmt = stmt.where(Post.state.in_(_OWNER_POST_STATES))
+    else:
         stmt = stmt.where(Post.state == PostState.published)
 
     stmt = stmt.order_by(Post.created_at.desc())
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+def _format_processing_post_item(post: Post, profile) -> dict:
+    content = post.content or {}
+    return {
+        "user_id": post.author_user_id,
+        "first_name": profile.first_name if profile else None,
+        "last_name": profile.last_name if profile else None,
+        "profile_photo_url": (
+            generate_download_url(profile.profile_photo_url)
+            if profile and profile.profile_photo_url
+            else None
+        ),
+        "post_id": post.id,
+        "caption": content.get("caption"),
+        "content_html": content.get("content_html"),
+        "media": _extract_post_media(post),
+        "is_admin_reviewed": post.is_admin_reviewed,
+    }
+
+
+async def list_processing_posts_service(
+    db: AsyncSession,
+    page: int | None = None,
+    page_size: int | None = None,
+) -> dict:
+    from sqlalchemy import func
+    from sqlalchemy.orm import selectinload
+    from apps.feed.db_models import PostAttachment
+    from apps.profiles.db_models import Profile
+    from common.pagination import build_paginated_response
+
+    base_filter = Post.state == PostState.processing
+    total_items = int((await db.execute(select(func.count(Post.id)).where(base_filter))).scalar_one())
+
+    stmt = (
+        select(Post, Profile)
+        .outerjoin(Profile, Profile.user_id == Post.author_user_id)
+        .where(base_filter)
+        .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
+        .order_by(Post.created_at.desc())
+    )
+    if page is not None and page_size is not None:
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+
+    rows = (await db.execute(stmt)).all()
+    items = [_format_processing_post_item(post, profile) for post, profile in rows]
+
+    p = page or 1
+    ps = page_size if page_size is not None else (len(items) if items else 1)
+    return build_paginated_response(items, p, ps, total_items).model_dump()

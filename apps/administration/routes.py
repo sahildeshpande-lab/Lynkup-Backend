@@ -234,6 +234,19 @@ async def update_user_profile(
     return ApiResponse(message="Profile updated successfully", data=data)
 
 
+@router.get("/posts/processing", response_model=ApiResponse)
+async def list_processing_posts(
+    page: int | None = Query(default=None, ge=1),
+    pageSize: int | None = Query(default=None, ge=1, le=200),
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_admin),
+) -> ApiResponse:
+    from apps.feed.services import list_processing_posts_service
+    _ = current_user
+    data = await list_processing_posts_service(db, page=page, page_size=pageSize)
+    return ApiResponse(message="Processing posts fetched successfully", data=data)
+
+
 @router.post("/posts/publish", response_model=ApiResponse)
 async def admin_publish_or_flag_post(
     payload: AdminPublishPostRequest,
