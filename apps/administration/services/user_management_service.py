@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
-from fastapi import HTTPException, status
+from fastapi import HTTPException, status, BackgroundTasks
 from pwdlib import PasswordHash
 from pwdlib.hashers.bcrypt import BcryptHasher
 from sqlalchemy import func, select
@@ -235,7 +235,7 @@ async def export_users(page: int | None, page_size: int | None, db: AsyncSession
         total_items = len(items)
         return build_paginated_response(items, 1, max(total_items, 1), total_items).model_dump()
 
-async def admin_create_user(payload: AdminUserCreateRequest, db: AsyncSession) -> ApiResponse:
+async def admin_create_user(payload: AdminUserCreateRequest, db: AsyncSession, background_tasks: BackgroundTasks | None = None) -> ApiResponse:
     from apps.accounts.services import assign_user_role
     from core.auth.services import create_firebase_user, delete_firebase_user
     from core.email_service import send_temporary_password_email
@@ -339,6 +339,7 @@ async def admin_create_user(payload: AdminUserCreateRequest, db: AsyncSession) -
         temporary_password,
         full_name=full_name or None,
         role=role_name,
+        background_tasks=background_tasks,
     )
 
     return ApiResponse(

@@ -21,7 +21,7 @@ async def admin_forgot_password(payload: AdminForgotPasswordRequest, db: AsyncSe
     email = payload.email.lower()
     stmt = select(User).options(selectinload(User.roles)).where(User.email == email)
     user = (await db.execute(stmt)).scalar_one_or_none()
-    if not user or user.role not in ("admin", "superadmin"):
+    if not user or user.role == "user":
         return ApiResponse(status=False, message="User not found", data=None)
 
     # Check for recent active token to rate limit
@@ -30,14 +30,14 @@ async def admin_forgot_password(payload: AdminForgotPasswordRequest, db: AsyncSe
         PasswordResetToken.user_id == user.id,
         PasswordResetToken.used_at == None,
         PasswordResetToken.expires_at > now
-    )
-    existing_token = (await db.execute(existing_stmt)).scalar_one_or_none()
-    if existing_token:
-        return ApiResponse(
-            status=False,
-            message=f"Recently email for resest password as been send please try after {auth_settings.password_reset_token_expire_minutes} mins  ",
-            data=None
-        )
+    ).limit(1)
+    # existing_token = (await db.execute(existing_stmt)).scalar_one_or_none()
+    # if existing_token:
+    #     return ApiResponse(
+    #         status=False,
+    #         message=f"Recently email for resest password as been send please try after {auth_settings.password_reset_token_expire_minutes} mins  ",
+    #         data=None
+    #     )
 
     # Generate token
     token_val = str(uuid.uuid4())
@@ -52,7 +52,7 @@ async def admin_forgot_password(payload: AdminForgotPasswordRequest, db: AsyncSe
     await db.commit()
 
     # Get application link
-    app_link = os.getenv("APPLICATION_LINK", "https://frontend-domain.com/").rstrip("/") + "/"
+    app_link = os.getenv("APPLICATION_LINK").rstrip("/") + "/"
     reset_link = f"{app_link}reset-password?token={token_val}"
 
     # Send email
@@ -88,7 +88,7 @@ async def admin_reset_password(payload: AdminResetPasswordRequest, db: AsyncSess
             return ApiResponse(status=False, message="Your reset password link has expired.", data=None)
 
         user = (await db.execute(select(User).options(selectinload(User.roles)).where(User.id == reset_token.user_id))).scalar_one_or_none()
-        if not user or user.role not in ("admin", "superadmin"):
+        if not user or user.role == "user":
             return ApiResponse(status=False, message="User not found", data=None)
 
         user.password_hash = PASSWORD_HASHER.hash(payload.new_password)

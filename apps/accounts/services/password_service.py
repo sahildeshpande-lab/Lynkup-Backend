@@ -14,6 +14,10 @@ from core.email_service import send_reset_password_email
 from ..schemas import ApiResponse, ResetPasswordRequest, ForgotPasswordRequest, UserChangePasswordRequest
 from core.auth.services import update_firebase_password, verify_firebase_token
 logger = logging.getLogger(__name__)
+from dotenv import load_dotenv
+
+load_dotenv()
+
 PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 
 from .common_service import _now
@@ -38,7 +42,7 @@ async def forgot_password( payload: ForgotPasswordRequest,db: AsyncSession ) -> 
         PasswordResetToken.user_id == user.id,
         PasswordResetToken.used_at == None,
         PasswordResetToken.expires_at > now
-    )
+    ).limit(1)
 
     existing_token = (
         await db.execute(existing_stmt)
@@ -66,7 +70,6 @@ async def forgot_password( payload: ForgotPasswordRequest,db: AsyncSession ) -> 
 
     app_link = os.getenv(
         "APPLICATION_LINK",
-        "https://frontend-domain.com/"
     ).rstrip("/") + "/"
 
     reset_link = (

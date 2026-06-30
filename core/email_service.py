@@ -526,14 +526,18 @@ async def send_temporary_password_email(
     temporary_password: str,
     full_name: str | None = None,
     role: str | None = None,
+    background_tasks: BackgroundTasks | None = None,
 ) -> bool:
-    return await _send_email(
+    subject = "KampuLynk Account Created"
+    html_content = build_temporary_password_email_html(temporary_password, full_name, role)
+    send_email_in_background(
+        background_tasks,
         to_email,
-        "KampuLynk Account Created",
-        build_temporary_password_email_html(temporary_password, full_name, role),
+        subject,
+        html_content,
         purpose="Account Created",
-        attachment=temporary_password,
     )
+    return True
 
 
 async def send_password_changed_email(to_email: str, full_name: str | None = None) -> bool:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from uuid import UUID
-from fastapi import APIRouter, Depends, Query, status, Form, UploadFile, File
+from fastapi import APIRouter, Depends, Query, status, Form, UploadFile, File, BackgroundTasks
 from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import EmailStr
@@ -138,11 +138,12 @@ async def list_viewers(
 @router.post("/admin/users", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
 async def create_user_by_admin(
     payload: AdminUserCreateRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_superadmin),
 ) -> ApiResponse:
     _ = current_user
-    return await services.admin_create_user(payload, db)
+    return await services.admin_create_user(payload, db, background_tasks)
 
 
 @router.get("/users/{userId:uuid}", response_model=ApiResponse)
