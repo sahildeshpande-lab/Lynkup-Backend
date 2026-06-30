@@ -164,8 +164,8 @@ async def test_accounts_session_management() -> None:
 
             # _issue_auth_session
             res = await _issue_auth_session(user, session)
-            assert res["user"]["firebase_uid"] == user.firebase_uid
             assert "user" in res
+            assert res["user"]["email"] == user.email
 
             # _revoke_refresh_token_row
             token_row = RefreshToken(
@@ -186,7 +186,7 @@ async def test_accounts_session_management() -> None:
             # build_firebase_session_response
             res_fb = await build_firebase_session_response(user, session)
             assert "user" in res_fb
-            assert res_fb["user"]["firebase_uid"] == user.firebase_uid
+            assert res_fb["user"]["email"] == user.email
 
     finally:
         await engine.dispose()

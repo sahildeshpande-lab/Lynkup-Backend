@@ -17,11 +17,11 @@ from .schemas import (
     AdminEditProfileRequest,
     AdminUserStatusRequest,
     ApiResponse,
-    AdminSignupRequest,
     AdminLoginRequest,
     ChangePasswordRequest,
     AdminForgotPasswordRequest,
     AdminResetPasswordRequest,
+    AdminPublishPostRequest,
 )
 from apps.accounts.schemas import EmailSignupRequest, RefreshTokenRequest, AdminAuthResponse
 from apps.profiles.schemas import CompletenessWeightsUpdateRequest, UpdateProfileRequest
@@ -29,39 +29,6 @@ from apps.profiles.schemas import CompletenessWeightsUpdateRequest, UpdateProfil
 
 router = APIRouter(tags=["4] Admin Management"])
 
-
-@router.post("/auth/admin/signup", response_model=AdminAuthResponse, status_code=status.HTTP_201_CREATED)
-async def admin_signup(
-    payload: AdminSignupRequest,
-    db: AsyncSession = Depends(get_session),
-) -> AdminAuthResponse:
-    return await services.admin_signup(payload, db)
-
-
-@router.post("/admin/onboarding", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
-async def admin_onboarding(
-    profile_photo: UploadFile = File(...),
-    university_id: str = Form(...),
-    major: str = Form(...),
-    minor: str | None = Form(None),
-    education_level_id: int = Form(...),
-    Bio: str = Form(...),
-    academic_interests: str = Form(...),
-    db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_admin),
-) -> ApiResponse:
-    data = await services.admin_complete_onboarding(
-        user_id=current_user.id,
-        profile_photo=profile_photo,
-        university_id=university_id,
-        major=major,
-        minor=minor,
-        education_level_id=education_level_id,
-        bio=Bio,
-        academic_interests=academic_interests,
-        db=db,
-    )
-    return ApiResponse(message="onboarding completed", data=data)
 
 
 @router.post("/auth/admin/login", response_model=AdminAuthResponse)
@@ -264,4 +231,27 @@ async def update_user_profile(
         db
     )
     return ApiResponse(message="Profile updated successfully", data=data)
+
+
+@router.post("/posts/publish", response_model=ApiResponse)
+async def admin_publish_or_flag_post(
+    payload: AdminPublishPostRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_admin),
+) -> ApiResponse:
+    """
+    Publish or flag a post by admin.
+    """
+    from apps.feed.services import admin_publish_post_service, format_post_detail
+    post = await admin_publish_post_service(
+        post_id=payload.post_id,
+        action=payload.action,
+        admin_user_id=current_user.id,
+        db=db
+    )
+    return ApiResponse(
+        status=True,
+        message=f"Post {payload.action}ed successfully",
+        data=format_post_detail(post)
+    )
 

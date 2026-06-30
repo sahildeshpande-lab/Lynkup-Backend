@@ -17,6 +17,7 @@ from core.auth.config import settings as auth_settings
 from core.security.auth import (
     get_bearer_token,
     get_current_user,
+    get_current_admin,
     get_current_superadmin,
 )
 
@@ -146,3 +147,137 @@ async def test_get_current_superadmin() -> None:
     user_admin.role = "superadmin"
     res = await get_current_superadmin(user_admin)
     assert res == user_admin
+
+    # 3. Moderator should be rejected
+    user_moderator = User()
+    user_moderator.role = "moderator"
+    with pytest.raises(HTTPException) as exc:
+        await get_current_superadmin(user_moderator)
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_get_current_admin_paths() -> None:
+    try:
+        await init_db()
+
+        async with async_session_factory() as session:
+            admin_id = uuid.uuid4()
+            admin = User(
+                id=admin_id,
+                email=f"admin_auth_{uuid.uuid4()}@example.com",
+                role="superadmin",
+                status="active",
+            )
+            session.add(admin)
+            await session.commit()
+            await session.refresh(admin)
+
+            from apps.accounts.services import assign_user_role
+            await assign_user_role(session, admin, "superadmin")
+            await session.commit()
+
+        access_payload = {
+            "sub": str(admin_id),
+            "type": "access",
+            "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
+        }
+        access_token = jwt.encode(
+            access_payload, auth_settings.jwt_secret, algorithm=auth_settings.jwt_algorithm
+        )
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=access_token)
+
+        async with async_session_factory() as session:
+            db_admin = await get_current_admin(creds, session)
+            assert db_admin.id == admin_id
+
+        with pytest.raises(HTTPException) as exc:
+            await get_current_admin(None, None)
+        assert exc.value.status_code == 401
+
+        refresh_payload = {
+            "sub": str(admin_id),
+            "type": "refresh",
+            "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
+        }
+        refresh_token = jwt.encode(
+            refresh_payload, auth_settings.jwt_secret, algorithm=auth_settings.jwt_algorithm
+        )
+        refresh_creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=refresh_token)
+        async with async_session_factory() as session:
+            with pytest.raises(HTTPException) as exc:
+                await get_current_admin(refresh_creds, session)
+            assert exc.value.status_code == 401
+
+        async with async_session_factory() as session:
+            user = User(
+                email=f"plain_user_{uuid.uuid4()}@example.com",
+                role="user",
+                status="active",
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+
+            user_payload = {
+                "sub": str(user.id),
+                "type": "access",
+                "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
+            }
+            user_token = jwt.encode(
+                user_payload, auth_settings.jwt_secret, algorithm=auth_settings.jwt_algorithm
+            )
+            user_creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=user_token)
+
+            with pytest.raises(HTTPException) as exc:
+                await get_current_admin(user_creds, session)
+            assert exc.value.status_code == 403
+            assert exc.value.detail == "Insufficient permissions"
+
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_get_current_user_firebase_paths(monkeypatch) -> None:
+    try:
+        await init_db()
+
+        firebase_uid = f"firebase-path-{uuid.uuid4()}"
+
+        def _mock_verify(_token, check_revoked=False):
+            return {"uid": firebase_uid, "email": "firebase@example.com"}
+
+        monkeypatch.setattr("core.auth.services.verify_firebase_token", _mock_verify)
+
+        async with async_session_factory() as session:
+            user = User(
+                firebase_uid=firebase_uid,
+                email=f"firebase_path_{uuid.uuid4()}@example.com",
+                role="user",
+                status="active",
+            )
+            session.add(user)
+            await session.commit()
+
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="firebase-token")
+
+        async with async_session_factory() as session:
+            db_user = await get_current_user(creds, session)
+            assert db_user.firebase_uid == firebase_uid
+
+        async with async_session_factory() as session:
+            stmt = select(User).where(User.firebase_uid == firebase_uid)
+            db_u = (await session.execute(stmt)).scalar_one()
+            db_u.status = UserStatus.banned
+            session.add(db_u)
+            await session.commit()
+
+        async with async_session_factory() as session:
+            with pytest.raises(HTTPException) as exc:
+                await get_current_user(creds, session)
+            assert exc.value.status_code == 403
+            assert exc.value.detail == "Account is banned"
+
+    finally:
+        await engine.dispose()

@@ -10,6 +10,7 @@ from apps.accounts.db_models import User
 from core.database import get_session
 from core.security.auth import get_current_user
 from common.pagination import paginate_items
+from common.responses import success_response
 from apps.connections.services import (
     block_user as block_user_service,
     follow_user as follow_user_service,
@@ -101,12 +102,12 @@ async def get_connection_recommendations(
     
     if page is None and pageSize is None:
         # if not provided: ALL
-        return ApiResponse(data=items)
+        return success_response("Connection recommendations fetched", items, response_cls=ApiResponse)
         
     p = page or 1
     ps = pageSize or 20
     paginated = paginate_items(items, page=p, page_size=ps)
-    return ApiResponse(data=paginated.model_dump())
+    return success_response("Connection recommendations fetched", paginated.model_dump(), response_cls=ApiResponse)
 
 
 @router.get("/lynkup", response_model=ApiResponse)

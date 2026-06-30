@@ -94,24 +94,26 @@ async def test_follow_unfollow_endpoints(test_users):
         assert data["follower_user_id"] == str(user1.id)
         assert data["following_user_id"] == str(user2.id)
 
-        # 2. Prevent duplicate follow (returns 200 with status=True and "Already following.")
+        # 2. Prevent duplicate follow (business failure in response body)
         resp_dup = await client.post("/api/v1/follow", json={"following_user_id": str(user2.id)})
         assert resp_dup.status_code == 200
-        assert resp_dup.json()["status"] is True
+        assert resp_dup.json()["status"] is False
         assert resp_dup.json()["message"] == "Already following."
 
-        # 3. Prevent self-follow (returns 400 Bad Request)
+        # 3. Prevent self-follow (business failure in response body)
         resp_self = await client.post("/api/v1/follow", json={"following_user_id": str(user1.id)})
-        assert resp_self.status_code == 400
+        assert resp_self.status_code == 200
+        assert resp_self.json()["status"] is False
 
         # 4. Unfollow user2
         resp_unfollow = await client.request("DELETE", "/api/v1/follow", json={"following_user_id": str(user2.id)})
         assert resp_unfollow.status_code == 200
         assert resp_unfollow.json()["data"] == []
 
-        # 5. Unfollow non-existent follow (returns 404 Not Found)
+        # 5. Unfollow non-existent follow (business failure in response body)
         resp_unfollow_again = await client.request("DELETE", "/api/v1/follow", json={"following_user_id": str(user2.id)})
-        assert resp_unfollow_again.status_code == 404
+        assert resp_unfollow_again.status_code == 200
+        assert resp_unfollow_again.json()["status"] is False
 
     app.dependency_overrides.clear()
 
@@ -131,24 +133,26 @@ async def test_block_unblock_endpoints(test_users):
         assert data["blocker_user_id"] == str(user1.id)
         assert data["blocked_user_id"] == str(user2.id)
 
-        # 2. Prevent duplicate block (returns 200 with status=True and "Already blocked.")
+        # 2. Prevent duplicate block (business failure in response body)
         resp_dup = await client.post("/api/v1/block", json={"blocked_user_id": str(user2.id)})
         assert resp_dup.status_code == 200
-        assert resp_dup.json()["status"] is True
+        assert resp_dup.json()["status"] is False
         assert resp_dup.json()["message"] == "Already blocked."
 
-        # 3. Prevent self-block (returns 400 Bad Request)
+        # 3. Prevent self-block (business failure in response body)
         resp_self = await client.post("/api/v1/block", json={"blocked_user_id": str(user1.id)})
-        assert resp_self.status_code == 400
+        assert resp_self.status_code == 200
+        assert resp_self.json()["status"] is False
 
         # 4. Unblock user2
         resp_unblock = await client.request("DELETE", "/api/v1/block", json={"blocked_user_id": str(user2.id)})
         assert resp_unblock.status_code == 200
         assert resp_unblock.json()["data"] == []
 
-        # 5. Unblock non-existent block (returns 404 Not Found)
+        # 5. Unblock non-existent block (business failure in response body)
         resp_unblock_again = await client.request("DELETE", "/api/v1/block", json={"blocked_user_id": str(user2.id)})
-        assert resp_unblock_again.status_code == 404
+        assert resp_unblock_again.status_code == 200
+        assert resp_unblock_again.json()["status"] is False
 
     app.dependency_overrides.clear()
 

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from fastapi import HTTPException, status
 from core.images import normalize_image_name, generate_download_url
 from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
@@ -90,8 +91,11 @@ async def complete_onboarding(
     if university_id:
         try:
             profile.university_id = UUID(str(university_id))
-        except ValueError:
-            pass
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid university_id",
+            ) from exc
     profile_data["universityId"] = str(profile.university_id) if profile.university_id else None
 
     profile.major = major

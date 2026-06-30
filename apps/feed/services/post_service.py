@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Literal
 from datetime import datetime, timezone
 from uuid import UUID
 from fastapi import HTTPException, status
@@ -10,6 +11,7 @@ from apps.feed.db_models import Post
 from apps.feed.schemas import SavePostRequest, EditPostRequest
 from apps.feed.content_utils import sanitize_html, validate_content, validate_media_count
 from core.images import generate_download_url
+from apps.connections.services.connection_service import is_blocked
 
 from .media_service import _verify_and_attach_media
 from .revision_service import _build_content_dict, _create_revision, _sync_hashtags
@@ -89,8 +91,11 @@ async def save_post_service(
             detail=str(exc)
         )
 
-    # Determine state from visibility
-    post_state = PostState.hidden if payload.content.visibility == "hidden" else PostState.draft
+    # Determine state
+    if payload.id is not None and payload.is_edit:
+        post_state = PostState.hidden if payload.content.visibility == "hidden" else PostState.draft
+    else:
+        post_state = PostState.processing
 
     # ----- CREATE -----
     if payload.id is None:
@@ -146,11 +151,11 @@ async def save_post_service(
             detail="Post does not belong to the authenticated user"
         )
 
-    # Only drafts and hidden posts are editable through this endpoint
-    if post.state not in (PostState.draft, PostState.hidden):
+    # Only drafts, hidden, and processing posts are editable through this endpoint
+    if post.state not in (PostState.draft, PostState.hidden, PostState.processing):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Post is in '{post.state.value}' state and cannot be edited as draft"
+            detail=f"Post is in '{post.state.value}' state and cannot be edited"
         )
 
     post.content = content_dict
@@ -314,8 +319,8 @@ async def publish_post_service(
             detail="Post does not belong to the authenticated user"
         )
 
-    # Only draft or hidden posts can be published
-    if post.state not in (PostState.draft, PostState.hidden):
+    # Only draft, hidden, or processing posts can be published
+    if post.state not in (PostState.draft, PostState.hidden, PostState.processing):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Post is in '{post.state.value}' state and cannot be published"
@@ -347,6 +352,59 @@ async def publish_post_service(
 
     return post
 
+
+async def admin_publish_post_service(
+    post_id: UUID,
+    action: Literal["publish", "flag"],
+    admin_user_id: UUID,
+    db: AsyncSession
+) -> Post:
+    """
+    Publish or flag a post by an admin.
+    """
+    result = await db.execute(select(Post).where(Post.id == post_id))
+    post = result.scalar_one_or_none()
+
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Post not found"
+        )
+
+    if action == "publish":
+        # Respect visibility stored in content
+        visibility = (post.content or {}).get("visibility", "public")
+        if visibility == "hidden" or post.state == PostState.hidden:
+            post.state = PostState.hidden
+        else:
+            post.state = PostState.published
+    elif action == "flag":
+        post.state = PostState.flagged
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid action: {action}"
+        )
+
+    # Increment revision number and update timestamp
+    post.revision_number += 1
+    post.updated_at = utc_now()
+
+    try:
+        # Create revision audit record with the admin user as the editor
+        await _create_revision(post, admin_user_id, db)
+
+        await db.commit()
+        await db.refresh(post)
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to publish/flag post by admin: {str(e)}"
+        )
+
+    return post
+
 async def get_post_service(
     post_id: UUID,
     user_id: UUID,
@@ -365,13 +423,40 @@ async def get_post_service(
             detail="Post not found"
         )
 
-    # Visibility control: draft and hidden posts are private to the author
-    if post.state in (PostState.draft, PostState.hidden):
+    if post.state == PostState.flagged and post.author_user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Post is not accessible"
+        )
+
+    if post.state in (PostState.draft, PostState.hidden, PostState.processing):
         if post.author_user_id != user_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Post is not accessible"
             )
+        return post
+
+    if post.author_user_id != user_id:
+        if await is_blocked(db, user_id, post.author_user_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Post is not accessible"
+            )
+
+        visibility = (post.content or {}).get("visibility", "public")
+        if visibility == "hidden":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Post is not accessible"
+            )
+        if visibility == "connections_only":
+            from apps.connections.services.connection_service import are_connected
+            if not await are_connected(db, user_id, post.author_user_id):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Post is not accessible"
+                )
 
     return post
 

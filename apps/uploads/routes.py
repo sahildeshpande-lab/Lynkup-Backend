@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.database.session import get_session
 from core.security.auth import get_current_user
 from apps.accounts.db_models import User
 from apps.profiles.schemas import ApiResponse
@@ -17,12 +15,11 @@ ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 router = APIRouter(tags=["2] User Management"])
 
 
-@router.post("/uploads/image")
+@router.post("/uploads/image", response_model=ApiResponse)
 async def upload_image(
     file: UploadFile = File(...),
     prefix: str = Form("profiles"),
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_session),
 ):
     if prefix not in ALLOWED_PREFIXES:
         raise HTTPException(

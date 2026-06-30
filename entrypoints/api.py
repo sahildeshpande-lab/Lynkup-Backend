@@ -10,6 +10,8 @@ from fastapi.exceptions import RequestValidationError
 from core.lifespan import lifespan
 from core.routes import build_router
 from core.security.auth import bearer_scheme
+from common.responses import error_response
+from apps.accounts.services import AccountExistsException
 
 
 AUTH_TAG = "1] User Registration, Authentication & Onboarding"
@@ -68,12 +70,22 @@ logger=logging.getLogger(__name__)
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
     return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "status": False,
-            "message": exc.detail,
-            "data": []
-        },
+        status_code=200,
+        content=error_response(str(exc.detail), data={"httpStatus": exc.status_code}).model_dump(),
+    )
+
+
+@app.exception_handler(AccountExistsException)
+async def account_exists_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=200,
+        content=error_response(
+            "Account already exists. Please login using your registered method.",
+            data={
+                "registration_type": exc.registration_type,
+                "httpStatus": 409,
+            },
+        ).model_dump(),
     )
 
 def make_json_serializable(obj):
@@ -90,12 +102,26 @@ def make_json_serializable(obj):
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
     return JSONResponse(
-        status_code=422,
-        content={
-            "status": False,
-            "message": "Validation failed",
-            "data": make_json_serializable(exc.errors()),
-        },
+        status_code=200,
+        content=error_response(
+            "Validation failed",
+            data={
+                "httpStatus": 422,
+                "errors": make_json_serializable(exc.errors()),
+            },
+        ).model_dump(),
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request, exc):
+    logger.exception("Unhandled server error")
+    return JSONResponse(
+        status_code=200,
+        content=error_response(
+            "Internal server error",
+            data={"httpStatus": 500},
+        ).model_dump(),
     )
 
 BASE_DIR = Path(__file__).resolve().parent

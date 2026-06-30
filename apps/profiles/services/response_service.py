@@ -69,7 +69,6 @@ async def build_user_base_response(
         "lastName": last_name,
         "email": user.email,
         "role": user.role,
-        "firebase_uid": user.firebase_uid,
         "loginType": user.registration_type.value if hasattr(user.registration_type, "value") else str(user.registration_type),
         "profilePhoto_url": generate_download_url(profile.profile_photo_url) if (profile and profile.profile_photo_url) else None,
         "bannerPhotoUrl": generate_download_url(profile.banner_photo_url) if (profile and profile.banner_photo_url) else None,

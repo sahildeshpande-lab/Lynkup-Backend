@@ -4,7 +4,7 @@ import sys
 from types import ModuleType
 
 from . import auth_service as _service_module_0
-from .auth_service import _generate_admin_tokens, admin_signup, admin_me, admin_complete_onboarding, admin_token, admin_signin
+from .auth_service import _generate_admin_tokens, admin_me, admin_token, admin_signin
 
 from . import user_management_service as _service_module_1
 from .user_management_service import (
@@ -42,11 +42,8 @@ sys.modules[__name__].__class__ = _ServicesModule
 
 __all__ = [
     "_generate_admin_tokens",
-    "admin_signup",
     "admin_me",
-    "admin_complete_onboarding",
     "admin_token",
-    "admin_signin",
     "_generate_temporary_password",
     "_coerce_uuid",
     "_fetch_users_with_details",

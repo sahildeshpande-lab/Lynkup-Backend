@@ -66,6 +66,7 @@ class SavePostRequest(BaseModel):
     the backend manages it entirely.
     """
     id: Optional[UUID] = None
+    is_edit: bool = False
     content: PostContentPayload
     media: Optional[List[MediaItem]] = Field(default_factory=list)
 

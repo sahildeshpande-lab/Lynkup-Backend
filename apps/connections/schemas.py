@@ -79,6 +79,14 @@ class BlockResponse(BaseModel):
         from_attributes = True
 
 
+class RelationshipFlags(BaseModel):
+    is_connected: bool = False
+    is_followed: bool = False
+    is_blocked: bool = False
+    request_sent: bool = False
+    request_received: bool = False
+
+
 class RecommendedUserResponse(BaseModel):
     user_id: UUID
     score: float
@@ -89,6 +97,7 @@ class RecommendedUserResponse(BaseModel):
     minor: str | None = None
     edu_level: str | None = None
     profile_photo_key: str | None = None
+    flags: RelationshipFlags | None = None
 
 
 class PendingLynkupRequestResponse(BaseModel):

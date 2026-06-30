@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 USER_EMAIL_PATTERNS = (
     "pytest%",
+    "pytest_conn_%",
     "active_%",
     "pending_%",
     "user_%",
@@ -54,6 +55,20 @@ async def _purge_pytest_data(session: AsyncSession) -> None:
     if user_ids:
         user_filter = bindparam("user_ids", expanding=True)
         user_params = {"user_ids": user_ids}
+
+        connection_tables = (
+            ("connection_requests", "sender_user_id", "receiver_user_id"),
+            ("connections", "user_low_id", "user_high_id"),
+            ("follows", "follower_user_id", "following_user_id"),
+            ("blocks", "blocker_user_id", "blocked_user_id"),
+        )
+        for table, col_a, col_b in connection_tables:
+            await session.execute(
+                text(
+                    f"DELETE FROM {table} WHERE {col_a} IN :user_ids OR {col_b} IN :user_ids"
+                ).bindparams(user_filter),
+                user_params,
+            )
 
         for table in (
             "security_events",

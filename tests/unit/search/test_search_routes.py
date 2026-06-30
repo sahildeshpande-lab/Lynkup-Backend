@@ -64,7 +64,8 @@ async def _search_universities(_params, _db) -> dict:
 def test_university_search_rejects_short_query() -> None:
     response = client.get("/api/v1/universities", params={"query": "ab", "page": 1, "pageSize": 20})
 
-    assert response.status_code == 400
+    assert response.status_code == 200
+    assert response.json()["status"] is False
 
 
 def test_university_search_returns_matches(monkeypatch) -> None:
@@ -134,7 +135,7 @@ def test_search_users_route(monkeypatch) -> None:
     monkeypatch.setattr(search_routes.services, "search_users", _mock_search_users)
 
     response = client.get(
-        "/api/v1/search",
+        "/api/v1/search-user",
         params={
             "query": "John Kampu CS Math Bachelors",
             "page": 1,
@@ -160,6 +161,8 @@ from apps.profiles.db_models import Profile, Country
 from apps.profiles.db_models.university_db_model import University
 from apps.connections.db_models.block import Block
 from apps.connections.db_models.connection import Connection
+from apps.connections.db_models.follow import Follow
+from apps.connections.db_models.connection_request import ConnectionRequest
 
 
 @pytest.mark.asyncio
@@ -207,10 +210,12 @@ async def test_search_users_service_logic(monkeypatch) -> None:
 
 
             # Create profiles
-            country = Country(name="United States", iso_code=f"U{unique_id[:1]}")
-            session.add(country)
-            await session.commit()
-            await session.refresh(country)
+            country_res = await session.execute(select(Country).where(Country.iso_code == "US"))
+            country = country_res.scalars().first()
+            if not country:
+                country = Country(name="United States", iso_code="US")
+                session.add(country)
+                await session.flush()
 
             uni = University(name=f"Kampu_{unique_id}", slug=f"kampu-uni-{unique_id}", country_id=country.id)
             session.add(uni)
@@ -263,6 +268,110 @@ async def test_search_users_service_logic(monkeypatch) -> None:
 
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_get_relationship_flags_logic(monkeypatch) -> None:
+    # Mock file_exists to return True
+    monkeypatch.setattr("core.images.file_exists", lambda key: True)
+    # Mock normalize_image_name
+    monkeypatch.setattr("core.images.normalize_image_name", lambda key: f"normalized/{key}")
+
+    try:
+        await init_db()
+        async with async_session_factory() as session:
+            import uuid
+            unique_id = str(uuid.uuid4())[:8]
+
+            # 1. Create a searcher and targets
+            searcher = User(email=f"s_{unique_id}@example.com", role="user", firebase_uid=f"uid_s_{unique_id}")
+            t1 = User(email=f"t1_{unique_id}@example.com", role="user", firebase_uid=f"uid_t1_{unique_id}", status="active")
+            t2 = User(email=f"t2_{unique_id}@example.com", role="user", firebase_uid=f"uid_t2_{unique_id}", status="active")
+            t3 = User(email=f"t3_{unique_id}@example.com", role="user", firebase_uid=f"uid_t3_{unique_id}", status="active")
+            t4 = User(email=f"t4_{unique_id}@example.com", role="user", firebase_uid=f"uid_t4_{unique_id}", status="active")
+            t5 = User(email=f"t5_{unique_id}@example.com", role="user", firebase_uid=f"uid_t5_{unique_id}", status="active")
+
+            session.add(searcher)
+            session.add(t1)
+            session.add(t2)
+            session.add(t3)
+            session.add(t4)
+            session.add(t5)
+            await session.commit()
+            
+            await session.refresh(searcher)
+            await session.refresh(t1)
+            await session.refresh(t2)
+            await session.refresh(t3)
+            await session.refresh(t4)
+            await session.refresh(t5)
+
+            from apps.connections.services.connection_service import build_connection_pair
+            low_id, high_id = build_connection_pair(searcher.id, t1.id)
+            conn = Connection(user_low_id=low_id, user_high_id=high_id, is_active=True)
+            session.add(conn)
+
+            follow = Follow(follower_user_id=searcher.id, following_user_id=t2.id, is_active=True)
+            session.add(follow)
+
+            block = Block(blocker_user_id=searcher.id, blocked_user_id=t3.id, is_active=True)
+            session.add(block)
+
+            req_sent = ConnectionRequest(sender_user_id=searcher.id, receiver_user_id=t4.id, status="pending")
+            session.add(req_sent)
+
+            req_rcvd = ConnectionRequest(sender_user_id=t5.id, receiver_user_id=searcher.id, status="pending")
+            session.add(req_rcvd)
+
+            await session.commit()
+
+        # Run get_relationship_flags
+        async with async_session_factory() as session:
+            from apps.connections.services import get_relationship_flags
+            flags = await get_relationship_flags(
+                session,
+                searcher.id,
+                [t1.id, t2.id, t3.id, t4.id, t5.id]
+            )
+
+            # Verify t1 (connected)
+            assert flags[t1.id]["is_connected"] is True
+            assert flags[t1.id]["is_followed"] is False
+            assert flags[t1.id]["is_blocked"] is False
+            assert flags[t1.id]["request_sent"] is False
+            assert flags[t1.id]["request_received"] is False
+
+            # Verify t2 (followed)
+            assert flags[t2.id]["is_connected"] is False
+            assert flags[t2.id]["is_followed"] is True
+            assert flags[t2.id]["is_blocked"] is False
+            assert flags[t2.id]["request_sent"] is False
+            assert flags[t2.id]["request_received"] is False
+
+            # Verify t3 (blocked)
+            assert flags[t3.id]["is_connected"] is False
+            assert flags[t3.id]["is_followed"] is False
+            assert flags[t3.id]["is_blocked"] is True
+            assert flags[t3.id]["request_sent"] is False
+            assert flags[t3.id]["request_received"] is False
+
+            # Verify t4 (request_sent)
+            assert flags[t4.id]["is_connected"] is False
+            assert flags[t4.id]["is_followed"] is False
+            assert flags[t4.id]["is_blocked"] is False
+            assert flags[t4.id]["request_sent"] is True
+            assert flags[t4.id]["request_received"] is False
+
+            # Verify t5 (request_received)
+            assert flags[t5.id]["is_connected"] is False
+            assert flags[t5.id]["is_followed"] is False
+            assert flags[t5.id]["is_blocked"] is False
+            assert flags[t5.id]["request_sent"] is False
+            assert flags[t5.id]["request_received"] is True
+
+    finally:
+        await engine.dispose()
+
 
 
 

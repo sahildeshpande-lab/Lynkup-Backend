@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from apps.accounts.db_models import User
 from common.enums import EducationLevel, OnboardingStatus, UserStatus, RegistrationType
-from ..schemas import AdminSignupRequest, AdminLoginRequest
+from ..schemas import  AdminLoginRequest
 from apps.accounts.schemas import ApiResponse, RefreshTokenRequest
 from apps.accounts.services import JWT_ALGORITHM, JWT_SECRET
 from apps.profiles.services import build_user_base_response
@@ -46,71 +46,6 @@ def _generate_admin_tokens(user: User) -> tuple[str, str]:
 
     return access_token, refresh_token
 
-async def admin_signup(payload: AdminSignupRequest, db: AsyncSession):
-    email = payload.email.lower()
-
-    # Check duplicate email
-    stmt = select(User).where(User.email == email)
-    existing_user = (await db.execute(stmt)).scalar_one_or_none()
-    if existing_user:
-        return ApiResponse(status=False, message="Email already registered", data=None)
-
-    from apps.accounts.services import assign_user_role
-
-    now = datetime.now(timezone.utc)
-    user = User(
-        email=email,
-        password_hash=PASSWORD_HASHER.hash(payload.password),
-        registration_type=RegistrationType.email,
-        status=UserStatus.active,
-        onboarding_status=OnboardingStatus.not_started,
-        created_at=now,
-        updated_at=now,
-        email_verified_at=now,
-    )
-    db.add(user)
-    await db.flush()
-
-    role_str = payload.role.value if hasattr(payload.role, "value") else str(payload.role)
-    await assign_user_role(db, user, role_str)
-
-    profile = Profile(
-        user_id=user.id,
-        first_name=payload.firstName,
-        last_name=payload.lastName,
-        completeness_score=0,
-        updated_at=now
-    )
-    db.add(profile)
-    await db.flush()
-
-    from apps.profiles.services import calculate_completeness_score
-    try:
-        profile.completeness_score = await calculate_completeness_score(user.id, db)
-        db.add(profile)
-    except Exception:
-        pass
-
-    await db.commit()
-    await db.refresh(user)
-    await db.refresh(profile)
-
-    stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
-    user = (await db.execute(stmt_user)).scalar_one()
-
-    user_data = await build_user_base_response(user, profile, db)
-    access_token, refresh_token = _generate_admin_tokens(user)
-    return ApiResponse(
-        status=True,
-        message="Signup successful",
-        data={
-            "accessToken": access_token,
-            "refreshToken": refresh_token,
-            "user": user_data,
-            "emailSent": False,
-        },
-    )
-
 async def admin_me(
     current_user: User,
     db: AsyncSession,
@@ -138,93 +73,6 @@ async def admin_me(
             "emailSent": False,
         },
     )
-
-async def admin_complete_onboarding(
-    user_id: UUID,
-    bio: str,
-    major: str,
-    minor: str | None,
-    university_id: str,
-    education_level_id: int,
-    academic_interests: str,
-    profile_photo,
-    db: AsyncSession,
-) -> dict:
-    import json
-    import uuid
-
-    from core.images import generate_download_url, normalize_image_name, save_image
-    from apps.profiles.services import (
-        _resolve_academic_interest_ids,
-        build_user_base_response,
-        calculate_completeness_score,
-    )
-
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-    profile = (await db.execute(select(Profile).where(Profile.user_id == user_id))).scalar_one_or_none()
-    if not profile:
-        profile = Profile(user_id=user_id, first_name="", last_name="", completeness_score=0)
-        db.add(profile)
-        await db.flush()
-
-    if profile_photo and profile_photo.filename:
-        content = await profile_photo.read()
-        if content:
-            ext = profile_photo.filename.split(".")[-1] if "." in profile_photo.filename else "png"
-            file_name = f"profiles/{uuid.uuid4()}.{ext}"
-            save_image(
-                file_name=file_name,
-                content=content,
-                content_type=profile_photo.content_type or "image/png",
-            )
-            profile.profile_photo_url = normalize_image_name(file_name)
-
-    profile.bio = bio
-    if university_id:
-        try:
-            profile.university_id = UUID(str(university_id))
-        except ValueError:
-            pass
-    profile.major = major
-    profile.minor = minor
-    try:
-        education_level = EducationLevel.from_id(education_level_id)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid education_level_id"
-        ) from exc
-    profile.edu_level = education_level.value
-
-    if academic_interests is not None:
-        val = academic_interests.strip()
-        if val.startswith("[") and val.endswith("]"):
-            try:
-                interests_list = json.loads(val)
-            except Exception:
-                interests_list = [x.strip().strip("'\"") for x in val[1:-1].split(",") if x.strip()]
-        else:
-            interests_list = [x.strip() for x in val.split(",") if x.strip()]
-        profile.profile_interests_id = await _resolve_academic_interest_ids(interests_list, db)
-
-    user.onboarding_status = OnboardingStatus.completed
-    db.add(user)
-    db.add(profile)
-    await db.flush()
-
-    profile.completeness_score = await calculate_completeness_score(user_id, db)
-    db.add(profile)
-    await db.commit()
-    await db.refresh(user)
-    await db.refresh(profile)
-
-    user_data = await build_user_base_response(user, profile, db)
-    if profile.profile_photo_url:
-        user_data["profilePhoto_url"] = generate_download_url(profile.profile_photo_url)
-    return {"user": user_data}
 
 async def admin_token(payload: RefreshTokenRequest, db: AsyncSession) -> dict:
     try:

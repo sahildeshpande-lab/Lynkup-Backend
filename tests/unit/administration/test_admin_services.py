@@ -20,14 +20,11 @@ from apps.administration.schemas import (
     AdminUserActionRequest,
     ChangePasswordRequest,
     AdminUserCreateRequest,
-    AdminSignupRequest,
     AdminLoginRequest,
 )
 
 from apps.administration.services import (
-    admin_complete_onboarding,
     admin_token,
-    admin_signup,
     admin_signin,
     list_users,
     export_users,
@@ -42,62 +39,6 @@ from apps.administration.services import (
 from common.enums import AdminUserStatus
 from apps.accounts.services import JWT_SECRET, JWT_ALGORITHM, _generate_tokens
 
-
-
-@pytest.mark.asyncio
-async def test_admin_complete_onboarding(monkeypatch) -> None:
-    try:
-        await init_db()
-        async with async_session_factory() as session:
-            user = User(
-                firebase_uid=f"uid-{uuid.uuid4()}",
-                email="admin_onboarding_test@example.com",
-                role="user",
-            )
-            session.add(user)
-            await session.commit()
-            await session.refresh(user)
-
-        async with async_session_factory() as session:
-            from apps.profiles.db_models.country_db_model import Country
-            from apps.profiles.db_models.university_db_model import University
-            
-            stmt_country = select(Country).where(Country.iso_code == "US")
-            country = (await session.execute(stmt_country)).scalar_one_or_none()
-            if not country:
-                country = Country(name="United States", iso_code="US")
-                session.add(country)
-                await session.flush()
-            
-            univ = University(name="Test University", slug=f"test-univ-{uuid.uuid4()}", country_id=country.id)
-            session.add(univ)
-            await session.commit()
-            univ_id = univ.id
-
-        from core.images import save_image
-        monkeypatch.setattr("core.images.save_image", lambda *args, **kwargs: None)
-
-        from fastapi import UploadFile
-        import io
-        dummy_photo = UploadFile(filename="test.png", file=io.BytesIO(b"dummy image data"))
-
-        async with async_session_factory() as session:
-            res = await admin_complete_onboarding(
-                user_id=user.id,
-                bio="Admin set bio",
-                major="Math",
-                minor="Physics",
-                university_id=str(univ_id),
-                education_level_id=2,
-                academic_interests="['Math']",
-                profile_photo=dummy_photo,
-                db=session,
-            )
-            assert res["user"]["id"] == str(user.id)
-            assert res["user"]["major"] == "Math"
-            assert res["user"]["educationLevel"] == "Masters"
-    finally:
-        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -168,30 +109,29 @@ async def test_list_users() -> None:
 
 
 @pytest.mark.asyncio
-async def test_admin_create_user(monkeypatch) -> None:
+async def test_admin_create_user_via_signup_removed_uses_admin_create_user(monkeypatch) -> None:
+    """Public admin signup was removed; superadmin creates users via admin_create_user."""
     try:
         await init_db()
-        # Mock email sender
-        monkeypatch.setattr("core.email_service.send_otp_email", lambda *args, **kwargs: True)
-        
+        async def _mock_temp_password_email(*_args, **_kwargs):
+            return True
+
+        monkeypatch.setattr("core.email_service.send_temporary_password_email", _mock_temp_password_email)
+
         email = f"user_admin_create_{uuid.uuid4()}@example.com"
-        payload = AdminSignupRequest(
+        payload = AdminUserCreateRequest(
             firstName="John",
             lastName="Doe",
             email=email,
-            password="Password123!",
             role="user",
         )
         async with async_session_factory() as session:
-            res = await admin_signup(payload, session)
+            res = await admin_create_user(payload, session)
             assert res.status is True
-            assert res.data["emailSent"] is False
-            
-            # Check local db
+
             stmt = select(User).where(User.email == email)
             user = (await session.execute(stmt)).scalar_one_or_none()
             assert user is not None
-            assert user.firebase_uid is None
     finally:
         await engine.dispose()
 
@@ -471,12 +411,15 @@ async def test_admin_actions(monkeypatch) -> None:
     try:
         await init_db()
         monkeypatch.setattr("core.auth.services.revoke_firebase_tokens", lambda *args: None)
+        monkeypatch.setattr("core.auth.services.disable_firebase_user", lambda *args: None)
+        monkeypatch.setattr("core.auth.services.enable_firebase_user", lambda *args: None)
         
         async with async_session_factory() as session:
             uid = str(uuid.uuid4())
+            email = f"user_actions_{uid}@example.com"
             user = User(
                 firebase_uid=uid,
-                email="user_actions@example.com",
+                email=email,
                 role="user",
                 status="active",
             )

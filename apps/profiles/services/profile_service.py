@@ -304,8 +304,12 @@ async def update_profile_visibility_service(user: User, payload: ProfileVisibili
 
     try:
         profile.profile_visibility = ProfileVisibility(payload.profileVisibility)
-    except ValueError:
-        profile.profile_visibility = ProfileVisibility.public
+    except ValueError as exc:
+        from fastapi import HTTPException, status
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid profileVisibility value",
+        ) from exc
 
     db.add(profile)
     await db.commit()

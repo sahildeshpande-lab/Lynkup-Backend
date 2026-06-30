@@ -55,19 +55,6 @@ def teardown_module() -> None:
     app.dependency_overrides.pop(get_current_superadmin, None)
 
 
-async def _mock_admin_signup(payload, _db) -> ApiResponse:
-    return ApiResponse(
-        status=True,
-        message="Signup successful",
-        data={
-            "accessToken": "admin-token",
-            "refreshToken": "admin-refresh-token",
-            "user": {"email": payload.email, "role": payload.role},
-            "emailSent": False,
-        },
-    )
-
-
 async def _list_users(_page: int, _page_size: int, _db, search: str | None = None) -> dict:
     return {"items": [], "page": 1, "pageSize": 10, "totalItems": 1, "totalPages": 1}
 
@@ -76,8 +63,8 @@ async def _get_user(_user_id: str, _db) -> dict:
     return {"found": True, "userId": str(_user_id)}
 
 
-async def _delete_user(_user_id: str, _db) -> dict:
-    return {"userId": str(_user_id), "deleted": True}
+async def _delete_users(_user_ids: list, _db) -> dict:
+    return {"deleted": [{"userId": str(uid), "status": "deleting"} for uid in _user_ids]}
 
 
 async def _update_status(_user_id: str, status, _db) -> dict:
@@ -88,26 +75,6 @@ async def _export_users(_page: int | None, _page_size: int | None, _db) -> dict:
     page = _page or 1
     page_size = _page_size or 5
     return {"items": [], "page": page, "pageSize": page_size, "totalItems": 0, "totalPages": 0}
-
-
-def test_admin_signup_returns_success_payload(monkeypatch) -> None:
-    monkeypatch.setattr(admin_routes.services, "admin_signup", _mock_admin_signup)
-
-    response = client.post(
-        "/api/v1/auth/admin/signup",
-        json={
-            "firstName": "Ada",
-            "lastName": "Lovelace",
-            "email": "ada@example.com",
-            "password": "Secret123",
-            "role": "superadmin",
-        },
-    )
-
-    assert response.status_code == 201
-    body = response.json()
-    assert body["status"] is True
-    assert body["data"]["user"]["email"] == "ada@example.com"
 
 
 def test_admin_login_route(monkeypatch) -> None:
@@ -133,44 +100,6 @@ def test_admin_login_route(monkeypatch) -> None:
     assert response_login.json()["data"]["accessToken"] == "admin_token_123"
 
 
-def test_admin_onboarding_returns_success_payload(monkeypatch) -> None:
-    async def _mock_admin_complete_onboarding(
-        user_id,
-        bio,
-        major,
-        minor,
-        university_id,
-        education_level_id,
-        academic_interests,
-        profile_photo,
-        db,
-    ):
-        return {"user_id": str(user_id), "onboarded": True}
-
-    monkeypatch.setattr(admin_routes.services, "admin_complete_onboarding", _mock_admin_complete_onboarding)
-
-    import io
-
-    response = client.post(
-        "/api/v1/admin/onboarding",
-        data={
-            "university_id": "11111111-1111-1111-1111-111111111111",
-            "major": "Computer Science",
-            "minor": "Math",
-            "education_level_id": 2,
-            "Bio": "Test Bio",
-            "academic_interests": "['Math', 'CS']",
-        },
-        files={"profile_photo": ("test.png", io.BytesIO(b"dummy image data"), "image/png")},
-    )
-
-    assert response.status_code == 201
-    body = response.json()
-    assert body["status"] is True
-    assert body["data"]["user_id"] == "11111111-1111-1111-1111-111111111111"
-    assert body["data"]["onboarded"] is True
-
-
 def test_admin_list_users_returns_paginated_payload(monkeypatch) -> None:
     monkeypatch.setattr(admin_routes.services, "list_users", _list_users)
 
@@ -186,16 +115,20 @@ def test_admin_list_users_returns_paginated_payload(monkeypatch) -> None:
 
 def test_admin_user_routes_use_users_path(monkeypatch) -> None:
     monkeypatch.setattr(admin_routes.services, "admin_get_user", _get_user)
-    monkeypatch.setattr(admin_routes.services, "admin_delete_user", _delete_user)
+    monkeypatch.setattr(admin_routes.services, "admin_delete_users", _delete_users)
 
     user_id = "11111111-1111-1111-1111-111111111111"
     get_response = client.get(f"/api/v1/users/{user_id}")
-    delete_response = client.delete(f"/api/v1/users/{user_id}")
+    delete_response = client.request(
+        "DELETE",
+        "/api/v1/users/",
+        json={"userIds": [user_id]},
+    )
 
     assert get_response.status_code == 200
     assert get_response.json()["data"]["found"] is True
     assert delete_response.status_code == 200
-    assert delete_response.json()["data"]["deleted"] is True
+    assert delete_response.json()["data"]["deleted"][0]["userId"] == user_id
 
 
 def test_admin_update_user_status(monkeypatch) -> None:
@@ -323,7 +256,8 @@ def test_admin_create_user_route(monkeypatch) -> None:
             "role": "superadmin",
         },
     )
-    assert response_invalid_role.status_code == 422
+    assert response_invalid_role.status_code == 200
+    assert response_invalid_role.json()["status"] is False
 
 
 def test_admin_edit_profile_route(monkeypatch) -> None:

@@ -48,23 +48,15 @@ async def get_current_firebase_user(
 ) -> dict:
     credentials = _credentials_or_401(credentials)
 
-    print("Auth header received")
-    print("Token length:", len(credentials.credentials))
-
     try:
-        decoded = verify_firebase_token(
+        return verify_firebase_token(
             credentials.credentials,
             check_revoked=False,
         )
-        print("Decoded UID:", decoded.get("uid"))
-        return decoded
-
     except Exception as exc:
-        import traceback
-        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=str(exc),
+            detail="Invalid Firebase ID token",
         ) from exc
 
 

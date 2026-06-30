@@ -37,6 +37,7 @@ router = APIRouter(prefix="/auth", tags=["1] User Registration, Authentication &
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import JSONResponse
 from apps.accounts.services import AccountExistsException, social_auth as social_auth_service
+from common.responses import error_response, success_response
 
 bearer_scheme = HTTPBearer(
     scheme_name="BearerAuth",
@@ -55,33 +56,23 @@ async def social_auth(
         data, created = await social_auth_service(payload, db)
 
         msg = "Signup successful" if created else "Login successful"
-        status_code = (
-            status.HTTP_201_CREATED
-            if created
-            else status.HTTP_200_OK
-        )
 
         return JSONResponse(
-            status_code=status_code,
-            content={
-                "status": True,
-                "message": msg,
-                "data": data,
-            },
+            status_code=status.HTTP_200_OK,
+            content=success_response(msg, data).model_dump(),
         )
 
     except AccountExistsException as exc:
         return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={
-                "success": False,
-                "error_code": "ACCOUNT_EXISTS",
-                "message":
-                    "Account already exists. Please login "
-                    "using your registered method."
-                ,
-                "registration_type": exc.registration_type,
-            },
+            status_code=status.HTTP_200_OK,
+            content=error_response(
+                "Account already exists. Please login using your registered method.",
+                data={
+                    "error_code": "ACCOUNT_EXISTS",
+                    "registration_type": exc.registration_type,
+                    "httpStatus": 409,
+                },
+            ).model_dump(),
         )
 
 

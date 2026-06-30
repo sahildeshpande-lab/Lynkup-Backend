@@ -29,7 +29,7 @@ class ProfileUpdateRequest(BaseModel):
 class ProfileVisibilityRequest(BaseModel):
     profileVisibility: Literal[
         "public",
-        "connection_only",
+        "connections_only",
         "private"
     ]
 

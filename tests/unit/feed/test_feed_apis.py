@@ -12,10 +12,12 @@ from sqlalchemy import text
 
 from entrypoints.api import app
 from core.database.session import async_session_factory
+from datetime import datetime, timezone, timedelta
 from core.database.init import init_db
-from core.security.auth import get_current_user
+from core.security.auth import get_current_user, get_current_admin
 from apps.accounts.db_models import User
 from apps.feed.db_models import Post, MediaAsset, PostAttachment
+from apps.connections.db_models import Connection
 from common.enums import MediaType, MediaAssetState, PostState
 from apps.feed.schemas import SavePostRequest, EditPostRequest, MediaItem, PostContentPayload, EditPostContentPayload, DeletePostRequest
 from apps.feed.services import (
@@ -23,6 +25,7 @@ from apps.feed.services import (
     save_post_service,
     edit_post_service,
     publish_post_service,
+    admin_publish_post_service,
     get_post_service,
     delete_post_service,
     list_user_posts_service,
@@ -33,7 +36,7 @@ from apps.feed.services import (
 async def clean_feed_pytest_data(session):
     # Find test users
     result = await session.execute(
-        select(User).where(User.email.in_(["pytest_feed_user@example.com", "pytest_feed_other@example.com"]))
+        select(User).where(User.email.in_(["pytest_feed_user@example.com", "pytest_feed_other@example.com", "third@example.com"]))
     )
     users = result.scalars().all()
     user_ids = [u.id for u in users]
@@ -83,6 +86,12 @@ async def clean_feed_pytest_data(session):
         await session.execute(text("""
             DELETE FROM media_assets 
             WHERE owner_user_id = ANY(:user_ids)
+        """), params)
+        
+        await session.execute(text("""
+            DELETE FROM connections 
+            WHERE user_low_id = ANY(:user_ids) 
+               OR user_high_id = ANY(:user_ids)
         """), params)
         
         await session.execute(text("""
@@ -247,7 +256,7 @@ async def test_create_post_service_success(test_users) -> None:
         assert post.author_user_id == user.id
         assert post.caption == "A wonderful day"
         assert post.content_html == "<p>Enjoying the sunshine!</p>"
-        assert post.state == PostState.draft  # public defaults to draft
+        assert post.state == PostState.processing  # public defaults to processing
 
         # Check PostAttachment records
         stmt = select(PostAttachment).where(PostAttachment.post_id == post.id)
@@ -273,7 +282,7 @@ async def test_create_post_service_visibility_hidden(test_users) -> None:
 
     async with async_session_factory() as session:
         post = await save_post_service(user.id, payload, session)
-        assert post.state == PostState.hidden
+        assert post.state == PostState.processing
 
 
 @pytest.mark.asyncio
@@ -391,7 +400,7 @@ async def test_update_post_service_success(test_users) -> None:
     async with async_session_factory() as session:
         post = await save_post_service(user.id, payload, session)
         post_id = post.id
-        assert post.state == PostState.draft
+        assert post.state == PostState.processing
 
     # Edit via general edit service (edit_post_service)
     edit_payload = EditPostRequest(
@@ -404,9 +413,10 @@ async def test_update_post_service_success(test_users) -> None:
         assert post.content_html == "Updated text"
         assert post.state == PostState.hidden
 
-    # Update draft via save_post_service with id
+    # Update draft via save_post_service with id and is_edit=True
     update_payload_draft = SavePostRequest(
         id=post_id,
+        is_edit=True,
         content=PostContentPayload(caption="Draft Caption", content_html="Draft text", visibility="public")
     )
     async with async_session_factory() as session:
@@ -414,6 +424,18 @@ async def test_update_post_service_success(test_users) -> None:
         assert post.caption == "Draft Caption"
         assert post.content_html == "Draft text"
         assert post.state == PostState.draft
+
+    # Update post via save_post_service with id and is_edit=False
+    update_payload_processing = SavePostRequest(
+        id=post_id,
+        is_edit=False,
+        content=PostContentPayload(caption="Processing Caption", content_html="Processing text", visibility="public")
+    )
+    async with async_session_factory() as session:
+        post = await save_post_service(user.id, update_payload_processing, session)
+        assert post.caption == "Processing Caption"
+        assert post.content_html == "Processing text"
+        assert post.state == PostState.processing
 
 
 @pytest.mark.asyncio
@@ -427,8 +449,22 @@ async def test_publish_post_service_success(test_users) -> None:
         post_id = post.id
 
     async with async_session_factory() as session:
-        post = await publish_post_service(post_id, user.id, session)
+        post = await admin_publish_post_service(post_id, "publish", user.id, session)
         assert post.state == PostState.published
+
+@pytest.mark.asyncio
+async def test_flag_post_service_success(test_users) -> None:
+    user, _ = test_users
+    payload = SavePostRequest(
+        content=PostContentPayload(caption="Original", content_html="Original text", visibility="public")
+    )
+    async with async_session_factory() as session:
+        post = await save_post_service(user.id, payload, session)
+        post_id = post.id
+
+    async with async_session_factory() as session:
+        post = await admin_publish_post_service(post_id, "flag", user.id, session)
+        assert post.state == PostState.flagged
 
 
 @pytest.mark.asyncio
@@ -510,13 +546,59 @@ async def test_get_feed_service_success(test_users) -> None:
 
 
 @pytest.mark.asyncio
+async def test_feed_service_connection_priority(test_users) -> None:
+    user, other = test_users
+    
+    # Connection low/high user order constraint
+    low_id, high_id = (user.id, other.id) if user.id < other.id else (other.id, user.id)
+    
+    third_user = User(
+        id=uuid.uuid4(),
+        email="third@example.com",
+        role="user",
+        firebase_uid="third-uid",
+    )
+    
+    async with async_session_factory() as session:
+        session.add(third_user)
+        conn = Connection(user_low_id=low_id, user_high_id=high_id, is_active=True)
+        session.add(conn)
+        
+        p_non_conn = Post(
+            author_user_id=third_user.id,
+            content={"caption": "Non-connection Post"},
+            state=PostState.published,
+            created_at=datetime.now(timezone.utc)
+        )
+        p_conn = Post(
+            author_user_id=other.id,
+            content={"caption": "Connection Post"},
+            state=PostState.published,
+            created_at=datetime.now(timezone.utc) - timedelta(hours=1)
+        )
+        session.add_all([p_non_conn, p_conn])
+        await session.commit()
+        
+    async with async_session_factory() as session:
+        feed = await get_feed_service(user.id, session)
+        assert len(feed) >= 2
+        # Connection post must appear first despite being older
+        assert feed[0].caption == "Connection Post"
+        assert feed[1].caption == "Non-connection Post"
+
+
+@pytest.mark.asyncio
 async def test_routes_post_management_flow(test_users) -> None:
     user, other = test_users
 
     async def _override_get_current_user():
         return user
 
+    async def _override_get_current_admin():
+        return User(id=user.id, email=user.email, role="superadmin")
+
     app.dependency_overrides[get_current_user] = _override_get_current_user
+    app.dependency_overrides[get_current_admin] = _override_get_current_admin
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -544,10 +626,16 @@ async def test_routes_post_management_flow(test_users) -> None:
             # save_post endpoint returns SavePostData (id, revision_number)
             assert draft_res.json()["data"]["revision_number"] == 2
 
-            # 3. POST /posts/{id}/publish
-            publish_res = await ac.post(f"/api/v1/posts/{post_id}/publish")
+            # 3. POST /posts/publish (admin route)
+            publish_res = await ac.post(
+                "/api/v1/posts/publish",
+                json={
+                    "post_id": str(post_id),
+                    "action": "publish"
+                }
+            )
             assert publish_res.status_code == 200
-            assert publish_res.json()["message"] == "Post published"
+            assert "published" in publish_res.json()["message"]
             assert publish_res.json()["data"]["state"] == "published"
 
             # 4. GET /posts/{id}
@@ -582,6 +670,8 @@ async def test_routes_post_management_flow(test_users) -> None:
 
             # Verify deleted
             get_deleted = await ac.get(f"/api/v1/posts/{post_id}")
-            assert get_deleted.status_code == 404
+            assert get_deleted.status_code == 200
+            assert get_deleted.json()["status"] is False
     finally:
         app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_current_admin, None)

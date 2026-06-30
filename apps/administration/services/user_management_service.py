@@ -392,6 +392,11 @@ async def admin_delete_users(user_ids: list[str], db: AsyncSession) -> dict:
             "user": user_data,
         })
     await db.commit()
+    if not deleted_users:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No matching users found to delete",
+        )
     return {"deleted_users": deleted_users}
 
 async def admin_delete_user(user_id: str, db: AsyncSession) -> dict:
@@ -474,7 +479,7 @@ async def admin_edit_profile(
 
 async def admin_update_user_status(
     user_id: str,
-    status: AdminUserStatus,
+    new_status: AdminUserStatus,
     db: AsyncSession
 ) -> dict:
     from core.auth.services import (
@@ -499,10 +504,16 @@ async def admin_update_user_status(
         )
 
     # Check BEFORE updating
-    already_same_status = user.status == status
+    already_same_status = user.status == new_status
+
+    if already_same_status:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"User is already {new_status.value}",
+        )
 
     if not already_same_status:
-        user.status = status
+        user.status = new_status
         user.updated_at = datetime.now(timezone.utc)
 
         await db.commit()
@@ -512,15 +523,12 @@ async def admin_update_user_status(
 
         if user.firebase_uid:
             try:
-                if status == AdminUserStatus.active:
+                if new_status == AdminUserStatus.active:
                     enable_firebase_user(user.firebase_uid)
                 else:
                     disable_firebase_user(user.firebase_uid)
             except Exception as e:
                 firebase_error = str(e)
-    else:
-        firebase_error = None
-
     profile = (
         await db.execute(
             select(Profile)
@@ -529,7 +537,7 @@ async def admin_update_user_status(
     ).scalar_one_or_none()
 
     response = {
-        "status": status.value,
+        "status": new_status.value,
         "already_exists": already_same_status,
         "user": await build_user_base_response(
             user,
@@ -539,6 +547,9 @@ async def admin_update_user_status(
     }
 
     if firebase_error:
-        response["firebase_error"] = firebase_error
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Status updated locally but Firebase sync failed: {firebase_error}",
+        )
 
     return response

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Optional, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
 
@@ -44,37 +45,6 @@ class TokenResponse(BaseModel):
     expires_at: datetime | None = None
 
 
-class AdminSignupRequest(BaseModel):
-    firstName: str
-    lastName: str
-    email: EmailStr
-    password: str = Field(min_length=8 , max_length=20)
-    role: Role = "superadmin"
-
-    @field_validator("firstName", "lastName")
-    @classmethod
-    def validate_names(cls, value: str) -> str:
-        if not value or not value.strip():
-            raise ValueError("names cannot be blank")
-        return value.strip()
-
-    @field_validator("email")
-    @classmethod
-    def normalize_email(cls, value: EmailStr) -> str:
-        if not value or not value.strip():
-            raise ValueError("email cannot be blank")
-        return value.lower().strip()
-
-    @field_validator("password")
-    @classmethod
-    def validate_password(cls, value: str) -> str:
-        if not value or not value.strip():
-            raise ValueError("password cannot be blank")
-        if not any(char.isupper() for char in value):
-            raise ValueError("password must contain at least one uppercase letter")
-        if not any(char.isdigit() for char in value):
-            raise ValueError("password must contain at least one number")
-        return value
 
 
 class AdminLoginRequest(BaseModel):
@@ -138,4 +108,9 @@ class AdminResetPasswordRequest(BaseModel):
         if not any(char.isdigit() for char in value):
             raise ValueError("password must contain at least one number")
         return value
+
+
+class AdminPublishPostRequest(BaseModel):
+    post_id: UUID
+    action: Literal["publish", "flag"] = "publish"
 

@@ -167,7 +167,8 @@ def test_signup_route_rejects_blank_fields(monkeypatch) -> None:
             "device_id": "test-device-id",
         },
     )
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["status"] is False
 
     # Test blank lastName
     response = client.post(
@@ -182,7 +183,8 @@ def test_signup_route_rejects_blank_fields(monkeypatch) -> None:
             "device_id": "test-device-id",
         },
     )
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["status"] is False
 
 
 def test_login_route_rejects_blank_fields(monkeypatch) -> None:
@@ -198,7 +200,8 @@ def test_login_route_rejects_blank_fields(monkeypatch) -> None:
             "device_id": "test-device-id",
         },
     )
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["status"] is False
 
 
 async def _mock_forgot_password(payload, db) -> ApiResponse:
@@ -288,7 +291,8 @@ def test_signup_route_rejects_blank_fields(monkeypatch) -> None:
             "device_id": "test-device-id",
         },
     )
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["status"] is False
 
     # Test blank lastName
     response = client.post(
@@ -303,7 +307,8 @@ def test_signup_route_rejects_blank_fields(monkeypatch) -> None:
             "device_id": "test-device-id",
         },
     )
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["status"] is False
 
 
 def test_login_route_rejects_blank_fields(monkeypatch) -> None:
@@ -319,7 +324,8 @@ def test_login_route_rejects_blank_fields(monkeypatch) -> None:
             "device_id": "test-device-id",
         },
     )
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["status"] is False
 
 
 async def _mock_forgot_password(payload, db) -> ApiResponse:
@@ -415,7 +421,7 @@ def test_social_auth_route_signup_success(monkeypatch) -> None:
         json={"provider": "google", "idToken": "google_test_token"},
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 200
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Signup successful"
@@ -435,11 +441,13 @@ def test_social_auth_route_conflict(monkeypatch) -> None:
         json={"provider": "google", "idToken": "google_test_token"},
     )
 
-    assert response.status_code == 409
+    assert response.status_code == 200
     body = response.json()
-    assert body["success"] is False
-    assert body["error_code"] == "ACCOUNT_EXISTS"
-    assert body["registration_type"] == "email"
+    assert body["status"] is False
+    assert body["status"] is False
+    assert body["message"] == "Account already exists. Please login using your registered method."
+    assert body["data"]["error_code"] == "ACCOUNT_EXISTS"
+    assert body["data"]["registration_type"] == "email"
 
 
 def test_social_auth_route_profile_photo_url(monkeypatch) -> None:
@@ -470,7 +478,7 @@ def test_social_auth_route_profile_photo_url(monkeypatch) -> None:
         }
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 200
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Signup successful"

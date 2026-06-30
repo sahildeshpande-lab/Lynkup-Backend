@@ -3,10 +3,11 @@ from datetime import datetime, timezone
 from uuid import UUID
 from sqlalchemy import or_, and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from apps.connections.db_models import Block, Connection, ConnectionRequest
+from apps.connections.db_models import Block, Connection, ConnectionRequest, Follow
 from apps.profiles.db_models.profile_db_model import Profile
 from apps.profiles.db_models import Profile
 from ..schemas import ApiResponse
+from common.responses import error_response, success_response
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -50,28 +51,30 @@ async def has_pending_request(db: AsyncSession, user_id_1: UUID, user_id_2: UUID
 
 async def send_connection_request(db: AsyncSession, sender_id: UUID, receiver_id: UUID) -> ApiResponse:
     if sender_id == receiver_id:
-        return ApiResponse(status=True, message="Cannot send request to self.", data=[])
+        return error_response("Cannot send request to self.", response_cls=ApiResponse)
 
     if await is_blocked(db, sender_id, receiver_id):
-        return ApiResponse(status=True, message="Cannot send request due to block.", data=[])
+        return error_response("Cannot send request due to block.", response_cls=ApiResponse)
 
     if await are_connected(db, sender_id, receiver_id):
-        return ApiResponse(status=True, message="Already connected.", data=[])
+        return error_response("Already connected.", response_cls=ApiResponse)
 
     if await has_pending_request(db, sender_id, receiver_id):
-        return ApiResponse(status=True, message="Connection request already sent..", flags={
-        "active_request_exists": True
-    }, data=[])
+        return error_response(
+            "Connection request already sent.",
+            response_cls=ApiResponse,
+            flags={"active_request_exists": True},
+        )
 
     request = ConnectionRequest(sender_user_id=sender_id, receiver_user_id=receiver_id, status="pending")
     db.add(request)
     await db.commit()
     await db.refresh(request)
-    return ApiResponse(status=True, message="Connection request sent successfully.", data=request)
+    return success_response("Connection request sent successfully.", request, response_cls=ApiResponse)
 
 async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user_id: UUID, response: str) -> ApiResponse:
     if response not in ["accepted", "declined"]:
-        return ApiResponse(status=True, message="Invalid response.", data=[])
+        return error_response("Invalid response.", response_cls=ApiResponse)
 
     stmt = select(ConnectionRequest).where(
         ConnectionRequest.status == "pending",
@@ -84,7 +87,7 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
     req = result.scalars().first()
 
     if not req:
-        return ApiResponse(status=True, message="Pending request not found.", data=[])
+        return error_response("Pending request not found.", response_cls=ApiResponse)
 
     req.status = response
 
@@ -125,7 +128,7 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
     except Exception as e:
         logger.exception("Failed to queue Lynkup response email: %s", e)
 
-    return ApiResponse(status=True, message=f"Request {response} successfully.", data=req)
+    return success_response(f"Request {response} successfully.", req, response_cls=ApiResponse)
 
 async def get_pending_requests(
     db: AsyncSession,
@@ -134,9 +137,10 @@ async def get_pending_requests(
     page_size: int | None = None,
     search: str | None = None,
 ) -> ApiResponse:
-    from common.pagination import paginate_items
+    from common.pagination import paginate_items, build_paginated_response
+    from sqlalchemy import func
 
-    stmt = select(ConnectionRequest, Profile).join(
+    base_stmt = select(ConnectionRequest, Profile).join(
         Profile, Profile.user_id == ConnectionRequest.sender_user_id
     ).where(
         ConnectionRequest.receiver_user_id == user_id,
@@ -145,13 +149,36 @@ async def get_pending_requests(
 
     if search:
         search_pattern = f"%{search.strip()}%"
-        stmt = stmt.where(
+        base_stmt = base_stmt.where(
             or_(
                 Profile.first_name.ilike(search_pattern),
                 Profile.last_name.ilike(search_pattern)
             )
         )
 
+    if page is None and page_size is None:
+        result = await db.execute(base_stmt.order_by(ConnectionRequest.created_at.desc()))
+        rows = result.all()
+        data = [
+            {
+                "lynkup_id": req.id,
+                "user_id": req.sender_user_id,
+                "status": req.status,
+                "first_name": profile.first_name,
+                "last_name": profile.last_name,
+                "profile_photo_key": profile.profile_photo_url,
+            }
+            for req, profile in rows
+        ]
+        return success_response("Lynkup Request pending", data, response_cls=ApiResponse)
+
+    p = page or 1
+    ps = page_size or 20
+
+    count_stmt = select(func.count()).select_from(base_stmt.subquery())
+    total_items = int((await db.execute(count_stmt)).scalar_one())
+
+    stmt = base_stmt.order_by(ConnectionRequest.created_at.desc()).offset((p - 1) * ps).limit(ps)
     result = await db.execute(stmt)
     rows = result.all()
 
@@ -167,11 +194,81 @@ async def get_pending_requests(
         for req, profile in rows
     ]
 
-    if page is None and page_size is None:
-        # if not provided: ALL
-        return ApiResponse(status=True, message="Lynkup Request pending", data=data)
+    paginated = build_paginated_response(data, p, ps, total_items)
+    return success_response("Lynkup Request pending", paginated.model_dump(), response_cls=ApiResponse)
 
-    p = page or 1
-    ps = page_size or 20
-    paginated = paginate_items(data, page=p, page_size=ps)
-    return ApiResponse(status=True, message="Lynkup Request pending", data=paginated.model_dump())
+
+async def get_relationship_flags(
+    db: AsyncSession,
+    current_user_id: UUID,
+    target_user_ids: list[UUID]
+) -> dict[UUID, dict[str, bool]]:
+    if not target_user_ids:
+        return {}
+
+    # 1. Fetch active connections
+    conn_stmt = select(Connection).where(
+        Connection.is_active == True,
+        or_(
+            and_(Connection.user_low_id == current_user_id, Connection.user_high_id.in_(target_user_ids)),
+            and_(Connection.user_high_id == current_user_id, Connection.user_low_id.in_(target_user_ids))
+        )
+    )
+    conn_res = await db.execute(conn_stmt)
+    connections = conn_res.scalars().all()
+    connected_user_ids = set()
+    for conn in connections:
+        connected_user_ids.add(conn.user_high_id if conn.user_low_id == current_user_id else conn.user_low_id)
+
+    # 2. Fetch active follows
+    follow_stmt = select(Follow).where(
+        Follow.follower_user_id == current_user_id,
+        Follow.following_user_id.in_(target_user_ids),
+        Follow.is_active == True
+    )
+    follow_res = await db.execute(follow_stmt)
+    follows = follow_res.scalars().all()
+    followed_user_ids = {f.following_user_id for f in follows}
+
+    # 3. Fetch active blocks
+    block_stmt = select(Block).where(
+        Block.is_active == True,
+        or_(
+            and_(Block.blocker_user_id == current_user_id, Block.blocked_user_id.in_(target_user_ids)),
+            and_(Block.blocked_user_id == current_user_id, Block.blocker_user_id.in_(target_user_ids))
+        )
+    )
+    block_res = await db.execute(block_stmt)
+    blocks = block_res.scalars().all()
+    blocked_user_ids = {b.blocked_user_id for b in blocks if b.blocker_user_id == current_user_id}
+
+    # 4. Fetch pending connection requests
+    req_stmt = select(ConnectionRequest).where(
+        ConnectionRequest.status == "pending",
+        or_(
+            and_(ConnectionRequest.sender_user_id == current_user_id, ConnectionRequest.receiver_user_id.in_(target_user_ids)),
+            and_(ConnectionRequest.receiver_user_id == current_user_id, ConnectionRequest.sender_user_id.in_(target_user_ids))
+        )
+    )
+    req_res = await db.execute(req_stmt)
+    requests = req_res.scalars().all()
+    request_sent_ids = set()
+    request_received_ids = set()
+    for r in requests:
+        if r.sender_user_id == current_user_id:
+            request_sent_ids.add(r.receiver_user_id)
+        else:
+            request_received_ids.add(r.sender_user_id)
+
+    # Build response map
+    result = {}
+    for uid in target_user_ids:
+        result[uid] = {
+            "is_connected": uid in connected_user_ids,
+            "is_followed": uid in followed_user_ids,
+            "is_blocked": uid in blocked_user_ids,
+            "request_sent": uid in request_sent_ids,
+            "request_received": uid in request_received_ids,
+        }
+    return result
+

@@ -65,6 +65,9 @@ async def admin_reset_password(payload: AdminResetPasswordRequest, db: AsyncSess
     import uuid
     now=datetime.now(timezone.utc)
 
+    if not payload.token:
+        return ApiResponse(status=False, message="Token is required", data=None)
+
     if payload.token  :
         try:
             # Check if it is a valid UUID string

@@ -76,8 +76,6 @@ async def get_current_user(
             user = await complete_firebase_registration(decoded, db)
         except AccountExistsException as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"User already registered via {exc.registration_type}")
-        else:
-            user == user
 
     if user.deleted_at:
         raise HTTPException(
@@ -160,9 +158,9 @@ async def get_current_admin(
 async def get_current_superadmin(
     user: User = Depends(get_current_admin),
 ) -> User:
-    if user.role == "user":
+    if user.role != "superadmin":
         raise HTTPException(
-            status_code=403,
-            detail="Insufficient permissions"
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions",
         )
     return user

@@ -27,8 +27,8 @@ async def forgot_password( payload: ForgotPasswordRequest,db: AsyncSession ) -> 
 
     if not user:
         return ApiResponse(
-            status=False,
-            message="User not found",
+            status=True,
+            message="If an account exists for this email, a password reset link has been sent.",
             data=None
         )
 
@@ -72,12 +72,10 @@ async def forgot_password( payload: ForgotPasswordRequest,db: AsyncSession ) -> 
     reset_link = (
         f"{app_link}reset-password?token={token_val}"
     )
-    print("Sending email to:", email)
     await send_reset_password_email(
         email,
         reset_link
     )
-    print("Email function completed")
 
     return ApiResponse(
         status=True,
@@ -145,7 +143,7 @@ async def reset_password(payload: ResetPasswordRequest,  db: AsyncSession    ) -
     elif payload.firebaseId:
 
         try:
-            decoded_token = auth.verify_id_token(
+            decoded_token = verify_firebase_token(
                 payload.firebaseId
             )
 

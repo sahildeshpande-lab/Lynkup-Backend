@@ -43,9 +43,7 @@ async def _log_email_event(
     attachment: str | None = None,
     is_sent: bool = True,
 ) -> None:
-    from core.email.config import settings as email_settings
-
-    from_email = email_settings.sendgrid_from_email
+    from_email = os.getenv("SENDGRID_FROM_EMAIL", "no-reply@yourdomain.com")
     db.add(
         TransactionalEmailLog(
             to=to_email,

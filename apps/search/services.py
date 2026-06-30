@@ -8,9 +8,12 @@ from common.pagination import build_paginated_response
 
 from .schemas import UniversitySearchParams
 
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
+
+if TYPE_CHECKING:
+    from apps.accounts.db_models import User
 
 async def search_universities(params: UniversitySearchParams, db: AsyncSession) -> dict:
     normalized_query = (params.query or "").strip().lower()
@@ -146,15 +149,20 @@ async def search_users(
 
     # Base stmt
     stmt = (
-        select(User, Profile)
+        select(User, Profile, University.name.label("university_name"))
         .join(Profile, Profile.user_id == User.id)
-        .join(UserRole, UserRole.user_id == User.id)
-        .join(Role, Role.id == UserRole.role_id)
         .outerjoin(University, University.id == Profile.university_id)
     )
 
-    # Exclude admins/superadmins/moderators/viewers
-    stmt = stmt.where(Role.name.notin_(["moderator", "viewer", "superadmin"]))
+    # Exclude admins/superadmins/moderators/viewers using exists subquery
+    role_exclude_subquery = exists(
+        select(1).where(
+            UserRole.user_id == User.id,
+            UserRole.role_id == Role.id,
+            Role.name.in_(["moderator", "viewer", "superadmin"])
+        )
+    )
+    stmt = stmt.where(~role_exclude_subquery)
 
     # Account status & not deleted
     stmt = stmt.where(
@@ -226,13 +234,11 @@ async def search_users(
 
     # Build count query for totalItems
     count_stmt = (
-        select(func.count(distinct(User.id)))
+        select(func.count(User.id))
         .join(Profile, Profile.user_id == User.id)
-        .join(UserRole, UserRole.user_id == User.id)
-        .join(Role, Role.id == UserRole.role_id)
         .outerjoin(University, University.id == Profile.university_id)
     )
-    count_stmt = count_stmt.where(Role.name.notin_(["moderator", "viewer", "superadmin"]))
+    count_stmt = count_stmt.where(~role_exclude_subquery)
     count_stmt = count_stmt.where(
         User.status == UserStatus.active,
         User.is_deleted == False,
@@ -268,9 +274,23 @@ async def search_users(
         result = await db.execute(stmt)
         rows = result.all()
 
+        target_user_ids = [user.id for user, profile, _university_name in rows]
+        from apps.connections.services import get_relationship_flags
+        flags_map = await get_relationship_flags(db, current_user.id, target_user_ids)
+
         items = []
-        for user, profile in rows:
-            items.append(await build_user_base_response(user, profile, db))
+        for user, profile, university_name in rows:
+            user_data = await build_user_base_response(
+                user, profile, db, university_name=university_name
+            )
+            user_data["flags"] = flags_map.get(user.id, {
+                "is_connected": False,
+                "is_followed": False,
+                "is_blocked": False,
+                "request_sent": False,
+                "request_received": False
+            })
+            items.append(user_data)
 
         from common.pagination import build_paginated_response
         paginated = build_paginated_response(items, page, page_size, total_items)
@@ -279,9 +299,23 @@ async def search_users(
         result = await db.execute(stmt)
         rows = result.all()
 
+        target_user_ids = [user.id for user, profile, _university_name in rows]
+        from apps.connections.services import get_relationship_flags
+        flags_map = await get_relationship_flags(db, current_user.id, target_user_ids)
+
         items = []
-        for user, profile in rows:
-            items.append(await build_user_base_response(user, profile, db))
+        for user, profile, university_name in rows:
+            user_data = await build_user_base_response(
+                user, profile, db, university_name=university_name
+            )
+            user_data["flags"] = flags_map.get(user.id, {
+                "is_connected": False,
+                "is_followed": False,
+                "is_blocked": False,
+                "request_sent": False,
+                "request_received": False
+            })
+            items.append(user_data)
 
         return {
             "items": items,
@@ -290,4 +324,3 @@ async def search_users(
             "totalItems": len(items),
             "totalPages": 1
         }
-

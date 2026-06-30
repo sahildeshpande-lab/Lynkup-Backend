@@ -60,7 +60,10 @@ async def save_post(
     )
     return ApiResponse(
         status=True,
-        message="Post created successfully" if payload.id is None else "Post updated and saved as draft",
+        message=(
+            "Post created successfully" if payload.id is None 
+            else ("Post updated and saved as draft" if payload.is_edit else "Post updated and processing")
+        ),
         data={
             "id": post.id,
             "revision_number": post.revision_number
@@ -68,25 +71,6 @@ async def save_post(
     )
 
 
-@router.post("/posts/{id}/publish", response_model=ApiResponse)
-async def publish_post(
-    id: UUID,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_session),
-) -> ApiResponse:
-    """
-    Publish a post.
-    """
-    post = await publish_post_service(
-        post_id=id,
-        user_id=current_user.id,
-        db=db
-    )
-    return ApiResponse(
-        status=True,
-        message="Post published",
-        data=format_post_detail(post)
-    )
 
 
 @router.get("/posts/{id}", response_model=ApiResponse)

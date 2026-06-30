@@ -4,7 +4,7 @@ import sys
 from types import ModuleType
 
 from . import connection_service as _service_module_0
-from .connection_service import utc_now, build_connection_pair, is_blocked, are_connected, has_pending_request, send_connection_request, respond_connection_request, get_pending_requests
+from .connection_service import utc_now, build_connection_pair, is_blocked, are_connected, has_pending_request, send_connection_request, respond_connection_request, get_pending_requests, get_relationship_flags
 
 from . import follow_service as _service_module_1
 from .follow_service import follow_user, unfollow_user
@@ -37,6 +37,7 @@ __all__ = [
     "send_connection_request",
     "respond_connection_request",
     "get_pending_requests",
+    "get_relationship_flags",
     "follow_user",
     "unfollow_user",
     "block_user",

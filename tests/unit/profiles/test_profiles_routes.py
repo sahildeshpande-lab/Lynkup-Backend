@@ -99,7 +99,8 @@ def test_get_me_requires_bearer_token() -> None:
     override = app.dependency_overrides.pop(get_current_user, None)
     try:
         response = client.get("/api/v1/myprofile")
-        assert response.status_code == 401
+        assert response.status_code == 200
+        assert response.json()["status"] is False
     finally:
         if override:
             app.dependency_overrides[get_current_user] = override

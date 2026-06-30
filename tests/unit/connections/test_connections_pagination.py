@@ -11,7 +11,7 @@ from entrypoints.api import app
 from core.database.session import async_session_factory
 from core.database.init import init_db
 from core.security.auth import get_current_user
-from apps.accounts.db_models import User
+from apps.accounts.db_models import User, Role, UserRole
 from apps.profiles.db_models import Profile
 from apps.connections.db_models import ConnectionRequest, Connection, Follow, Block
 from apps.connections.schemas import RecommendedUserResponse, PendingLynkupRequestResponse
@@ -29,6 +29,7 @@ async def clean_pytest_connections_data(session):
         await session.execute(text("DELETE FROM connections WHERE user_low_id = ANY(:user_ids) OR user_high_id = ANY(:user_ids)"), params)
         await session.execute(text("DELETE FROM follows WHERE follower_user_id = ANY(:user_ids) OR following_user_id = ANY(:user_ids)"), params)
         await session.execute(text("DELETE FROM blocks WHERE blocker_user_id = ANY(:user_ids) OR blocked_user_id = ANY(:user_ids)"), params)
+        await session.execute(text("DELETE FROM user_roles WHERE user_id = ANY(:user_ids)"), params)
         await session.execute(text("DELETE FROM profiles WHERE user_id = ANY(:user_ids)"), params)
         await session.execute(text("DELETE FROM users WHERE id = ANY(:user_ids)"), params)
         await session.commit()
@@ -83,16 +84,27 @@ async def test_users(db_setup):
         
         for u, _, _, _ in users:
             await session.refresh(u)
+
+        user_role = (await session.execute(select(Role).where(Role.name == "user"))).scalar_one_or_none()
+        if user_role is None:
+            user_role = Role(name="user")
+            session.add(user_role)
+            await session.flush()
+
+        for u in [primary] + [user for user, _, _, _ in users]:
+            session.add(UserRole(user_id=u.id, role_id=user_role.id))
+        await session.commit()
             
         # Create profiles
         p_primary = Profile(
             user_id=primary.id,
             first_name="Primary",
             last_name="User",
+            major="pytest_major_unique",
             completeness_rubric_version="v1"
         )
         session.add(p_primary)
-        
+         
         profiles = []
         for u, first, last, photo in users:
             p = Profile(
@@ -100,6 +112,7 @@ async def test_users(db_setup):
                 first_name=first,
                 last_name=last,
                 profile_photo_url=photo,
+                major="pytest_major_unique" if first == "Eve" else None,
                 completeness_rubric_version="v1"
             )
             session.add(p)
