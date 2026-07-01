@@ -15,6 +15,7 @@ from apps.connections.services.connection_service import is_blocked
 
 from .media_service import _verify_and_attach_media
 from .revision_service import _build_content_dict, _create_revision, _sync_hashtags
+from apps.moderation.services.moderator_assignment_service import assign_next_moderator_round_robin
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -57,6 +58,18 @@ def format_post_detail(post: Post) -> dict:
         "updated_at": post.updated_at,
         "media": media_data
     }
+
+async def _assign_moderator_if_processing(
+    post: Post,
+    db: AsyncSession,
+    *,
+    previous_state: PostState | None = None,
+) -> None:
+    if post.state != PostState.processing:
+        return
+    if previous_state == PostState.processing and post.moderator_id is not None:
+        return
+    post.moderator_id = await assign_next_moderator_round_robin(db)
 
 async def save_post_service(
     user_id: UUID,
@@ -119,6 +132,7 @@ async def save_post_service(
 
             await _sync_hashtags(post.id, content_dict, db)
             await _create_revision(post, user_id, db)
+            await _assign_moderator_if_processing(post, db)
 
             await db.commit()
             await db.refresh(post)
@@ -145,6 +159,7 @@ async def save_post_service(
         raise ApiError(f"Post is in '{post.state.value}' state and cannot be edited")
 
     post.content = content_dict
+    previous_state = post.state
     post.state = post_state
     post.revision_number += 1
     post.updated_at = utc_now()
@@ -161,6 +176,9 @@ async def save_post_service(
 
         await _sync_hashtags(post.id, content_dict, db)
         await _create_revision(post, user_id, db)
+        await _assign_moderator_if_processing(
+            post, db, previous_state=previous_state
+        )
 
         await db.commit()
         await db.refresh(post)
@@ -335,7 +353,8 @@ async def admin_publish_post_service(
     else:
         raise ApiError(f"Invalid action: {action}")
 
-    post.is_admin_reviewed = True
+    post.is_moderator_reviewed = True
+    post.reviewed_at = utc_now()
 
     # Increment revision number and update timestamp
     post.revision_number += 1
@@ -473,7 +492,9 @@ def _format_processing_post_item(post: Post, profile) -> dict:
         "caption": content.get("caption"),
         "content_html": content.get("content_html"),
         "media": _extract_post_media(post),
-        "is_admin_reviewed": post.is_admin_reviewed,
+        "is_moderator_reviewed": post.is_moderator_reviewed,
+        "moderator_id": post.moderator_id,
+        "reviewed_at": post.reviewed_at,
     }
 
 

@@ -59,6 +59,33 @@ async def init_db() -> None:
                 updated_at TIMESTAMP WITH TIME ZONE NOT NULL
             )
         """))
+        await conn.execute(text(
+            "ALTER TABLE posts ADD COLUMN IF NOT EXISTS moderator_id UUID REFERENCES users(id)"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE posts ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP WITH TIME ZONE"
+        ))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_posts_moderator_id ON posts (moderator_id)"
+        ))
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS moderation_assignment_state (
+                id UUID PRIMARY KEY,
+                last_assigned_moderator_id UUID REFERENCES users(id),
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+            )
+        """))
+        await conn.execute(text("""
+            INSERT INTO moderation_assignment_state (id, last_assigned_moderator_id, updated_at)
+            VALUES ('00000000-0000-0000-0000-000000000001'::uuid, NULL, NOW())
+            ON CONFLICT (id) DO NOTHING
+        """))
+        try:
+            await conn.execute(text(
+                "ALTER TABLE posts RENAME COLUMN is_admin_reviewed TO is_moderator_reviewed"
+            ))
+        except Exception:
+            pass
         # await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS is_sent BOOLEAN NOT NULL DEFAULT FALSE"))
         # await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP WITH TIME ZONE"))
         # await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS error_message TEXT"))

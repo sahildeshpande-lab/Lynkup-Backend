@@ -34,9 +34,19 @@ class Post(SQLModel, table=True):
         default_factory=utc_now,
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )
-    is_admin_reviewed: bool = Field(
+    is_moderator_reviewed: bool = Field(
         default=False,
         sa_column=Column(Boolean, nullable=False, server_default="false"),
+    )
+    moderator_id: UUID | None = Field(
+        default=None,
+        foreign_key="users.id",
+        nullable=True,
+        index=True,
+    )
+    reviewed_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
     )
 
     attachments: List["PostAttachment"] = Relationship(

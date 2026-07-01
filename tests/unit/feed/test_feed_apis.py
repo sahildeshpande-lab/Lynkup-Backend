@@ -15,7 +15,7 @@ from entrypoints.api import app
 from core.database.session import async_session_factory
 from datetime import datetime, timezone, timedelta
 from core.database.init import init_db
-from core.security.auth import get_current_user, get_current_admin
+from core.security.auth import get_current_user, get_current_moderator
 from apps.accounts.db_models import User
 from apps.feed.db_models import Post, MediaAsset, PostAttachment
 from apps.connections.db_models import Connection
@@ -596,11 +596,11 @@ async def test_routes_post_management_flow(test_users) -> None:
     async def _override_get_current_user():
         return user
 
-    async def _override_get_current_admin():
-        return User(id=user.id, email=user.email, role="superadmin")
+    async def _override_get_current_moderator():
+        return User(id=user.id, email=user.email, role="moderator")
 
     app.dependency_overrides[get_current_user] = _override_get_current_user
-    app.dependency_overrides[get_current_admin] = _override_get_current_admin
+    app.dependency_overrides[get_current_moderator] = _override_get_current_moderator
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -676,4 +676,4 @@ async def test_routes_post_management_flow(test_users) -> None:
             assert get_deleted.json()["data"]["state"] == "deleted"
     finally:
         app.dependency_overrides.pop(get_current_user, None)
-        app.dependency_overrides.pop(get_current_admin, None)
+        app.dependency_overrides.pop(get_current_moderator, None)

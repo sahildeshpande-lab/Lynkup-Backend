@@ -4,7 +4,7 @@ from apps.accounts.db_models import ConsentRecord, SecurityEvent, RefreshToken, 
 from apps.profiles.db_models import Country, Profile, AcademicInterest, University, ProfileStats
 from apps.connections.db_models import ConnectionRequest, Connection, Follow, Block, ConnectionRecommendationSnapshot
 from apps.feed.db_models import Post, PostRevision, MediaAsset, PostAttachment, Hashtag, PostHashtag, Topic, PostTopic, LinkPreview, PostReaction
-from apps.moderation.db_models import ModerationWordsConfig
+from apps.moderation.db_models import ModerationWordsConfig, ModerationAssignmentState
 
 __all__ = [
     "ConsentRecord",
@@ -38,5 +38,6 @@ __all__ = [
     "LinkPreview",
     "PostReaction",
     "ModerationWordsConfig",
+    "ModerationAssignmentState",
 ]
 

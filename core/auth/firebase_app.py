@@ -25,6 +25,10 @@
 #     if settings.firebase_project_id:
 #         options["projectId"] = settings.firebase_project_id
 #     firebase_admin.initialize_app(cred, options or None)
+
+
+''' For deploy '''
+
 import json
 import os
 from pathlib import Path

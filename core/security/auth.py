@@ -92,6 +92,14 @@ async def get_current_user(
     return user
 
 
+async def get_current_app_user(
+    user: User = Depends(get_current_user),
+) -> User:
+    if user.role != "user":
+        raise ApiError("This endpoint is only available to user accounts")
+    return user
+
+
 async def get_current_admin(
     credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
     db: AsyncSession = Depends(get_session),
@@ -124,9 +132,17 @@ async def get_current_admin(
     return user
 
 
+async def get_current_moderator(
+    user: User = Depends(get_current_admin),
+) -> User:
+    if user.role != "moderator":
+        raise ApiError("Insufficient permissions")
+    return user
+
+
 async def get_current_superadmin(
     user: User = Depends(get_current_admin),
 ) -> User:
-    if user.role == "user":
+    if user.role != "superadmin":
         raise ApiError("Insufficient permissions")
     return user

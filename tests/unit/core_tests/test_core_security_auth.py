@@ -19,6 +19,8 @@ from core.security.auth import (
     get_current_user,
     get_current_admin,
     get_current_superadmin,
+    get_current_app_user,
+    get_current_moderator,
 )
 
 @pytest.mark.asyncio
@@ -135,25 +137,50 @@ async def test_get_current_user_db_states() -> None:
 
 @pytest.mark.asyncio
 async def test_get_current_superadmin() -> None:
-    # 1. Normal user should raise Forbidden
+    from common.exceptions import ApiError
+
     user_normal = User()
     user_normal.role = "user"
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(ApiError):
         await get_current_superadmin(user_normal)
-    assert exc.value.status_code == 403
 
-    # 2. Superadmin should pass
     user_admin = User()
     user_admin.role = "superadmin"
     res = await get_current_superadmin(user_admin)
     assert res == user_admin
 
-    # 3. Moderator should be rejected
     user_moderator = User()
     user_moderator.role = "moderator"
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(ApiError):
         await get_current_superadmin(user_moderator)
-    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_get_current_app_user() -> None:
+    from common.exceptions import ApiError
+
+    user = User()
+    user.role = "user"
+    assert await get_current_app_user(user) == user
+
+    moderator = User()
+    moderator.role = "moderator"
+    with pytest.raises(ApiError):
+        await get_current_app_user(moderator)
+
+
+@pytest.mark.asyncio
+async def test_get_current_moderator() -> None:
+    from common.exceptions import ApiError
+
+    moderator = User()
+    moderator.role = "moderator"
+    assert await get_current_moderator(moderator) == moderator
+
+    superadmin = User()
+    superadmin.role = "superadmin"
+    with pytest.raises(ApiError):
+        await get_current_moderator(superadmin)
 
 
 @pytest.mark.asyncio

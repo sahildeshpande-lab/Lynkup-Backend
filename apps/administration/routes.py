@@ -6,7 +6,7 @@ from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import EmailStr
 from core.database.session import get_session
-from core.security.auth import get_current_superadmin, get_current_admin
+from core.security.auth import get_current_superadmin, get_current_admin, get_current_moderator
 from apps.accounts.db_models import User
 
 from . import services
@@ -239,7 +239,7 @@ async def list_processing_posts(
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_admin),
+    current_user=Depends(get_current_moderator),
 ) -> ApiResponse:
     from apps.feed.services import list_processing_posts_service
     _ = current_user
@@ -251,10 +251,10 @@ async def list_processing_posts(
 async def admin_publish_or_flag_post(
     payload: AdminPublishPostRequest,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_admin),
+    current_user=Depends(get_current_moderator),
 ) -> ApiResponse:
     """
-    Publish or flag a post by admin.
+    Publish or flag a post by moderator.
     """
     from apps.feed.services import admin_publish_post_service, format_post_detail
     post = await admin_publish_post_service(

@@ -6,7 +6,7 @@ from apps.accounts.db_models import User
 from apps.administration import routes as admin_routes
 from apps.accounts.schemas import ApiResponse
 from core.database.session import get_session
-from core.security.auth import get_current_admin, get_current_superadmin
+from core.security.auth import get_current_admin, get_current_moderator, get_current_superadmin
 from entrypoints.api import app
 
 
@@ -43,15 +43,26 @@ async def _override_admin():
     )
 
 
+async def _override_moderator():
+    return User(
+        id="22222222-2222-2222-2222-222222222222",
+        email="moderator@example.com",
+        role="moderator",
+        firebase_uid="moderator-uid",
+    )
+
+
 def setup_module() -> None:
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_admin] = _override_admin
+    app.dependency_overrides[get_current_moderator] = _override_moderator
     app.dependency_overrides[get_current_superadmin] = _override_admin
 
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_admin, None)
+    app.dependency_overrides.pop(get_current_moderator, None)
     app.dependency_overrides.pop(get_current_superadmin, None)
 
 
@@ -357,7 +368,7 @@ def test_list_processing_posts_route(monkeypatch) -> None:
                     "caption": "Hello",
                     "content_html": "<p>Hello</p>",
                     "media": [],
-                    "is_admin_reviewed": False,
+                    "is_moderator_reviewed": False,
                 }
             ],
             "page": 1,
@@ -377,5 +388,5 @@ def test_list_processing_posts_route(monkeypatch) -> None:
     assert body["message"] == "Processing posts fetched successfully"
     assert body["data"]["items"][0]["first_name"] == "Jane"
     assert body["data"]["items"][0]["post_id"] == "22222222-2222-2222-2222-222222222222"
-    assert body["data"]["items"][0]["is_admin_reviewed"] is False
+    assert body["data"]["items"][0]["is_moderator_reviewed"] is False
 
