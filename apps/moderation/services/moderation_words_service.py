@@ -24,7 +24,6 @@ def _to_response_data(config: ModerationWordsConfig | None) -> dict:
     if config is None:
         return ModerationWordsData().model_dump()
     return ModerationWordsData(
-        spamWords=list(config.spam_words or []),
         profanityWords=list(config.profanity_words or []),
     ).model_dump()
 
@@ -43,18 +42,15 @@ async def update_moderation_words(
     payload: UpdateModerationWordsRequest,
     db: AsyncSession,
 ) -> dict:
-    spam_words = _normalize_words(payload.spamWords)
     profanity_words = _normalize_words(payload.profanityWords)
 
     config = await _get_config(db)
     if config is None:
         config = ModerationWordsConfig(
-            spam_words=spam_words,
             profanity_words=profanity_words,
         )
         db.add(config)
     else:
-        config.spam_words = spam_words
         config.profanity_words = profanity_words
         config.updated_at = utc_now()
         db.add(config)

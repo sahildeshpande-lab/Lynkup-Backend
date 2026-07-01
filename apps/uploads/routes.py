@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, UploadFile, File, Form
+from fastapi import APIRouter, UploadFile, File, Form
 
-from core.security.auth import get_current_user
-from apps.accounts.db_models import User
 from apps.profiles.schemas import ApiResponse
 from common.exceptions import ApiError
 from common.responses import success_response
@@ -21,9 +19,7 @@ router = APIRouter(tags=["2] User Management"])
 async def upload_image(
     file: UploadFile = File(...),
     prefix: str = Form("profiles"),
-    current_user: User = Depends(get_current_user),
 ):
-    _ = current_user
     if prefix not in ALLOWED_PREFIXES:
         raise ApiError(f"Invalid prefix. Must be one of: {', '.join(ALLOWED_PREFIXES)}")
 

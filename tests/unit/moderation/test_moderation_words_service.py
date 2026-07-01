@@ -43,7 +43,7 @@ async def test_get_moderation_words_empty() -> None:
         await init_db()
         async with async_session_factory() as session:
             data = await get_moderation_words(session)
-            assert data == {"spamWords": [], "profanityWords": []}
+            assert data == {"profanityWords": []}
     finally:
         await engine.dispose()
 
@@ -55,24 +55,21 @@ async def test_update_moderation_words_replaces_entire_list() -> None:
         async with async_session_factory() as session:
             first = await update_moderation_words(
                 UpdateModerationWordsRequest(
-                    spamWords=["Free Money", "click here"],
-                    profanityWords=["BadWord"],
+                    profanityWords=["BadWord", "Another"],
                 ),
                 session,
             )
             assert first == {
-                "spamWords": ["free money", "click here"],
-                "profanityWords": ["badword"],
+                "profanityWords": ["badword", "another"],
             }
 
             second = await update_moderation_words(
                 UpdateModerationWordsRequest(
-                    spamWords=["buy now"],
                     profanityWords=[],
                 ),
                 session,
             )
-            assert second == {"spamWords": ["buy now"], "profanityWords": []}
+            assert second == {"profanityWords": []}
 
             fetched = await get_moderation_words(session)
             assert fetched == second

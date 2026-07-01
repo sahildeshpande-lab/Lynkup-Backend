@@ -1,11 +1,11 @@
-# from __future__ import annotations
+from __future__ import annotations
 
-# from pathlib import Path
+from pathlib import Path
 
-# import firebase_admin
-# from firebase_admin import credentials
+import firebase_admin
+from firebase_admin import credentials
 
-# from .config import settings
+from .config import settings
 
 
 # def initialize_firebase_app() -> None:

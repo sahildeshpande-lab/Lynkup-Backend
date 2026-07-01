@@ -4,30 +4,11 @@ import io
 
 from fastapi.testclient import TestClient
 
-from apps.accounts.db_models import User
 from apps.uploads import routes as upload_routes
-from core.security.auth import get_current_user
 from entrypoints.api import app
 
 
 client = TestClient(app)
-
-
-async def _override_current_user():
-    return User(
-        id="11111111-1111-1111-1111-111111111111",
-        email="upload@example.com",
-        role="user",
-        firebase_uid="upload-uid",
-    )
-
-
-def setup_module() -> None:
-    app.dependency_overrides[get_current_user] = _override_current_user
-
-
-def teardown_module() -> None:
-    app.dependency_overrides.pop(get_current_user, None)
 
 
 def test_upload_image_success(monkeypatch) -> None:

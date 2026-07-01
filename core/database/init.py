@@ -54,11 +54,13 @@ async def init_db() -> None:
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS moderation_words_config (
                 id UUID PRIMARY KEY,
-                spam_words JSONB NOT NULL DEFAULT '[]',
                 profanity_words JSONB NOT NULL DEFAULT '[]',
                 updated_at TIMESTAMP WITH TIME ZONE NOT NULL
             )
         """))
+        await conn.execute(text(
+            "ALTER TABLE moderation_words_config DROP COLUMN IF EXISTS spam_words"
+        ))
         await conn.execute(text(
             "ALTER TABLE posts ADD COLUMN IF NOT EXISTS moderator_id UUID REFERENCES users(id)"
         ))

@@ -18,7 +18,7 @@ def build_router() -> APIRouter:
     router.include_router(moderation_router)
     router.include_router(profiles_router, dependencies=[Depends(get_current_app_user)])
     router.include_router(search_router, dependencies=[Depends(get_current_app_user)])
-    router.include_router(uploads_router, dependencies=[Depends(get_current_app_user)])
+    router.include_router(uploads_router)
     router.include_router(connections_router, dependencies=[Depends(get_current_app_user)])
     router.include_router(feed_router, dependencies=[Depends(get_current_app_user)])
     return router

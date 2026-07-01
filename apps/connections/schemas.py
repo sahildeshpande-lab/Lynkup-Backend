@@ -84,7 +84,7 @@ class RecommendedUserResponse(BaseModel):
     major: str | None = None
     minor: str | None = None
     edu_level: str | None = None
-    profile_photo_key: str | None = None
+    profilePhoto_url: str | None = None
     is_connected: bool = False
     is_followed: bool = False
     is_blocked: bool = False
@@ -98,7 +98,7 @@ class PendingLynkupRequestResponse(BaseModel):
     status: str
     first_name: str | None = None
     last_name: str | None = None
-    profile_photo_key: str | None = None
+    profilePhoto_url: str | None = None
 
     class Config:
         from_attributes = True

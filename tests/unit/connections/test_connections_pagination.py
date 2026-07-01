@@ -168,7 +168,7 @@ async def test_get_recommendations_no_pagination(test_users) -> None:
             assert data["totalPages"] == 1
             eve_recommendation = next((item for item in data["items"] if item["first_name"] == "Eve"), None)
             assert eve_recommendation is not None
-            assert eve_recommendation["profile_photo_key"] == "photo_eve.png"
+            assert eve_recommendation["profilePhoto_url"] == "/static/uploads/photo_eve.png"
             assert eve_recommendation["first_name"] == "Eve"
     finally:
         app.dependency_overrides.pop(get_current_user, None)
@@ -200,7 +200,7 @@ async def test_get_recommendations_with_pagination(test_users) -> None:
             # Find Eve in items
             eve_recommendation = next((item for item in data["items"] if item["first_name"] == "Eve"), None)
             assert eve_recommendation is not None
-            assert eve_recommendation["profile_photo_key"] == "photo_eve.png"
+            assert eve_recommendation["profilePhoto_url"] == "/static/uploads/photo_eve.png"
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -229,7 +229,7 @@ async def test_get_pending_requests_no_pagination(test_users) -> None:
             assert "Bob" in first_names
             assert "Charlie" in first_names
             assert "David" in first_names
-            assert data[0]["profile_photo_key"] is not None
+            assert data[0]["profilePhoto_url"] is not None
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -288,7 +288,7 @@ async def test_get_pending_requests_with_search(test_users) -> None:
             data_charlie = response_charlie.json()["data"]
             assert len(data_charlie) == 1
             assert data_charlie[0]["first_name"] == "Charlie"
-            assert data_charlie[0]["profile_photo_key"] == "photo_charlie.png"
+            assert data_charlie[0]["profilePhoto_url"] == "/static/uploads/photo_charlie.png"
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -325,7 +325,7 @@ async def test_list_connections(test_users) -> None:
                 assert item["status"] == "accepted"
                 assert "lynkup_id" in item
                 assert "user_id" in item
-                assert "profile_photo_key" in item
+                assert "profilePhoto_url" in item
 
             paginated = await ac.get("/api/v1/connections", params={"page": 1, "pageSize": 1})
             assert paginated.status_code == 200

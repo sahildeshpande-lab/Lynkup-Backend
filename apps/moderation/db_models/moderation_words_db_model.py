@@ -16,10 +16,6 @@ class ModerationWordsConfig(SQLModel, table=True):
     __tablename__ = "moderation_words_config"
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    spam_words: list[str] = Field(
-        default_factory=list,
-        sa_column=Column(JSONB, nullable=False, server_default="[]"),
-    )
     profanity_words: list[str] = Field(
         default_factory=list,
         sa_column=Column(JSONB, nullable=False, server_default="[]"),

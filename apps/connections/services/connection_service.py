@@ -8,6 +8,7 @@ from apps.profiles.db_models.profile_db_model import Profile
 from apps.profiles.db_models import Profile
 from ..schemas import ApiResponse
 from common.responses import error_response, success_response
+from core.images import generate_download_url
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -174,7 +175,7 @@ async def get_pending_requests(
                 "status": req.status,
                 "first_name": profile.first_name,
                 "last_name": profile.last_name,
-                "profile_photo_key": profile.profile_photo_url,
+                "profilePhoto_url": generate_download_url(profile.profile_photo_url) if profile.profile_photo_url else None,
             }
             for req, profile in rows
         ]
@@ -197,7 +198,7 @@ async def get_pending_requests(
             "status": req.status,
             "first_name": profile.first_name,
             "last_name": profile.last_name,
-            "profile_photo_key": profile.profile_photo_url,
+            "profilePhoto_url": generate_download_url(profile.profile_photo_url) if profile.profile_photo_url else None,
         }
         for req, profile in rows
     ]
@@ -257,7 +258,7 @@ async def get_connections_service(
             "status": "accepted",
             "first_name": profile.first_name,
             "last_name": profile.last_name,
-            "profile_photo_key": profile.profile_photo_url,
+            "profilePhoto_url": generate_download_url(profile.profile_photo_url) if profile.profile_photo_url else None,
         }
 
     if page is None and page_size is None:

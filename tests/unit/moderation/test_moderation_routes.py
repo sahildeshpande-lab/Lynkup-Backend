@@ -41,7 +41,6 @@ def teardown_module() -> None:
 def test_get_moderation_words_route(monkeypatch) -> None:
     async def _mock_get(_db):
         return {
-            "spamWords": ["free money", "click here"],
             "profanityWords": ["word1"],
         }
 
@@ -56,22 +55,20 @@ def test_get_moderation_words_route(monkeypatch) -> None:
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Words fetched successfully"
-    assert body["data"]["spamWords"] == ["free money", "click here"]
     assert body["data"]["profanityWords"] == ["word1"]
+    assert "spamWords" not in body["data"]
 
 
 def test_update_moderation_words_route(monkeypatch) -> None:
     async def _mock_update(payload, _db):
-        assert payload.spamWords == ["buy now"]
         assert payload.profanityWords == ["word2"]
-        return {"spamWords": ["buy now"], "profanityWords": ["word2"]}
+        return {"profanityWords": ["word2"]}
 
     monkeypatch.setattr(moderation_routes, "update_moderation_words", _mock_update)
 
     response = client.post(
         "/api/v1/admin/moderation-words",
         json={
-            "spamWords": ["buy now"],
             "profanityWords": ["word2"],
         },
         headers={"Authorization": "Bearer admin-token"},
@@ -81,4 +78,4 @@ def test_update_moderation_words_route(monkeypatch) -> None:
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Words updated successfully"
-    assert body["data"] == {"spamWords": ["buy now"], "profanityWords": ["word2"]}
+    assert body["data"] == {"profanityWords": ["word2"]}
