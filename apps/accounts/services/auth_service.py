@@ -218,6 +218,4 @@ def _build_user_base(refresh_token: str) -> UserBaseResponse:
         email=primary_email,
         createdAt=now,
         updatedAt=now,
-        referenceCode="",
-        invitationCode=None,
     )

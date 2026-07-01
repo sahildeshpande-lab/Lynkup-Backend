@@ -2,10 +2,11 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 from uuid import UUID
-from fastapi import UploadFile, HTTPException, status
+from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 from common.enums import MediaType, MediaAssetState
+from common.exceptions import ApiError
 from apps.feed.db_models import MediaAsset, PostAttachment
 from apps.feed.content_utils import validate_media_asset
 from core.images import save_image, generate_download_url
@@ -24,28 +25,16 @@ async def upload_post_media_service(
     file_size = len(content)
 
     if file_size == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot upload an empty file"
-        )
+        raise ApiError("Cannot upload an empty file")
 
     # Simple content type validation based on MediaType
     content_type = file.content_type or ""
     if media_type == MediaType.image and not content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type for image media asset"
-        )
+        raise ApiError("Invalid file type for image media asset")
     elif media_type == MediaType.video and not content_type.startswith("video/"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type for video media asset"
-        )
+        raise ApiError("Invalid file type for video media asset")
     elif media_type == MediaType.audio and not content_type.startswith("audio/"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type for audio media asset"
-        )
+        raise ApiError("Invalid file type for audio media asset")
 
     # Extract extension
     ext = Path(file.filename).suffix if file.filename else ""
@@ -75,11 +64,8 @@ async def upload_post_media_service(
     # Save to storage (S3 or local depending on settings)
     try:
         save_image(file_name=key, content=content, content_type=content_type)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Storage upload failed: {str(e)}"
-        )
+    except Exception:
+        raise ApiError("Storage upload failed")
 
     # Save media metadata in the database
     media_asset = MediaAsset(
@@ -96,12 +82,9 @@ async def upload_post_media_service(
     try:
         await db.commit()
         await db.refresh(media_asset)
-    except Exception as e:
+    except Exception:
         await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database error saving media metadata: {str(e)}"
-        )
+        raise ApiError("Database error saving media metadata")
 
     return {
         "id": media_asset.id,
@@ -131,14 +114,10 @@ async def _verify_and_attach_media(
         result = await db.execute(select(MediaAsset).where(MediaAsset.id == media_item.id))
         media_asset = result.scalar_one_or_none()
         if not media_asset:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Media asset with ID {media_item.id} not found"
-            )
+            raise ApiError(f"Media asset with ID {media_item.id} not found")
         if media_asset.owner_user_id != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Media asset with ID {media_item.id} does not belong to the authenticated user"
+            raise ApiError(
+                f"Media asset with ID {media_item.id} does not belong to the authenticated user"
             )
 
         # Validate attachment rules (document/audio size and type)
@@ -146,10 +125,7 @@ async def _verify_and_attach_media(
         try:
             validate_media_asset(media_asset, media_type_str)
         except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(exc)
-            )
+            raise ApiError(str(exc))
 
         attachment = PostAttachment(
             post_id=post_id,

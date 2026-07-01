@@ -21,6 +21,7 @@ from apps.profiles.schemas import (
     ReportUserRequest,
     CompletenessWeightsUpdateRequest,
     UpdateProfileMeRequest,
+    UpdateProfileRequest,
 )
 from core.auth.config import settings as auth_settings
 
@@ -44,6 +45,7 @@ from apps.profiles.services import (
     accept_lynkup,
     remove_lynkup,
     update_profile_me_form,
+    update_my_profile_service,
     get_completeness_weights,
     calculate_completeness_score,
     update_completeness_weights,
@@ -181,6 +183,52 @@ async def test_profiles_complete_onboarding(monkeypatch) -> None:
             assert res["user"]["id"] == str(user.id)
             assert res["user"]["major"] == "Physics"
             assert res["user"]["educationLevel"] == EducationLevel.masters.value
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_update_my_profile_clears_photos_when_keys_null(monkeypatch) -> None:
+    try:
+        await init_db()
+        monkeypatch.setattr("core.images.file_exists", lambda *_args, **_kwargs: True)
+
+        async with async_session_factory() as session:
+            user = User(
+                firebase_uid=f"uid-{uuid.uuid4()}",
+                email="user_photo_clear_test@example.com",
+                role="user",
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+
+            profile = Profile(
+                user_id=user.id,
+                first_name="Test",
+                last_name="User",
+                profile_photo_url="profiles/old.png",
+                banner_photo_url="banners/old.png",
+                completeness_score=0,
+            )
+            session.add(profile)
+            await session.commit()
+
+        async with async_session_factory() as session:
+            db_user = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+            payload = UpdateProfileRequest.model_validate({
+                "profile_photo_key": None,
+                "banner_photo_key": None,
+            })
+            result = await update_my_profile_service(db_user, payload, session)
+            assert result["user"]["profilePhoto_url"] is None
+            assert result["user"]["bannerPhotoUrl"] is None
+
+            db_profile = (await session.execute(
+                select(Profile).where(Profile.user_id == user.id)
+            )).scalar_one()
+            assert db_profile.profile_photo_url is None
+            assert db_profile.banner_photo_url is None
     finally:
         await engine.dispose()
 

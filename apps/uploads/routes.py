@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, UploadFile, File, Form
 
 from core.security.auth import get_current_user
 from apps.accounts.db_models import User
 from apps.profiles.schemas import ApiResponse
+from common.exceptions import ApiError
+from common.responses import success_response
 from core.images import save_image, generate_download_url
 import uuid
 
@@ -21,34 +23,24 @@ async def upload_image(
     prefix: str = Form("profiles"),
     current_user: User = Depends(get_current_user),
 ):
+    _ = current_user
     if prefix not in ALLOWED_PREFIXES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid prefix. Must be one of: {', '.join(ALLOWED_PREFIXES)}",
-        )
+        raise ApiError(f"Invalid prefix. Must be one of: {', '.join(ALLOWED_PREFIXES)}")
 
     if file.content_type not in ALLOWED_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid file type. Must be one of: {', '.join(ALLOWED_CONTENT_TYPES)}",
-        )
+        raise ApiError(f"Invalid file type. Must be one of: {', '.join(ALLOWED_CONTENT_TYPES)}")
 
     content = await file.read()
 
     if len(content) > MAX_IMAGE_SIZE:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File size exceeds 5MB limit",
-        )
+        raise ApiError("File size exceeds 5MB limit")
 
     ext = file.filename.split(".")[-1] if file.filename and "." in file.filename else "png"
     file_name = f"{prefix}/{uuid.uuid4()}.{ext}"
     save_image(file_name=file_name, content=content, content_type=file.content_type or "image/png")
 
-    return ApiResponse(
-        message="image uploaded",
-        data={
-            "key": file_name,
-            "url": generate_download_url(file_name),
-        },
+    return success_response(
+        "image uploaded",
+        {"key": file_name, "url": generate_download_url(file_name)},
+        response_cls=ApiResponse,
     )

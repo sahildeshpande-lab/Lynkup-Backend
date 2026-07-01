@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from fastapi import Security, Depends, HTTPException, status
+from fastapi import Security, Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -13,7 +13,7 @@ from core.database.session import get_session
 from apps.accounts.db_models import User
 from apps.accounts.services import complete_firebase_registration, AccountExistsException
 from common.enums import UserStatus
-import hashlib
+from common.exceptions import ApiError
 import jwt
 
 ACCESS_TOKEN_TTL = timedelta(minutes=auth_settings.access_token_expire_minutes)
@@ -39,7 +39,7 @@ async def get_current_user(
     db: AsyncSession = Depends(get_session),
 ) -> User:
     if not credentials:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing access token")
+        raise ApiError("Missing access token")
 
     # Try local JWT decoding first
     try:
@@ -49,11 +49,11 @@ async def get_current_user(
             user = (await db.execute(stmt)).scalar_one_or_none()
             if user:
                 if user.deleted_at:
-                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account deleted")
+                    raise ApiError("Account deleted")
                 if user.status != UserStatus.active:
-                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is not active")
+                    raise ApiError("Account is not active")
                 return user
-    except HTTPException:
+    except ApiError:
         raise
     except Exception:
         pass
@@ -63,11 +63,11 @@ async def get_current_user(
         from core.auth.services import verify_firebase_token
         decoded = verify_firebase_token(credentials.credentials, check_revoked=False)
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token") from exc
+        raise ApiError("Invalid access token") from exc
 
     firebase_uid = decoded.get("uid")
     if not firebase_uid:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Firebase credentials")
+        raise ApiError("Invalid Firebase credentials")
 
     stmt = select(User).options(selectinload(User.roles)).where(User.firebase_uid == firebase_uid)
     user = (await db.execute(stmt)).scalar_one_or_none()
@@ -75,41 +75,19 @@ async def get_current_user(
         try:
             user = await complete_firebase_registration(decoded, db)
         except AccountExistsException as exc:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"User already registered via {exc.registration_type}")
+            raise ApiError(f"User already registered via {exc.registration_type}")
 
     if user.deleted_at:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account deleted"
-        )
+        raise ApiError("Account deleted")
 
-    # if user.status == UserStatus.suspended:
-    #     raise HTTPException(
-    #         status_code=status.HTTP_403_FORBIDDEN,
-    #         detail="Account is suspeded",
-    #     )
-    # if user.status == UserStatus.banned:
-    #     raise HTTPException(
-    #         status_code=status.HTTP_403_FORBIDDEN,
-    #         detail="Account is banned",
-    #     )
-    # if user.status == UserStatus.pending:
-    #     raise HTTPException(
-    #         status_code=status.HTTP_403_FORBIDDEN,
-    #         detail="Account is pending",
-    #     )
-    
     messages = {
-    UserStatus.pending: "Account is pending",
-    UserStatus.suspended: "Account is suspended",
-    UserStatus.banned: "Account is banned",
+        UserStatus.pending: "Account is pending",
+        UserStatus.suspended: "Account is suspended",
+        UserStatus.banned: "Account is banned",
     }
 
     if user.status != UserStatus.active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=messages.get(user.status, "Account is not active"),
-        )
+        raise ApiError(messages.get(user.status, "Account is not active"))
 
     return user
 
@@ -119,38 +97,29 @@ async def get_current_admin(
     db: AsyncSession = Depends(get_session),
 ) -> User:
     if not credentials:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing access token")
+        raise ApiError("Missing access token")
 
     try:
         decoded = jwt.decode(credentials.credentials, auth_settings.jwt_secret, algorithms=[auth_settings.jwt_algorithm])
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token") from exc
+        raise ApiError("Invalid access token") from exc
 
     if decoded.get("type") != "access":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token")
+        raise ApiError("Invalid access token")
 
     stmt = select(User).options(selectinload(User.roles)).where(User.id == decoded.get("sub"))
     user = (await db.execute(stmt)).scalar_one_or_none()
     if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        raise ApiError("User not found")
 
     if user.deleted_at:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account deleted"
-        )
+        raise ApiError("Account deleted")
 
     if user.status != UserStatus.active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is not active",
-        )
+        raise ApiError("Account is not active")
 
-    if user.role in ("user"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Insufficient permissions",
-        )
+    if user.role in ("user",):
+        raise ApiError("Insufficient permissions")
 
     return user
 
@@ -158,9 +127,6 @@ async def get_current_admin(
 async def get_current_superadmin(
     user: User = Depends(get_current_admin),
 ) -> User:
-    if user.role != "superadmin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Insufficient permissions",
-        )
+    if user.role == "user":
+        raise ApiError("Insufficient permissions")
     return user

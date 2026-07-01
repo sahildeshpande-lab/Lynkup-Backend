@@ -188,7 +188,6 @@ def _build_user_base(seed: str = "me") -> UserBaseResponse:
         email=normalized_email,
         createdAt=now,
         updatedAt=now,
-        referenceCode="",
     )
 
 def get_me(token: str) -> dict:
@@ -256,7 +255,7 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
     if payload.academic_interests is not None:
         profile.profile_interests_id = await _resolve_academic_interest_ids(payload.academic_interests, db)
 
-    if payload.profile_photo_key is not None:
+    if "profile_photo_key" in payload.model_fields_set:
         if payload.profile_photo_key:
             if not file_exists(payload.profile_photo_key):
                 raise HTTPException(status_code=400, detail="profile_photo_key does not reference an uploaded file")
@@ -264,7 +263,7 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
         else:
             profile.profile_photo_url = None
 
-    if payload.banner_photo_key is not None:
+    if "banner_photo_key" in payload.model_fields_set:
         if payload.banner_photo_key:
             if not file_exists(payload.banner_photo_key):
                 raise HTTPException(status_code=400, detail="banner_photo_key does not reference an uploaded file")

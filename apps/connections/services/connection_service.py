@@ -63,7 +63,6 @@ async def send_connection_request(db: AsyncSession, sender_id: UUID, receiver_id
         return error_response(
             "Connection request already sent.",
             response_cls=ApiResponse,
-            flags={"active_request_exists": True},
         )
 
     request = ConnectionRequest(sender_user_id=sender_id, receiver_user_id=receiver_id, status="pending")
@@ -93,16 +92,25 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
 
     if response == "accepted":
         low_id, high_id = build_connection_pair(req.sender_user_id, req.receiver_user_id)
-        # Check if they are already connected before creating
         conn_check = select(Connection).where(Connection.user_low_id == low_id, Connection.user_high_id == high_id)
         conn_res = await db.execute(conn_check)
         existing_conn = conn_res.scalars().first()
 
+        should_increment = False
         if existing_conn:
-            existing_conn.is_active = True
+            if not existing_conn.is_active:
+                existing_conn.is_active = True
+                should_increment = True
         else:
             new_conn = Connection(user_low_id=low_id, user_high_id=high_id)
             db.add(new_conn)
+            should_increment = True
+
+        if should_increment:
+            from apps.profiles.services.profile_stats_service import increment_connection_counts_for_users
+            await increment_connection_counts_for_users(
+                db, req.sender_user_id, req.receiver_user_id
+            )
 
     await db.commit()
     await db.refresh(req)
@@ -196,6 +204,84 @@ async def get_pending_requests(
 
     paginated = build_paginated_response(data, p, ps, total_items)
     return success_response("Lynkup Request pending", paginated.model_dump(), response_cls=ApiResponse)
+
+
+async def get_connections_service(
+    db: AsyncSession,
+    user_id: UUID,
+    page: int | None = None,
+    page_size: int | None = None,
+) -> ApiResponse:
+    from common.pagination import build_paginated_response
+    from sqlalchemy import func
+
+    base_stmt = (
+        select(Connection, Profile)
+        .join(
+            Profile,
+            or_(
+                and_(Connection.user_low_id == user_id, Profile.user_id == Connection.user_high_id),
+                and_(Connection.user_high_id == user_id, Profile.user_id == Connection.user_low_id),
+            ),
+        )
+        .where(
+            or_(Connection.user_low_id == user_id, Connection.user_high_id == user_id),
+            Connection.is_active == True,
+        )
+    )
+
+    async def _build_item(conn: Connection, profile: Profile) -> dict:
+        other_user_id = conn.user_high_id if conn.user_low_id == user_id else conn.user_low_id
+        lynkup_stmt = (
+            select(ConnectionRequest.id)
+            .where(
+                ConnectionRequest.status == "accepted",
+                or_(
+                    and_(
+                        ConnectionRequest.sender_user_id == user_id,
+                        ConnectionRequest.receiver_user_id == other_user_id,
+                    ),
+                    and_(
+                        ConnectionRequest.sender_user_id == other_user_id,
+                        ConnectionRequest.receiver_user_id == user_id,
+                    ),
+                ),
+            )
+            .order_by(ConnectionRequest.updated_at.desc())
+            .limit(1)
+        )
+        lynkup_id = (await db.execute(lynkup_stmt)).scalar_one_or_none() or conn.id
+        return {
+            "lynkup_id": lynkup_id,
+            "user_id": other_user_id,
+            "status": "accepted",
+            "first_name": profile.first_name,
+            "last_name": profile.last_name,
+            "profile_photo_key": profile.profile_photo_url,
+        }
+
+    if page is None and page_size is None:
+        result = await db.execute(base_stmt.order_by(Connection.connected_at.desc()))
+        rows = result.all()
+        data = [await _build_item(conn, profile) for conn, profile in rows]
+        return success_response("Connections fetched successfully", data, response_cls=ApiResponse)
+
+    p = page or 1
+    ps = page_size or 20
+
+    count_stmt = select(func.count()).select_from(base_stmt.subquery())
+    total_items = int((await db.execute(count_stmt)).scalar_one())
+
+    stmt = base_stmt.order_by(Connection.connected_at.desc()).offset((p - 1) * ps).limit(ps)
+    rows = (await db.execute(stmt)).all()
+    data = [await _build_item(conn, profile) for conn, profile in rows]
+
+    paginated = build_paginated_response(data, p, ps, total_items)
+    return success_response(
+        "Connections fetched successfully",
+        paginated.model_dump(),
+        response_cls=ApiResponse,
+    )
 
 
 async def get_relationship_flags(

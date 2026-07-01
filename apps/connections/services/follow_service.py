@@ -37,12 +37,7 @@ async def follow_user(db: AsyncSession, follower_id: UUID, following_id: UUID) -
     existing_follow = result.scalars().first()
 
     if existing_follow and existing_follow.is_active:
-        return error_response(
-            "Already following.",
-            FollowResponse.model_validate(existing_follow),
-            response_cls=ApiResponse,
-            flags={"already_following": True},
-        )
+        return error_response("Already following.", response_cls=ApiResponse)
 
     try:
         if existing_follow:
@@ -74,12 +69,7 @@ async def follow_user(db: AsyncSession, follower_id: UUID, following_id: UUID) -
         res = await db.execute(stmt)
         follow = res.scalars().first()
         if follow:
-            return error_response(
-                "Already following.",
-                FollowResponse.model_validate(follow),
-                response_cls=ApiResponse,
-                flags={"already_following": True},
-            )
+            return error_response("Already following.", response_cls=ApiResponse)
         return error_response("Failed to follow user due to constraint violation.", response_cls=ApiResponse)
     except Exception:
         await db.rollback()

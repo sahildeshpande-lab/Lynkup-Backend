@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Literal
 from datetime import datetime, timezone
 from uuid import UUID
-from fastapi import HTTPException, status
+from common.exceptions import ApiError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from common.enums import PostState
@@ -77,10 +77,7 @@ async def save_post_service(
     try:
         validate_media_count(payload.media)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc)
-        )
+        raise ApiError(str(exc))
 
     # Build content dict (includes HTML sanitization)
     content_dict = _build_content_dict(payload.content)
@@ -90,13 +87,10 @@ async def save_post_service(
     try:
         validate_content(content_dict, has_media)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc)
-        )
+        raise ApiError(str(exc))
 
     # Determine state
-    if payload.id is not None and payload.is_edit:
+    if payload.id is not None and payload.is_draft:
         post_state = PostState.hidden if payload.content.visibility == "hidden" else PostState.draft
     else:
         post_state = PostState.processing
@@ -123,20 +117,17 @@ async def save_post_service(
                     replace=False,
                 )
 
-            await _sync_hashtags(post.id, content_dict.get("content_html"), db)
+            await _sync_hashtags(post.id, content_dict, db)
             await _create_revision(post, user_id, db)
 
             await db.commit()
             await db.refresh(post)
-        except HTTPException:
+        except ApiError:
             await db.rollback()
             raise
         except Exception as e:
             await db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to create post: {str(e)}"
-            )
+            raise ApiError("Failed to create post")
 
         return post
 
@@ -145,22 +136,13 @@ async def save_post_service(
     post = result.scalar_one_or_none()
 
     if not post:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Post not found"
-        )
+        raise ApiError("Post not found")
     if post.author_user_id != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Post does not belong to the authenticated user"
-        )
+        raise ApiError("Post does not belong to the authenticated user")
 
     # Only drafts, hidden, and processing posts are editable through this endpoint
     if post.state not in (PostState.draft, PostState.hidden, PostState.processing):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Post is in '{post.state.value}' state and cannot be edited"
-        )
+        raise ApiError(f"Post is in '{post.state.value}' state and cannot be edited")
 
     post.content = content_dict
     post.state = post_state
@@ -177,20 +159,17 @@ async def save_post_service(
                 replace=True,
             )
 
-        await _sync_hashtags(post.id, content_dict.get("content_html"), db)
+        await _sync_hashtags(post.id, content_dict, db)
         await _create_revision(post, user_id, db)
 
         await db.commit()
         await db.refresh(post)
-    except HTTPException:
+    except ApiError:
         await db.rollback()
         raise
-    except Exception as e:
+    except Exception:
         await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update post: {str(e)}"
-        )
+        raise ApiError("Failed to update post")
 
     return post
 
@@ -206,25 +185,16 @@ async def edit_post_service(
     post = result.scalar_one_or_none()
 
     if not post:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Post not found"
-        )
+        raise ApiError("Post not found")
     if post.author_user_id != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Post does not belong to the authenticated user"
-        )
+        raise ApiError("Post does not belong to the authenticated user")
 
     # Validate media count if media payload is provided
     if payload.media is not None:
         try:
             validate_media_count(payload.media)
         except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(exc)
-            )
+            raise ApiError(str(exc))
 
     # Build updated/merged content dict
     merged_content = dict(post.content or {})
@@ -245,10 +215,7 @@ async def edit_post_service(
     try:
         validate_content(merged_content, has_media)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc)
-        )
+        raise ApiError(str(exc))
 
     # Apply changes to model
     post.content = merged_content
@@ -274,24 +241,20 @@ async def edit_post_service(
                 replace=True,
             )
 
-        # Re-sync hashtags from current content_html
-        content_html = merged_content.get("content_html")
-        await _sync_hashtags(post.id, content_html, db)
+        # Re-sync hashtags from current caption and content_html
+        await _sync_hashtags(post.id, merged_content, db)
 
         # Create revision audit record
         await _create_revision(post, user_id, db)
 
         await db.commit()
         await db.refresh(post)
-    except HTTPException:
+    except ApiError:
         await db.rollback()
         raise
-    except Exception as e:
+    except Exception:
         await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to edit post: {str(e)}"
-        )
+        raise ApiError("Failed to edit post")
 
     return post
 
@@ -313,22 +276,13 @@ async def publish_post_service(
     post = result.scalar_one_or_none()
 
     if not post:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Post not found"
-        )
+        raise ApiError("Post not found")
     if post.author_user_id != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Post does not belong to the authenticated user"
-        )
+        raise ApiError("Post does not belong to the authenticated user")
 
     # Only draft, hidden, or processing posts can be published
     if post.state not in (PostState.draft, PostState.hidden, PostState.processing):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Post is in '{post.state.value}' state and cannot be published"
-        )
+        raise ApiError(f"Post is in '{post.state.value}' state and cannot be published")
 
     # State transition: respect visibility stored in content
     visibility = (post.content or {}).get("visibility", "public")
@@ -349,10 +303,7 @@ async def publish_post_service(
         await db.refresh(post)
     except Exception as e:
         await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to publish post: {str(e)}"
-        )
+        raise ApiError("Failed to publish post")
 
     return post
 
@@ -370,10 +321,7 @@ async def admin_publish_post_service(
     post = result.scalar_one_or_none()
 
     if not post:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Post not found"
-        )
+        raise ApiError("Post not found")
 
     if action == "publish":
         # Respect visibility stored in content
@@ -385,10 +333,7 @@ async def admin_publish_post_service(
     elif action == "flag":
         post.state = PostState.flagged
     else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid action: {action}"
-        )
+        raise ApiError(f"Invalid action: {action}")
 
     post.is_admin_reviewed = True
 
@@ -404,10 +349,7 @@ async def admin_publish_post_service(
         await db.refresh(post)
     except Exception as e:
         await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to publish/flag post by admin: {str(e)}"
-        )
+        raise ApiError("Failed to publish or flag post")
 
     return post
 
@@ -424,53 +366,32 @@ async def get_post_service(
     post = result.scalar_one_or_none()
 
     if not post:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Post not found"
-        )
+        raise ApiError("Post not found")
 
     if post.state == PostState.deleted:
         if post.author_user_id != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Post not found"
-            )
+            raise ApiError("Post not found")
         return post
 
     if post.state == PostState.flagged and post.author_user_id != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Post is not accessible"
-        )
+        raise ApiError("Post is not accessible")
 
     if post.state in (PostState.draft, PostState.hidden, PostState.processing):
         if post.author_user_id != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Post is not accessible"
-            )
+            raise ApiError("Post is not accessible")
         return post
 
     if post.author_user_id != user_id:
         if await is_blocked(db, user_id, post.author_user_id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Post is not accessible"
-            )
+            raise ApiError("Post is not accessible")
 
         visibility = (post.content or {}).get("visibility", "public")
         if visibility == "hidden":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Post is not accessible"
-            )
+            raise ApiError("Post is not accessible")
         if visibility == "connections_only":
             from apps.connections.services.connection_service import are_connected
             if not await are_connected(db, user_id, post.author_user_id):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Post is not accessible"
-                )
+                raise ApiError("Post is not accessible")
 
     return post
 
@@ -486,15 +407,9 @@ async def delete_post_service(
     post = result.scalar_one_or_none()
 
     if not post:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Post not found"
-        )
+        raise ApiError("Post not found")
     if post.author_user_id != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Post does not belong to the authenticated user"
-        )
+        raise ApiError("Post does not belong to the authenticated user")
 
     post.state = PostState.deleted
     post.updated_at = utc_now()
@@ -504,10 +419,7 @@ async def delete_post_service(
         await db.refresh(post)
     except Exception as e:
         await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete post: {str(e)}"
-        )
+        raise ApiError("Failed to delete post")
 
     return post
 
@@ -533,10 +445,7 @@ async def list_user_posts_service(
     # Verify user exists
     user_result = await db.execute(select(User).where(User.id == target_user_id))
     if not user_result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
+        raise ApiError("User not found")
 
     stmt = select(Post).where(Post.author_user_id == target_user_id)
     if target_user_id == current_user_id:

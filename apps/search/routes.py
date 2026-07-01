@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Query, status 
+from fastapi import APIRouter, Depends, Query
+from common.exceptions import ApiError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.pagination import PaginationParams
@@ -26,10 +27,7 @@ async def universities(
 ) -> ApiResponse:
     normalized_query = query.strip() if query else ""
     if normalized_query and len(normalized_query) < 3:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Search query must be at least 3 characters",
-        )
+        raise ApiError("Search query must be at least 3 characters")
 
     data = await services.search_universities(
         UniversitySearchParams(query=normalized_query, page=pagination.page, pageSize=pagination.pageSize),

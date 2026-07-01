@@ -11,11 +11,7 @@ from common.enums import LynkupResponse
 T = TypeVar("T")
 
 
-class ApiResponse(BaseModel):
-    status: bool = True
-    message: str = "success"
-    data: Any | None = None
-    flags: dict[str, bool] | None = None
+from common.schemas import ApiResponse
 
 
 class ConnectionRequestCreate(BaseModel):

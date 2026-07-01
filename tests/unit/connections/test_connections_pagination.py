@@ -13,7 +13,9 @@ from core.database.init import init_db
 from core.security.auth import get_current_user
 from apps.accounts.db_models import User, Role, UserRole
 from apps.profiles.db_models import Profile
+from apps.profiles.db_models.profile_stats_db_model import ProfileStats
 from apps.connections.db_models import ConnectionRequest, Connection, Follow, Block
+from apps.connections.services.connection_service import build_connection_pair, respond_connection_request
 from apps.connections.schemas import RecommendedUserResponse, PendingLynkupRequestResponse
 
 
@@ -30,6 +32,13 @@ async def clean_pytest_connections_data(session):
         await session.execute(text("DELETE FROM follows WHERE follower_user_id = ANY(:user_ids) OR following_user_id = ANY(:user_ids)"), params)
         await session.execute(text("DELETE FROM blocks WHERE blocker_user_id = ANY(:user_ids) OR blocked_user_id = ANY(:user_ids)"), params)
         await session.execute(text("DELETE FROM user_roles WHERE user_id = ANY(:user_ids)"), params)
+        await session.execute(
+            text(
+                "DELETE FROM profile_stats WHERE profile_id IN "
+                "(SELECT id FROM profiles WHERE user_id = ANY(:user_ids))"
+            ),
+            params,
+        )
         await session.execute(text("DELETE FROM profiles WHERE user_id = ANY(:user_ids)"), params)
         await session.execute(text("DELETE FROM users WHERE id = ANY(:user_ids)"), params)
         await session.commit()
@@ -282,3 +291,83 @@ async def test_get_pending_requests_with_search(test_users) -> None:
             assert data_charlie[0]["profile_photo_key"] == "photo_charlie.png"
     finally:
         app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_list_connections(test_users) -> None:
+    primary, users = test_users
+    alice, bob = users[0], users[1]
+
+    async with async_session_factory() as session:
+        for other in (alice, bob):
+            low_id, high_id = build_connection_pair(primary.id, other.id)
+            session.add(Connection(user_low_id=low_id, user_high_id=high_id, is_active=True))
+        await session.commit()
+
+    async def _override_get_current_user():
+        return primary
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.get("/api/v1/connections")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] is True
+            assert body["message"] == "Connections fetched successfully"
+            data = body["data"]
+            assert isinstance(data, list)
+            assert len(data) == 2
+            first_names = {item["first_name"] for item in data}
+            assert first_names == {"Alice", "Bob"}
+            for item in data:
+                assert item["status"] == "accepted"
+                assert "lynkup_id" in item
+                assert "user_id" in item
+                assert "profile_photo_key" in item
+
+            paginated = await ac.get("/api/v1/connections", params={"page": 1, "pageSize": 1})
+            assert paginated.status_code == 200
+            page_data = paginated.json()["data"]
+            assert isinstance(page_data, dict)
+            assert page_data["page"] == 1
+            assert page_data["pageSize"] == 1
+            assert page_data["totalItems"] == 2
+            assert page_data["totalPages"] == 2
+            assert len(page_data["items"]) == 1
+            assert page_data["items"][0]["status"] == "accepted"
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_lynkup_accept_increments_connection_count(test_users) -> None:
+    primary, users = test_users
+    alice = users[0]
+
+    async with async_session_factory() as session:
+        primary_profile = (await session.execute(
+            select(Profile).where(Profile.user_id == primary.id)
+        )).scalar_one()
+        alice_profile = (await session.execute(
+            select(Profile).where(Profile.user_id == alice.id)
+        )).scalar_one()
+        primary_profile_id = primary_profile.id
+        alice_profile_id = alice_profile.id
+        session.add(ProfileStats(profile_id=primary_profile_id, connection_count=0))
+        session.add(ProfileStats(profile_id=alice_profile_id, connection_count=0))
+        await session.commit()
+
+    async with async_session_factory() as session:
+        response = await respond_connection_request(session, primary.id, alice.id, "accepted")
+        assert response.status is True
+
+        primary_stats = (await session.execute(
+            select(ProfileStats).where(ProfileStats.profile_id == primary_profile_id)
+        )).scalar_one()
+        alice_stats = (await session.execute(
+            select(ProfileStats).where(ProfileStats.profile_id == alice_profile_id)
+        )).scalar_one()
+        assert primary_stats.connection_count == 1
+        assert alice_stats.connection_count == 1

@@ -9,10 +9,7 @@ from common.enums import ProfileVisibility
 from common.enums import Role, SocialProvider
 
 
-class ApiResponse(BaseModel):
-    status: bool = True
-    message: str = "success"
-    data: Any | None = None
+from common.schemas import ApiResponse
 
 
 class SocialAuthRequest(BaseModel):
@@ -162,16 +159,13 @@ class AuthUserResponse(BaseModel):
     isEmailVerified: bool = False
     email_verified_at: datetime | None = None
     email_otp_created_at: datetime | None = None
-    referenceCode: str | None = None
-    invitationCode: str | None = None
-    invitationDeepLinkUrl: str | None = None
-    invitationWebUrl: str | None = None
     onlinePresence: bool = False
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
     posts_count: int|None =None ,
     followers_count: int|None =None ,
     following_count: int|None =None,
+    connection_count: int = 0
     is_onboarding_completed: bool = False
     is_deleted: bool = False
 
@@ -198,16 +192,13 @@ class UserBaseResponse(BaseModel):
     isEmailVerified: bool = False
     email_verified_at: datetime | None = None
     email_otp_created_at: datetime | None = None
-    referenceCode: str = ""
-    invitationCode: str | None = None
-    invitationDeepLinkUrl: str | None = None
-    invitationWebUrl: str | None = None
     onlinePresence: bool = False
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
     posts_count: int | None = None
     followers_count: int | None = None
     following_count: int | None = None
+    connection_count: int = 0
     is_onboarding_completed: bool = False
     is_deleted: bool = False
 

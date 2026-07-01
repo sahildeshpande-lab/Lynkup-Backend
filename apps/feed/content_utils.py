@@ -116,14 +116,23 @@ def normalize_text(html: str) -> str:
     return " ".join(raw.split()).strip()
 
 
-def extract_hashtags(html: str) -> list[str]:
+def extract_hashtags(
+    *,
+    caption: str | None = None,
+    content_html: str | None = None,
+) -> list[str]:
     """
-    Extract hashtags from HTML content.
+    Extract hashtags from caption and content_html combined.
 
-    Given ``<p>Learning #FastAPI and #PostgreSQL</p>``
-    returns ``["fastapi", "postgresql"]`` (lowercased, deduplicated).
+    Given caption ``"Hello #World"`` and content ``"<p>#FastAPI</p>"``
+    returns ``["world", "fastapi"]`` (lowercased, deduplicated, order preserved).
     """
-    plain = _strip_html(html)
+    parts: list[str] = []
+    if caption:
+        parts.append(str(caption))
+    if content_html:
+        parts.append(_strip_html(content_html))
+    plain = " ".join(parts)
     tags = _HASHTAG_RE.findall(plain)
     seen: set[str] = set()
     result: list[str] = []
@@ -133,6 +142,25 @@ def extract_hashtags(html: str) -> list[str]:
             seen.add(lower)
             result.append(lower)
     return result
+
+
+def validate_hashtag_count(
+    caption: str | None,
+    content_html: str | None,
+    *,
+    limit: int | None = None,
+) -> None:
+    """Raise ValueError when combined caption/content_html exceeds the hashtag limit."""
+    if limit is None:
+        from apps.feed.config import settings
+
+        limit = settings.hashtag_limit
+
+    tags = extract_hashtags(caption=caption, content_html=content_html)
+    if len(tags) > limit:
+        raise ValueError(
+            f"Maximum {limit} hashtags allowed per post (got {len(tags)})"
+        )
 
 
 def validate_content(content: dict, has_media: bool) -> None:
@@ -167,6 +195,8 @@ def validate_content(content: dict, has_media: bool) -> None:
 
     if not content_html and not has_media:
         raise ValueError("Post must have either content or media")
+
+    validate_hashtag_count(content.get("caption"), content_html)
 
 
 def validate_media_count(media: list | None) -> None:

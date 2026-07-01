@@ -49,7 +49,6 @@ async def _mock_signup(payload, firebase_user, db) -> ApiResponse:
         role=payload.role,
         createdAt=datetime.now(),
         updatedAt=datetime.now(),
-        referenceCode="",
         status="pending",
         profileVisibility="public",
         email_verified_at=None,
@@ -111,9 +110,6 @@ def test_signup_route_exists(monkeypatch) -> None:
     assert body["status"] is True
     assert body["message"] == "Signup successful"
     assert body["data"]["emailSent"] is True
-    
-    assert body["data"]["user"]["invitationCode"] is None
-    assert body["data"]["user"]["referenceCode"] == ""
     assert body["data"]["user"]["status"] == "pending"
     assert body["data"]["user"]["profileVisibility"] == "public"
     assert body["data"]["user"]["email_verified_at"] is None
@@ -444,10 +440,8 @@ def test_social_auth_route_conflict(monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] is False
-    assert body["status"] is False
     assert body["message"] == "Account already exists. Please login using your registered method."
-    assert body["data"]["error_code"] == "ACCOUNT_EXISTS"
-    assert body["data"]["registration_type"] == "email"
+    assert body["data"] is None
 
 
 def test_social_auth_route_profile_photo_url(monkeypatch) -> None:

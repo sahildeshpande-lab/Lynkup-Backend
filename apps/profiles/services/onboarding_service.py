@@ -40,6 +40,9 @@ async def complete_onboarding(
     db.add(profile)
     await db.flush()
 
+    from apps.profiles.services.profile_stats_service import get_or_create_profile_stats
+    await get_or_create_profile_stats(db, profile.id)
+
     profile_data = {}
 
     # Validate that the uploaded image key exists in storage

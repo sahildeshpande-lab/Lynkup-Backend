@@ -233,7 +233,7 @@ async def change_password(payload: UserChangePasswordRequest, db: AsyncSession) 
     if not user.password_hash or not PASSWORD_HASHER.verify(payload.current_password, user.password_hash):
         return ApiResponse(
             status=False,
-            message="existing password does not match",
+            message="Existing password does not match",
             data=None
         )
 

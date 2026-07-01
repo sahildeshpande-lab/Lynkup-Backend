@@ -15,6 +15,7 @@ from apps.connections.services import (
     block_user as block_user_service,
     follow_user as follow_user_service,
     get_pending_requests as get_pending_requests_service,
+    get_connections_service,
     get_recommendations,
     respond_connection_request as respond_connection_request_service,
     send_connection_request,
@@ -115,6 +116,21 @@ async def get_connection_recommendations(
         data = paginated.model_dump()
 
     return success_response("Connection recommendations fetched", data, response_cls=ApiResponse)
+
+
+@router.get("/connections", response_model=ApiResponse)
+async def list_connections(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    page: int | None = Query(None, ge=1),
+    pageSize: int | None = Query(None, ge=1, le=200),
+):
+    return await get_connections_service(
+        db,
+        current_user.id,
+        page=page,
+        page_size=pageSize,
+    )
 
 
 @router.get("/lynkup", response_model=ApiResponse)

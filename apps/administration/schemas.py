@@ -9,11 +9,7 @@ from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
 from common.enums import Role,AdminUserStatus
 
 
-class ApiResponse(BaseModel):
-    status: bool = True
-    message: str = "success"
-    data: Any | None = None
-
+from common.schemas import ApiResponse
 
 
 class AdminUserCreateRequest(BaseModel):

@@ -4,26 +4,23 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from apps.accounts.schemas import ApiResponse
+from .schemas import ApiResponse
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
 
 
 def success_response(
-    message: str = "success",
+    message: str = "Operation completed successfully",
     data: Any | None = None,
     *,
     response_cls: type[ResponseT] = ApiResponse,
-    **extra: Any,
 ) -> ResponseT:
-    return response_cls(status=True, message=message, data=data, **extra)
+    return response_cls(status=True, message=message, data=data)
 
 
 def error_response(
     message: str,
-    data: Any | None = None,
     *,
     response_cls: type[ResponseT] = ApiResponse,
-    **extra: Any,
 ) -> ResponseT:
-    return response_cls(status=False, message=message, data=data, **extra)
+    return response_cls(status=False, message=message, data=None)

@@ -8,6 +8,7 @@ from core.database.session import get_session
 from core.security.auth import get_current_user
 from apps.accounts.db_models import User
 from common.enums import MediaType
+from common.responses import success_response
 from apps.feed.schemas import ApiResponse, SavePostRequest, DeletePostRequest, EditPostRequest
 from apps.feed.services import (
     upload_post_media_service,
@@ -31,20 +32,13 @@ async def upload_post_media(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """
-    Upload a single media file before creating a post.
-    """
     data = await upload_post_media_service(
         user_id=current_user.id,
         file=file,
         media_type=type,
         db=db
     )
-    return ApiResponse(
-        status=True,
-        message=f"{type.value} uploaded",
-        data=data
-    )
+    return success_response(f"{type.value} uploaded", data, response_cls=ApiResponse)
 
 
 @router.post("/post", response_model=ApiResponse)
@@ -58,19 +52,15 @@ async def save_post(
         payload=payload,
         db=db
     )
-    return ApiResponse(
-        status=True,
-        message=(
-            "Post created successfully" if payload.id is None 
-            else ("Post updated and saved as draft" if payload.is_edit else "Post updated and processing")
-        ),
-        data={
-            "id": post.id,
-            "revision_number": post.revision_number
-        }
+    message = (
+        "Post created successfully" if payload.id is None
+        else ("Post updated and saved as draft" if payload.is_draft else "Post updated and processing")
     )
-
-
+    return success_response(
+        message,
+        {"id": post.id, "revision_number": post.revision_number},
+        response_cls=ApiResponse,
+    )
 
 
 @router.get("/posts/{id}", response_model=ApiResponse)
@@ -79,19 +69,12 @@ async def get_post(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """
-    Retrieve details of a post.
-    """
     post = await get_post_service(
         post_id=id,
         user_id=current_user.id,
         db=db
     )
-    return ApiResponse(
-        status=True,
-        message="Post retrieved successfully",
-        data=format_post_detail(post)
-    )
+    return success_response("Post retrieved successfully", format_post_detail(post), response_cls=ApiResponse)
 
 
 @router.patch("/posts", response_model=ApiResponse)
@@ -100,19 +83,12 @@ async def edit_post(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """
-    Edit/update an existing post. All fields (caption, content_html, visibility, media) are optional.
-    """
     post = await edit_post_service(
         user_id=current_user.id,
         payload=payload,
         db=db
     )
-    return ApiResponse(
-        status=True,
-        message="Post updated successfully",
-        data=format_post_detail(post)
-    )
+    return success_response("Post updated successfully", format_post_detail(post), response_cls=ApiResponse)
 
 
 @router.delete("/posts", response_model=ApiResponse)
@@ -121,18 +97,12 @@ async def delete_post(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """
-    Hard delete a post.
-    """
     await delete_post_service(
         post_id=payload.id,
         user_id=current_user.id,
         db=db
     )
-    return ApiResponse(
-        status=True,
-        message="Post deleted successfully"
-    )
+    return success_response("Post deleted successfully", response_cls=ApiResponse)
 
 
 @router.get("/posts", response_model=ApiResponse)
@@ -140,18 +110,15 @@ async def list_user_posts(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """
-    List posts for the authenticated user.
-    """
     posts = await list_user_posts_service(
         target_user_id=current_user.id,
         current_user_id=current_user.id,
         db=db
     )
-    return ApiResponse(
-        status=True,
-        message="User posts retrieved successfully",
-        data=[format_post_detail(p) for p in posts]
+    return success_response(
+        "User posts retrieved successfully",
+        [format_post_detail(p) for p in posts],
+        response_cls=ApiResponse,
     )
 
 
@@ -160,15 +127,12 @@ async def get_feed(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """
-    Get the feed.
-    """
     posts = await get_feed_service(
         current_user_id=current_user.id,
         db=db
     )
-    return ApiResponse(
-        status=True,
-        message="Feed retrieved successfully",
-        data=[format_post_detail(p) for p in posts]
+    return success_response(
+        "Feed retrieved successfully",
+        [format_post_detail(p) for p in posts],
+        response_cls=ApiResponse,
     )

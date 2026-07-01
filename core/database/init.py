@@ -40,9 +40,25 @@ async def init_db() -> None:
             await conn.execute(text("ALTER TYPE onboardingstatus ADD VALUE IF NOT EXISTS 'pending'"))
         except Exception:
             pass
-        
 
-        # await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS subject VARCHAR(256) NOT NULL DEFAULT ''"))
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS profile_stats (
+                id UUID PRIMARY KEY,
+                profile_id UUID NOT NULL UNIQUE REFERENCES profiles(id),
+                connection_count INTEGER NOT NULL DEFAULT 0
+            )
+        """))
+        await conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_profile_stats_profile_id ON profile_stats (profile_id)"
+        ))
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS moderation_words_config (
+                id UUID PRIMARY KEY,
+                spam_words JSONB NOT NULL DEFAULT '[]',
+                profanity_words JSONB NOT NULL DEFAULT '[]',
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+            )
+        """))
         # await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS is_sent BOOLEAN NOT NULL DEFAULT FALSE"))
         # await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP WITH TIME ZONE"))
         # await conn.execute(text("ALTER TABLE transactional_email_log ADD COLUMN IF NOT EXISTS error_message TEXT"))

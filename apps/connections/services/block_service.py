@@ -19,12 +19,7 @@ async def block_user(db: AsyncSession, blocker_id: UUID, blocked_id: UUID) -> Ap
 
     if block:
         if block.is_active:
-            return error_response(
-                "Already blocked.",
-                BlockResponse.model_validate(block),
-                response_cls=ApiResponse,
-                flags={"already_blocked": True},
-            )
+            return error_response("Already blocked.", response_cls=ApiResponse)
         block.is_active = True
     else:
         block = Block(blocker_user_id=blocker_id, blocked_user_id=blocked_id)

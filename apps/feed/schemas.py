@@ -8,10 +8,7 @@ from pydantic import BaseModel, Field
 from common.enums import MediaType
 
 
-class ApiResponse(BaseModel):
-    status: bool = True
-    message: str = "success"
-    data: Any | None = None
+from common.schemas import ApiResponse
 
 
 class PostUploadData(BaseModel):
@@ -59,14 +56,17 @@ class SavePostRequest(BaseModel):
     """
     Unified create / update-draft request.
 
-    - If ``id`` is omitted or null → create a new draft.
-    - If ``id`` is provided → update the existing draft.
+    - If ``id`` is omitted or null → create a new post (submitted for processing).
+    - If ``id`` is provided → update the existing post.
+
+    ``is_draft``: when updating (``id`` provided), ``true`` saves as draft
+    (or hidden if visibility is ``hidden``); ``false`` submits for processing.
 
     ``revision_number`` is never sent by the frontend;
     the backend manages it entirely.
     """
     id: Optional[UUID] = None
-    is_edit: bool = False
+    is_draft: bool = False
     content: PostContentPayload
     media: Optional[List[MediaItem]] = Field(default_factory=list)
 

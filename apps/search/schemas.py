@@ -5,10 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
-class ApiResponse(BaseModel):
-    status: bool = True
-    message: str = "success"
-    data: Any | None = None
+from common.schemas import ApiResponse
 
 
 class UniversitySearchParams(BaseModel):

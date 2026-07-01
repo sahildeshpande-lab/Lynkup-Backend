@@ -62,16 +62,11 @@ async def social_auth(
             content=success_response(msg, data).model_dump(),
         )
 
-    except AccountExistsException as exc:
+    except AccountExistsException:
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content=error_response(
                 "Account already exists. Please login using your registered method.",
-                data={
-                    "error_code": "ACCOUNT_EXISTS",
-                    "registration_type": exc.registration_type,
-                    "httpStatus": 409,
-                },
             ).model_dump(),
         )
 

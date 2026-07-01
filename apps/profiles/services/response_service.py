@@ -63,6 +63,9 @@ async def build_user_base_response(
     if profile and profile.profile_visibility:
         profile_visibility = profile.profile_visibility.value if hasattr(profile.profile_visibility, "value") else str(profile.profile_visibility)
 
+    from apps.profiles.services.profile_stats_service import get_connection_count_for_profile
+    connection_count = await get_connection_count_for_profile(db, profile.id if profile else None)
+
     return {
         "id": str(user.id),
         "firstName": first_name,
@@ -105,14 +108,11 @@ async def build_user_base_response(
         },
         "isEmailVerified": user.email_verified_at is not None,
         "email_verified_at": user.email_verified_at.isoformat() if user.email_verified_at else None,
-        "referenceCode": "",
-        "invitationCode": None,
-        "invitationDeepLinkUrl": None,
-        "invitationWebUrl": None,
         "onlinePresence": profile.online_presence_visible if profile else False,
         "posts_count": profile.posts_count if profile else 0,
         "followers_count": profile.followers_count if profile else 0,
         "following_count": profile.following_count if profile else 0,
+        "connection_count": connection_count,
         "createdAt": user.created_at.isoformat() if user.created_at else None,
         "updatedAt": user.updated_at.isoformat() if user.updated_at else None,
         "is_onboarding_completed": user.onboarding_status == OnboardingStatus.completed if hasattr(user, "onboarding_status") else False,

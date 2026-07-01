@@ -4,7 +4,8 @@ import io
 import uuid
 import pytest
 import pytest_asyncio
-from fastapi import UploadFile, HTTPException
+from fastapi import UploadFile
+from common.exceptions import ApiError
 import httpx
 from httpx import AsyncClient
 from sqlmodel import select
@@ -188,10 +189,9 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
         headers={"content-type": "image/png"}
     )
     async with async_session_factory() as session:
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(ApiError) as exc_info:
             await upload_post_media_service(user.id, file_empty, MediaType.image, session)
-        assert exc_info.value.status_code == 400
-        assert "empty" in exc_info.value.detail
+        assert "empty" in exc_info.value.message
 
     # Mismatch media type
     file_mismatch = UploadFile(
@@ -200,10 +200,9 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
         headers={"content-type": "video/mp4"}
     )
     async with async_session_factory() as session:
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(ApiError) as exc_info:
             await upload_post_media_service(user.id, file_mismatch, MediaType.image, session)
-        assert exc_info.value.status_code == 400
-        assert "Invalid file type" in exc_info.value.detail
+        assert "Invalid file type" in exc_info.value.message
 
 
 @pytest.mark.asyncio
@@ -314,10 +313,9 @@ async def test_create_post_service_unauthorized_media(test_users) -> None:
     )
 
     async with async_session_factory() as session:
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(ApiError) as exc_info:
             await save_post_service(user.id, payload, session)
-        assert exc_info.value.status_code == 403
-        assert "does not belong to the authenticated user" in exc_info.value.detail
+        assert "does not belong to the authenticated user" in exc_info.value.message
 
 
 @pytest.mark.asyncio
@@ -334,10 +332,9 @@ async def test_create_post_service_nonexistent_media(test_users) -> None:
     )
 
     async with async_session_factory() as session:
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(ApiError) as exc_info:
             await save_post_service(user.id, payload, session)
-        assert exc_info.value.status_code == 404
-        assert "not found" in exc_info.value.detail
+        assert "not found" in exc_info.value.message
 
 
 @pytest.mark.asyncio
@@ -413,10 +410,10 @@ async def test_update_post_service_success(test_users) -> None:
         assert post.content_html == "Updated text"
         assert post.state == PostState.hidden
 
-    # Update draft via save_post_service with id and is_edit=True
+    # Update draft via save_post_service with id and is_draft=True
     update_payload_draft = SavePostRequest(
         id=post_id,
-        is_edit=True,
+        is_draft=True,
         content=PostContentPayload(caption="Draft Caption", content_html="Draft text", visibility="public")
     )
     async with async_session_factory() as session:
@@ -425,10 +422,10 @@ async def test_update_post_service_success(test_users) -> None:
         assert post.content_html == "Draft text"
         assert post.state == PostState.draft
 
-    # Update post via save_post_service with id and is_edit=False
+    # Update post via save_post_service with id and is_draft=False
     update_payload_processing = SavePostRequest(
         id=post_id,
-        is_edit=False,
+        is_draft=False,
         content=PostContentPayload(caption="Processing Caption", content_html="Processing text", visibility="public")
     )
     async with async_session_factory() as session:
@@ -481,9 +478,9 @@ async def test_get_post_service_visibility(test_users) -> None:
         p = await get_post_service(post_id, user.id, session)
         assert p.id == post_id
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(ApiError) as exc_info:
             await get_post_service(post_id, other.id, session)
-        assert exc_info.value.status_code == 403
+        assert "not accessible" in exc_info.value.message
 
 
 @pytest.mark.asyncio

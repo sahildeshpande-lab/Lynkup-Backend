@@ -138,8 +138,6 @@ def _build_auth_user_response(user: User, profile: Profile | None) -> AuthUserRe
         completenessScore=profile.completeness_score if profile else 33,
         createdAt=user.created_at,
         updatedAt=user.updated_at,
-        referenceCode="",
-        invitationCode=None,
         profilePhoto_url=generate_download_url(profile.profile_photo_url) if (profile and profile.profile_photo_url) else None,
         bannerPhotoUrl=generate_download_url(profile.banner_photo_url) if (profile and profile.banner_photo_url) else None,
     )

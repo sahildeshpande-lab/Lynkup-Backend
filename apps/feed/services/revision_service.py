@@ -69,11 +69,11 @@ async def _create_revision(
 
 async def _sync_hashtags(
     post_id: UUID,
-    content_html: str | None,
+    content: dict | None,
     db: AsyncSession,
 ) -> None:
     """
-    Extract hashtags from ``content_html`` and synchronise the
+    Extract hashtags from caption and content_html and synchronise the
     ``PostHashtag`` join table.
 
     - New hashtags are inserted into the ``hashtags`` table (get-or-create).
@@ -84,10 +84,13 @@ async def _sync_hashtags(
         text("DELETE FROM post_hashtags WHERE post_id = :post_id").bindparams(post_id=post_id)
     )
 
-    if not content_html:
+    if not content:
         return
 
-    tags = extract_hashtags(content_html)
+    tags = extract_hashtags(
+        caption=content.get("caption"),
+        content_html=content.get("content_html"),
+    )
     if not tags:
         return
 
