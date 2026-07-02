@@ -5,6 +5,7 @@ from sqlalchemy import select
 from common.enums import PostState
 from apps.feed.db_models import Post
 from apps.connections.services.recommendation_service import get_user_connections
+from apps.profiles.db_models import Profile
 
 async def get_feed_service(
     current_user_id: UUID,
@@ -18,9 +19,17 @@ async def get_feed_service(
     connection_ids = await get_user_connections(db, current_user_id)
 
     # Fetch all published posts ordered by created_at DESC
-    stmt = select(Post).where(Post.state == PostState.published).order_by(Post.created_at.desc())
+    stmt = (
+        select(Post, Profile)
+        .outerjoin(Profile, Profile.user_id == Post.author_user_id)
+        .where(Post.state == PostState.published)
+        .order_by(Post.created_at.desc())
+    )
     result = await db.execute(stmt)
-    posts = list(result.scalars().all())
+    posts = []
+    for post, profile in result.all():
+        post._author_profile = profile
+        posts.append(post)
 
     # Split posts into connection posts and non-connection posts
     connection_posts = [p for p in posts if p.author_user_id in connection_ids]

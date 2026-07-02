@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 from typing import Literal
 from datetime import datetime, timezone
 from uuid import UUID
@@ -16,6 +17,8 @@ from apps.connections.services.connection_service import is_blocked
 from .media_service import _verify_and_attach_media
 from .revision_service import _build_content_dict, _create_revision, _sync_hashtags
 from apps.moderation.services.moderator_assignment_service import assign_next_moderator_round_robin
+
+logger = logging.getLogger(__name__)
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -44,7 +47,7 @@ def format_post_detail(post: Post) -> dict:
     media_data = _extract_post_media(post)
 
     content = post.content or {}
-    return {
+    data = {
         "id": post.id,
         "author_user_id": post.author_user_id,
         "state": post.state.value if hasattr(post.state, "value") else str(post.state),
@@ -58,6 +61,18 @@ def format_post_detail(post: Post) -> dict:
         "updated_at": post.updated_at,
         "media": media_data
     }
+    author_profile = getattr(post, "_author_profile", None)
+    if author_profile is not None:
+        data.update({
+            "first_name": author_profile.first_name,
+            "last_name": author_profile.last_name,
+            "profile_photo_url": (
+                generate_profile_image_url(author_profile.profile_photo_url)
+                if author_profile.profile_photo_url
+                else None
+            ),
+        })
+    return data
 
 async def _assign_moderator_if_processing(
     post: Post,
@@ -350,11 +365,28 @@ async def admin_publish_post_service(
     """
     Publish or flag a post by a moderator/admin.
     """
+    from apps.profiles.db_models import Profile
+
     result = await db.execute(select(Post).where(Post.id == post_id))
     post = result.scalar_one_or_none()
 
     if not post:
         raise ApiError("Post not found")
+
+    author_result = await db.execute(
+        select(User, Profile)
+        .outerjoin(Profile, Profile.user_id == User.id)
+        .where(User.id == post.author_user_id)
+    )
+    author_row = author_result.first()
+    author_user: User | None = None
+    author_full_name: str | None = None
+    if author_row:
+        author_user, author_profile = author_row
+        if author_profile:
+            author_full_name = " ".join(
+                part for part in (author_profile.first_name, author_profile.last_name) if part
+            ).strip() or None
 
     if status == "publish":
         # Respect visibility stored in content
@@ -385,6 +417,14 @@ async def admin_publish_post_service(
     except Exception as e:
         await db.rollback()
         raise ApiError("Failed to publish or flag post")
+
+    if author_user and author_user.email:
+        try:
+            from core.email_service import send_post_review_email
+
+            await send_post_review_email(author_user.email, status, author_full_name)
+        except Exception as e:
+            logger.exception("Failed to queue post review email: %s", e)
 
     return post
 
@@ -605,6 +645,7 @@ def _format_processing_post_item(post: Post, profile) -> dict:
 
 async def list_processing_posts_service(
     db: AsyncSession,
+    moderator_id: UUID | None = None,
     page: int | None = None,
     page_size: int | None = None,
 ) -> dict:
@@ -614,13 +655,16 @@ async def list_processing_posts_service(
     from apps.profiles.db_models import Profile
     from common.pagination import build_paginated_response
 
-    base_filter = Post.state == PostState.processing
-    total_items = int((await db.execute(select(func.count(Post.id)).where(base_filter))).scalar_one())
+    filters = [Post.state == PostState.processing]
+    if moderator_id is not None:
+        filters.append(Post.moderator_id == moderator_id)
+
+    total_items = int((await db.execute(select(func.count(Post.id)).where(*filters))).scalar_one())
 
     stmt = (
         select(Post, Profile)
         .outerjoin(Profile, Profile.user_id == Post.author_user_id)
-        .where(base_filter)
+        .where(*filters)
         .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
         .order_by(Post.created_at.desc())
     )
@@ -637,7 +681,7 @@ async def list_processing_posts_service(
 
 async def list_reviewed_posts_service(
     db: AsyncSession,
-    moderator_id: UUID,
+    moderator_id: UUID | None,
     status: Literal["publish", "flag"] | None = None,
     page: int | None = None,
     page_size: int | None = None,

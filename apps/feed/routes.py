@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 
 from core.database.session import get_session
-from core.security.auth import get_current_user
+from core.security.auth import get_current_app_user, get_current_user
 from apps.accounts.db_models import User
 from common.enums import MediaType
 from common.responses import success_response
@@ -31,7 +31,7 @@ router = APIRouter(tags=["6] Feed / Posts"])
 async def upload_post_media(
     files:  list[UploadFile] = File(...),
     type: MediaType = Form(...),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     data = await upload_post_media_service(
@@ -50,7 +50,7 @@ async def upload_post_media(
 @router.post("/post", response_model=ApiResponse)
 async def save_post(
     payload: SavePostRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     post = await save_post_service(
@@ -72,7 +72,7 @@ async def save_post(
 @router.get("/posts/{id}", response_model=ApiResponse)
 async def get_post(
     id: UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     post = await get_post_service(
@@ -86,7 +86,7 @@ async def get_post(
 @router.patch("/posts", response_model=ApiResponse)
 async def edit_post(
     payload: EditPostRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     post = await edit_post_service(
@@ -100,7 +100,7 @@ async def edit_post(
 @router.delete("/posts", response_model=ApiResponse)
 async def delete_post(
     payload: DeletePostRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     await delete_post_service(
@@ -113,7 +113,7 @@ async def delete_post(
 
 @router.get("/posts", response_model=ApiResponse)
 async def list_user_posts(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     posts = await list_user_posts_service(
@@ -130,7 +130,7 @@ async def list_user_posts(
 
 @router.get("/draftpost", response_model=ApiResponse)
 async def list_draft_posts(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     posts = await list_draft_posts_service(
@@ -147,7 +147,7 @@ async def list_draft_posts(
 @router.delete("/draftpost", response_model=ApiResponse)
 async def delete_draft_post(
     payload: DeletePostRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     await delete_draft_post_service(

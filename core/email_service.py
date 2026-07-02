@@ -521,6 +521,42 @@ async def send_lynkup_response_email(to_email: str, response_status: str, full_n
     return await _queue_email(to_email, subject, html_content, purpose=purpose)
 
 
+def build_post_review_email_html(
+    full_name: str | None = None,
+    review_status: str = "publish",
+) -> str:
+    greeting = f"Hi {full_name}," if full_name else "Hi,"
+    if review_status == "flag":
+        title = "Please Review Your Post"
+        body = "A moderator has flagged your post. Please review your post and make the necessary updates before submitting it again."
+    else:
+        title = "Your Post Has Been Published"
+        body = "Good news! A moderator has approved your post and it has been published."
+
+    body_html = (
+        f'<div style="font-size:16px;font-weight:700;margin-bottom:16px;">{escape(title)}</div>'
+        f'<p style="margin:0 0 14px;">{escape(greeting)}</p>'
+        f'<p style="margin:0;">{escape(body)}</p>'
+    )
+    return _render_email_layout(title, body_html)
+
+
+async def send_post_review_email(
+    to_email: str,
+    review_status: str,
+    full_name: str | None = None,
+) -> bool:
+    """Queue post review result email for cron delivery."""
+    if review_status == "flag":
+        subject = "KampuLynk Post Flagged"
+        purpose = "Post Flagged"
+    else:
+        subject = "KampuLynk Post Published"
+        purpose = "Post Published"
+    html_content = build_post_review_email_html(full_name, review_status)
+    return await _queue_email(to_email, subject, html_content, purpose=purpose)
+
+
 async def send_temporary_password_email(
     to_email: str,
     temporary_password: str,

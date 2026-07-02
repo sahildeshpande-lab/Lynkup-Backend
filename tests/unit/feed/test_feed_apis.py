@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import uuid
+from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from fastapi import UploadFile
@@ -15,10 +16,11 @@ from entrypoints.api import app
 from core.database.session import async_session_factory
 from datetime import datetime, timezone, timedelta
 from core.database.init import init_db
-from core.security.auth import get_current_user, get_current_moderator
-from apps.accounts.db_models import User
+from core.security.auth import get_current_app_user, get_current_user, get_current_moderator
+from apps.accounts.db_models import TransactionalEmailLog, User
 from apps.feed.db_models import Post, MediaAsset, PostAttachment
 from apps.connections.db_models import Connection
+from apps.profiles.db_models import Profile
 from common.enums import MediaType, MediaAssetState, PostState
 from apps.feed.schemas import SavePostRequest, EditPostRequest, MediaItem, PostContentPayload, EditPostContentPayload, DeletePostRequest
 from apps.feed.services import (
@@ -33,7 +35,9 @@ from apps.feed.services import (
     delete_draft_post_service,
     list_user_posts_service,
     list_reviewed_posts_service,
+    list_processing_posts_service,
     get_feed_service,
+    format_post_detail,
 )
 
 
@@ -44,6 +48,7 @@ async def clean_feed_pytest_data(session):
             "pytest_feed_user@example.com",
             "pytest_feed_other@example.com",
             "pytest_feed_mod_b@example.com",
+            "pytest_feed_superadmin@example.com",
             "third@example.com",
         ]))
     )
@@ -102,11 +107,22 @@ async def clean_feed_pytest_data(session):
             WHERE user_low_id = ANY(:user_ids) 
                OR user_high_id = ANY(:user_ids)
         """), params)
+
+        await session.execute(text("""
+            DELETE FROM profiles
+            WHERE user_id = ANY(:user_ids)
+        """), params)
         
         await session.execute(text("""
             DELETE FROM users 
             WHERE id = ANY(:user_ids)
         """), params)
+
+        await session.execute(text("""
+            DELETE FROM transactional_email_log
+            WHERE "to" IN ('pytest_feed_user@example.com', 'pytest_feed_other@example.com')
+               OR "to" LIKE 'pytest_feed_%@example.com'
+        """))
         
         await session.commit()
 
@@ -540,6 +556,19 @@ async def test_publish_post_service_success(test_users) -> None:
         assert post.moderator_id == user.id
         assert post.is_moderator_reviewed is True
 
+    async with async_session_factory() as session:
+        log = (await session.execute(
+            select(TransactionalEmailLog)
+            .where(
+                TransactionalEmailLog.to_email == user.email,
+                TransactionalEmailLog.purpose == "Post Published",
+            )
+            .order_by(TransactionalEmailLog.created_at.desc())
+        )).scalars().first()
+        assert log is not None
+        assert log.is_send is False
+        assert "published" in log.subject.lower()
+
 @pytest.mark.asyncio
 async def test_flag_post_service_success(test_users) -> None:
     user, _ = test_users
@@ -554,6 +583,19 @@ async def test_flag_post_service_success(test_users) -> None:
         post = await admin_publish_post_service(post_id, "flag", user.id, session)
         assert post.state == PostState.flagged
         assert post.moderator_id == user.id
+
+    async with async_session_factory() as session:
+        log = (await session.execute(
+            select(TransactionalEmailLog)
+            .where(
+                TransactionalEmailLog.to_email == user.email,
+                TransactionalEmailLog.purpose == "Post Flagged",
+            )
+            .order_by(TransactionalEmailLog.created_at.desc())
+        )).scalars().first()
+        assert log is not None
+        assert log.is_send is False
+        assert "flagged" in log.subject.lower()
 
 
 @pytest.mark.asyncio
@@ -648,6 +690,171 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
 
 
 @pytest.mark.asyncio
+async def test_superadmin_reviewed_posts_status_filter_without_moderator_id(test_users) -> None:
+    author, moderator_a = test_users
+    moderator_b = User(
+        email="pytest_feed_mod_b@example.com",
+        role="moderator",
+        firebase_uid=f"uid-feed-mod-b-{uuid.uuid4()}",
+        status="active",
+    )
+    superadmin = User(
+        email="pytest_feed_superadmin@example.com",
+        role="superadmin",
+        firebase_uid=f"uid-feed-superadmin-{uuid.uuid4()}",
+        status="active",
+    )
+
+    async with async_session_factory() as session:
+        session.add_all([moderator_b, superadmin])
+        await session.commit()
+        await session.refresh(moderator_b)
+        await session.refresh(superadmin)
+
+        published_by_a = Post(
+            author_user_id=author.id,
+            content={"caption": "Published by A", "visibility": "public"},
+            state=PostState.published,
+            is_moderator_reviewed=True,
+            moderator_id=moderator_a.id,
+        )
+        published_by_b = Post(
+            author_user_id=author.id,
+            content={"caption": "Published by B", "visibility": "public"},
+            state=PostState.published,
+            is_moderator_reviewed=True,
+            moderator_id=moderator_b.id,
+        )
+        flagged_by_b = Post(
+            author_user_id=author.id,
+            content={"caption": "Flagged by B", "visibility": "public"},
+            state=PostState.flagged,
+            is_moderator_reviewed=True,
+            moderator_id=moderator_b.id,
+        )
+        session.add_all([published_by_a, published_by_b, flagged_by_b])
+        await session.commit()
+
+    async def _override_get_current_moderator():
+        return SimpleNamespace(id=superadmin.id, role="superadmin")
+
+    app.dependency_overrides[get_current_moderator] = _override_get_current_moderator
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.get("/api/v1/admin/posts/reviewed", params={"status": "publish"})
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] is True
+            assert body["data"]["totalItems"] >= 2
+            captions = {item["caption"] for item in body["data"]["items"]}
+            assert {"Published by A", "Published by B"}.issubset(captions)
+    finally:
+        app.dependency_overrides.pop(get_current_moderator, None)
+
+
+@pytest.mark.asyncio
+async def test_processing_posts_service_filters_by_assigned_moderator(test_users) -> None:
+    author, moderator_a = test_users
+    moderator_b = User(
+        email="pytest_feed_mod_b@example.com",
+        role="moderator",
+        firebase_uid=f"uid-feed-mod-b-{uuid.uuid4()}",
+        status="active",
+    )
+
+    async with async_session_factory() as session:
+        session.add(moderator_b)
+        await session.commit()
+        await session.refresh(moderator_b)
+
+        post_for_a = Post(
+            author_user_id=author.id,
+            content={"caption": "Assigned to A", "visibility": "public"},
+            state=PostState.processing,
+            moderator_id=moderator_a.id,
+        )
+        post_for_b = Post(
+            author_user_id=author.id,
+            content={"caption": "Assigned to B", "visibility": "public"},
+            state=PostState.processing,
+            moderator_id=moderator_b.id,
+        )
+        session.add_all([post_for_a, post_for_b])
+        await session.commit()
+
+    async with async_session_factory() as session:
+        only_a = await list_processing_posts_service(session, moderator_id=moderator_a.id)
+        assert only_a["totalItems"] == 1
+        assert only_a["items"][0]["caption"] == "Assigned to A"
+        assert only_a["items"][0]["moderator_id"] == moderator_a.id
+
+        all_processing = await list_processing_posts_service(session, moderator_id=None)
+        captions = {item["caption"] for item in all_processing["items"]}
+        assert {"Assigned to A", "Assigned to B"}.issubset(captions)
+
+
+@pytest.mark.asyncio
+async def test_processing_posts_route_filters_for_moderator_and_allows_superadmin(test_users) -> None:
+    author, moderator_a = test_users
+    moderator_b = User(
+        email="pytest_feed_mod_b@example.com",
+        role="moderator",
+        firebase_uid=f"uid-feed-mod-b-{uuid.uuid4()}",
+        status="active",
+    )
+    superadmin_id = uuid.uuid4()
+
+    async with async_session_factory() as session:
+        session.add(moderator_b)
+        await session.commit()
+        await session.refresh(moderator_b)
+
+        post_for_a = Post(
+            author_user_id=author.id,
+            content={"caption": "Route assigned to A", "visibility": "public"},
+            state=PostState.processing,
+            moderator_id=moderator_a.id,
+        )
+        post_for_b = Post(
+            author_user_id=author.id,
+            content={"caption": "Route assigned to B", "visibility": "public"},
+            state=PostState.processing,
+            moderator_id=moderator_b.id,
+        )
+        session.add_all([post_for_a, post_for_b])
+        await session.commit()
+
+    app.dependency_overrides[get_current_moderator] = (
+        lambda: SimpleNamespace(id=moderator_a.id, role="moderator")
+    )
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            moderator_response = await ac.get("/api/v1/posts/processing")
+            assert moderator_response.status_code == 200
+            moderator_body = moderator_response.json()
+            assert moderator_body["data"]["totalItems"] == 1
+            assert moderator_body["data"]["items"][0]["caption"] == "Route assigned to A"
+    finally:
+        app.dependency_overrides.pop(get_current_moderator, None)
+
+    app.dependency_overrides[get_current_moderator] = (
+        lambda: SimpleNamespace(id=superadmin_id, role="superadmin")
+    )
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            superadmin_response = await ac.get("/api/v1/posts/processing")
+            assert superadmin_response.status_code == 200
+            superadmin_body = superadmin_response.json()
+            captions = {item["caption"] for item in superadmin_body["data"]["items"]}
+            assert {"Route assigned to A", "Route assigned to B"}.issubset(captions)
+    finally:
+        app.dependency_overrides.pop(get_current_moderator, None)
+
+
+@pytest.mark.asyncio
 async def test_get_post_service_visibility(test_users) -> None:
     user, other = test_users
     payload = SavePostRequest(
@@ -715,19 +922,85 @@ async def test_get_feed_service_success(test_users) -> None:
     user, other = test_users
     
     async with async_session_factory() as session:
+        user_profile = Profile(
+            user_id=user.id,
+            first_name="Feed",
+            last_name="User",
+            profile_photo_url="profiles/feed-user.jpg",
+        )
+        other_profile = Profile(
+            user_id=other.id,
+            first_name="Other",
+            last_name="User",
+            profile_photo_url="profiles/other-user.jpg",
+        )
         p1 = Post(author_user_id=user.id, content={"caption": "Draft Post"}, state=PostState.draft)
         p2 = Post(author_user_id=user.id, content={"caption": "Published Post 1"}, state=PostState.published)
         p3 = Post(author_user_id=other.id, content={"caption": "Published Post 2"}, state=PostState.published)
         p4 = Post(author_user_id=other.id, content={"caption": "Hidden Post"}, state=PostState.hidden)
-        session.add_all([p1, p2, p3, p4])
+        session.add_all([user_profile, other_profile, p1, p2, p3, p4])
         await session.commit()
         
     async with async_session_factory() as session:
         feed = await get_feed_service(user.id, session)
-        assert len(feed) == 2
+        assert len(feed) >= 2
         captions = {f.caption for f in feed}
         assert "Published Post 1" in captions
         assert "Published Post 2" in captions
+        formatted = [format_post_detail(post) for post in feed]
+        by_caption = {item["content"]["caption"]: item for item in formatted}
+        assert by_caption["Published Post 1"]["first_name"] == "Feed"
+        assert by_caption["Published Post 1"]["last_name"] == "User"
+        assert by_caption["Published Post 1"]["profile_photo_url"].endswith("/static/uploads/profiles/feed-user.jpg")
+        assert by_caption["Published Post 2"]["first_name"] == "Other"
+
+
+@pytest.mark.asyncio
+async def test_feed_route_accessible_to_superadmin_and_includes_author_profile(test_users) -> None:
+    user, _ = test_users
+    superadmin = SimpleNamespace(id=user.id, role="superadmin")
+
+    async with async_session_factory() as session:
+        profile = Profile(
+            user_id=user.id,
+            first_name="Admin",
+            last_name="Feed",
+            profile_photo_url="profiles/admin-feed.jpg",
+        )
+        post = Post(
+            author_user_id=user.id,
+            content={"caption": "Admin accessible feed", "visibility": "public"},
+            state=PostState.published,
+        )
+        session.add_all([profile, post])
+        await session.commit()
+
+    async def _override_get_current_user():
+        return superadmin
+
+    async def _fail_if_app_user_dependency_runs():
+        raise AssertionError("Feed route should not require app-user-only auth")
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    app.dependency_overrides[get_current_app_user] = _fail_if_app_user_dependency_runs
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.get("/api/v1/feed")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] is True
+            matching = [
+                item for item in body["data"]
+                if item["content"]["caption"] == "Admin accessible feed"
+            ]
+            assert len(matching) == 1
+            assert matching[0]["first_name"] == "Admin"
+            assert matching[0]["last_name"] == "Feed"
+            assert matching[0]["profile_photo_url"].endswith("/static/uploads/profiles/admin-feed.jpg")
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_current_app_user, None)
 
 
 @pytest.mark.asyncio

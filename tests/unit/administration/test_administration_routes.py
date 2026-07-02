@@ -356,7 +356,8 @@ def test_update_user_profile_route(monkeypatch) -> None:
 
 
 def test_list_processing_posts_route(monkeypatch) -> None:
-    async def _mock_list_processing_posts(_db, page=None, page_size=None):
+    async def _mock_list_processing_posts(_db, moderator_id=None, page=None, page_size=None):
+        _ = moderator_id
         return {
             "items": [
                 {

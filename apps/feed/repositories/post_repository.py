@@ -13,13 +13,14 @@ _PUBLISH_REVIEW_STATES = (PostState.published, PostState.hidden)
 
 
 def _build_reviewed_posts_filter(
-    moderator_id: UUID,
+    moderator_id: UUID | None,
     status: Literal["publish", "flag"] | None,
 ):
     filters = [
         Post.is_moderator_reviewed.is_(True),
-        Post.moderator_id == moderator_id,
     ]
+    if moderator_id is not None:
+        filters.append(Post.moderator_id == moderator_id)
     if status == "publish":
         filters.append(Post.state.in_(_PUBLISH_REVIEW_STATES))
     elif status == "flag":
@@ -29,7 +30,7 @@ def _build_reviewed_posts_filter(
 
 async def count_reviewed_posts_for_moderator(
     db: AsyncSession,
-    moderator_id: UUID,
+    moderator_id: UUID | None,
     status: Literal["publish", "flag"] | None = None,
 ) -> int:
     filters = _build_reviewed_posts_filter(moderator_id, status)
@@ -39,7 +40,7 @@ async def count_reviewed_posts_for_moderator(
 
 async def fetch_reviewed_posts_for_moderator(
     db: AsyncSession,
-    moderator_id: UUID,
+    moderator_id: UUID | None,
     *,
     status: Literal["publish", "flag"] | None = None,
     offset: int = 0,

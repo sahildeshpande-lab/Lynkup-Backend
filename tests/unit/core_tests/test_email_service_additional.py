@@ -13,8 +13,10 @@ from core.email_service import (
     build_account_created_email_html,
     build_temporary_password_email_html,
     build_password_changed_email_html,
+    build_post_review_email_html,
     build_lynkup_response_email_html,
     send_lynkup_response_email,
+    send_post_review_email,
     send_temporary_password_email,
     send_password_changed_email,
     send_notification_email,
@@ -58,6 +60,9 @@ async def test_all_email_builders_and_senders():
     html_lynk = build_lynkup_response_email_html("John Doe", "accepted")
     assert "John Doe" in html_lynk
 
+    html_review = build_post_review_email_html("John Doe", "flag")
+    assert "Please Review Your Post" in html_review
+
     # 2. Test senders (which queue or send immediately)
     async with async_session_factory() as session:
         await session.execute(text("DELETE FROM transactional_email_log WHERE \"to\" LIKE 'test_add_email_%'"))
@@ -66,6 +71,9 @@ async def test_all_email_builders_and_senders():
     # Queue emails (returns True and inserts into DB with is_sent = False)
     res1 = await send_lynkup_response_email("test_add_email_1@example.com", "accepted", "John Doe")
     assert res1 is True
+
+    res_review = await send_post_review_email("test_add_email_review@example.com", "publish", "John Doe")
+    assert res_review is True
 
     res2 = await send_temporary_password_email("test_add_email_2@example.com", "temp_pass", "John Doe", "user")
     assert res2 is True

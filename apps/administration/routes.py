@@ -242,8 +242,14 @@ async def list_processing_posts(
     current_user=Depends(get_current_moderator),
 ) -> ApiResponse:
     from apps.feed.services import list_processing_posts_service
-    _ = current_user
-    data = await list_processing_posts_service(db, page=page, page_size=pageSize)
+    role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    moderator_id = None if role == "superadmin" else current_user.id
+    data = await list_processing_posts_service(
+        db,
+        moderator_id=moderator_id,
+        page=page,
+        page_size=pageSize,
+    )
     return ApiResponse(message="Processing posts fetched successfully", data=data)
 
 
@@ -265,7 +271,7 @@ async def list_reviewed_posts(
     from apps.feed.services import list_reviewed_posts_service
     from common.exceptions import ApiError
 
-    target_moderator_id = current_user.id
+    target_moderator_id = None if current_user.role == "superadmin" else current_user.id
     if moderator_id is not None:
         if current_user.role != "superadmin":
             raise ApiError("Insufficient permissions")
