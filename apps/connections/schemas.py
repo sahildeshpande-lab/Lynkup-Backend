@@ -23,6 +23,10 @@ class ConnectionRequestRespond(BaseModel):
     response: LynkupResponse
 
 
+class ConnectionRemoveRequest(BaseModel):
+    user_id: UUID
+
+
 class FollowRequest(BaseModel):
     following_user_id: str
 

@@ -658,8 +658,18 @@ async def test_list_reviewed_posts_service_filters_by_moderator_and_action(test_
 @pytest.mark.asyncio
 async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
     author, moderator = test_users
+    other_moderator = User(
+        email="pytest_feed_mod_b@example.com",
+        role="moderator",
+        firebase_uid=f"uid-feed-mod-b-{uuid.uuid4()}",
+        status="active",
+    )
 
     async with async_session_factory() as session:
+        session.add(other_moderator)
+        await session.commit()
+        await session.refresh(other_moderator)
+
         reviewed_post = Post(
             author_user_id=author.id,
             content={"caption": "Reviewed via route", "visibility": "public"},
@@ -667,7 +677,14 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
             is_moderator_reviewed=True,
             moderator_id=moderator.id,
         )
-        session.add(reviewed_post)
+        other_reviewed_post = Post(
+            author_user_id=author.id,
+            content={"caption": "Other moderator reviewed", "visibility": "public"},
+            state=PostState.published,
+            is_moderator_reviewed=True,
+            moderator_id=other_moderator.id,
+        )
+        session.add_all([reviewed_post, other_reviewed_post])
         await session.commit()
 
     async def _override_get_current_moderator():
@@ -682,15 +699,24 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
             body = response.json()
             assert body["status"] is True
             assert body["message"] == "Posts fetched successfully"
-            assert len(body["data"]["items"]) == 1
-            assert body["data"]["items"][0]["caption"] == "Reviewed via route"
-            assert body["data"]["items"][0]["review_status"] == "publish"
+            captions = {item["caption"] for item in body["data"]["items"]}
+            assert {"Reviewed via route", "Other moderator reviewed"}.issubset(captions)
+
+            filtered_response = await ac.get(
+                "/api/v1/admin/posts/reviewed",
+                params={"status": "publish", "moderator_id": str(other_moderator.id)},
+            )
+            assert filtered_response.status_code == 200
+            filtered_body = filtered_response.json()
+            filtered_captions = {item["caption"] for item in filtered_body["data"]["items"]}
+            assert "Other moderator reviewed" in filtered_captions
+            assert "Reviewed via route" not in filtered_captions
     finally:
         app.dependency_overrides.pop(get_current_moderator, None)
 
 
 @pytest.mark.asyncio
-async def test_superadmin_reviewed_posts_status_filter_without_moderator_id(test_users) -> None:
+async def test_reviewed_posts_status_filter_without_moderator_id_returns_all(test_users) -> None:
     author, moderator_a = test_users
     moderator_b = User(
         email="pytest_feed_mod_b@example.com",
@@ -698,18 +724,10 @@ async def test_superadmin_reviewed_posts_status_filter_without_moderator_id(test
         firebase_uid=f"uid-feed-mod-b-{uuid.uuid4()}",
         status="active",
     )
-    superadmin = User(
-        email="pytest_feed_superadmin@example.com",
-        role="superadmin",
-        firebase_uid=f"uid-feed-superadmin-{uuid.uuid4()}",
-        status="active",
-    )
-
     async with async_session_factory() as session:
-        session.add_all([moderator_b, superadmin])
+        session.add(moderator_b)
         await session.commit()
         await session.refresh(moderator_b)
-        await session.refresh(superadmin)
 
         published_by_a = Post(
             author_user_id=author.id,
@@ -736,7 +754,7 @@ async def test_superadmin_reviewed_posts_status_filter_without_moderator_id(test
         await session.commit()
 
     async def _override_get_current_moderator():
-        return SimpleNamespace(id=superadmin.id, role="superadmin")
+        return SimpleNamespace(id=moderator_a.id, role="moderator")
 
     app.dependency_overrides[get_current_moderator] = _override_get_current_moderator
     try:

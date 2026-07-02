@@ -164,6 +164,34 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
 
     return success_response(f"Request {response} successfully.", req, response_cls=ApiResponse)
 
+
+async def remove_connection(
+    db: AsyncSession,
+    current_user_id: UUID,
+    other_user_id: UUID,
+) -> ApiResponse:
+    """Remove an accepted connection and decrement both users' connection counts."""
+    if current_user_id == other_user_id:
+        return error_response("Connection not found", response_cls=ApiResponse)
+
+    from apps.connections.repositories import delete_connection, get_active_connection_between
+    from apps.profiles.services.profile_stats_service import decrement_connection_counts_for_users
+
+    connection = await get_active_connection_between(db, current_user_id, other_user_id)
+    if connection is None:
+        return error_response("Connection not found", response_cls=ApiResponse)
+
+    try:
+        await delete_connection(db, connection)
+        await decrement_connection_counts_for_users(db, current_user_id, other_user_id)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise ApiError("Failed to remove connection")
+
+    return success_response("Connection removed successfully", response_cls=ApiResponse)
+
+
 async def get_pending_requests(
     db: AsyncSession,
     user_id: UUID,

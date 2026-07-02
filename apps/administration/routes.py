@@ -261,7 +261,7 @@ async def list_reviewed_posts(
     ),
     moderator_id: str | None = Query(
         default=None,
-        description="Filter posts reviewed by a specific moderator (superadmin only)",
+        description="Filter posts reviewed by a specific moderator",
     ),
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
@@ -271,10 +271,9 @@ async def list_reviewed_posts(
     from apps.feed.services import list_reviewed_posts_service
     from common.exceptions import ApiError
 
-    target_moderator_id = None if current_user.role == "superadmin" else current_user.id
+    _ = current_user
+    target_moderator_id = None
     if moderator_id is not None:
-        if current_user.role != "superadmin":
-            raise ApiError("Insufficient permissions")
         try:
             target_moderator_id = UUID(moderator_id)
         except ValueError as exc:

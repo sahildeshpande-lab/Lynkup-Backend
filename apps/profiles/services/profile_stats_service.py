@@ -52,3 +52,18 @@ async def increment_connection_counts_for_users(
             continue
         stats = await get_or_create_profile_stats(db, profile.id)
         stats.connection_count += 1
+
+
+async def decrement_connection_counts_for_users(
+    db: AsyncSession,
+    user_id_1: UUID,
+    user_id_2: UUID,
+) -> None:
+    """Decrease connection counts for both users without going below zero."""
+    for user_id in (user_id_1, user_id_2):
+        profile_result = await db.execute(select(Profile).where(Profile.user_id == user_id))
+        profile = profile_result.scalar_one_or_none()
+        if not profile:
+            continue
+        stats = await get_or_create_profile_stats(db, profile.id)
+        stats.connection_count = max((stats.connection_count or 0) - 1, 0)

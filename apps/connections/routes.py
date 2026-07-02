@@ -17,6 +17,7 @@ from apps.connections.services import (
     get_pending_requests as get_pending_requests_service,
     get_connections_service,
     get_recommendations,
+    remove_connection as remove_connection_service,
     respond_connection_request as respond_connection_request_service,
     send_connection_request,
     unblock_user as unblock_user_service,
@@ -25,6 +26,7 @@ from apps.connections.services import (
 from .schemas import (
     ApiResponse,
     ConnectionRequestCreate,
+    ConnectionRemoveRequest,
     ConnectionRequestRespond,
     FollowRequest,
     BlockRequest,
@@ -53,6 +55,15 @@ async def respond_connection_request(
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
     return await respond_connection_request_service(db, current_user.id, UUID(request.receiver_user_id), request.response)
+
+
+@router.delete("/lynkupremove", response_model=ApiResponse)
+async def remove_connection(
+    request: ConnectionRemoveRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> ApiResponse:
+    return await remove_connection_service(db, current_user.id, request.user_id)
 
 
 @router.post("/follow", response_model=ApiResponse)

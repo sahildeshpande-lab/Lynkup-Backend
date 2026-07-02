@@ -419,3 +419,88 @@ async def test_lynkupresponse_accept_increments_connection_count_via_api(test_us
         )).scalar_one()
         assert primary_stats.connection_count == 1
         assert alice_stats.connection_count == 1
+
+
+@pytest.mark.asyncio
+async def test_lynkupremove_deletes_connection_and_decrements_counts(test_users) -> None:
+    primary, users = test_users
+    alice = users[0]
+    low_id, high_id = build_connection_pair(primary.id, alice.id)
+
+    async with async_session_factory() as session:
+        primary_profile = (await session.execute(
+            select(Profile).where(Profile.user_id == primary.id)
+        )).scalar_one()
+        alice_profile = (await session.execute(
+            select(Profile).where(Profile.user_id == alice.id)
+        )).scalar_one()
+        primary_profile_id = primary_profile.id
+        alice_profile_id = alice_profile.id
+        session.add(Connection(user_low_id=low_id, user_high_id=high_id, is_active=True))
+        session.add(ProfileStats(profile_id=primary_profile_id, connection_count=1))
+        session.add(ProfileStats(profile_id=alice_profile_id, connection_count=1))
+        await session.commit()
+
+    async def _override_get_current_user():
+        return primary
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.request(
+                "DELETE",
+                "/api/v1/lynkupremove",
+                json={"user_id": str(alice.id)},
+            )
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] is True
+            assert body["message"] == "Connection removed successfully"
+            assert body["data"] is None
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    async with async_session_factory() as session:
+        connection = (await session.execute(
+            select(Connection).where(
+                Connection.user_low_id == low_id,
+                Connection.user_high_id == high_id,
+            )
+        )).scalar_one_or_none()
+        assert connection is None
+
+        primary_stats = (await session.execute(
+            select(ProfileStats).where(ProfileStats.profile_id == primary_profile_id)
+        )).scalar_one()
+        alice_stats = (await session.execute(
+            select(ProfileStats).where(ProfileStats.profile_id == alice_profile_id)
+        )).scalar_one()
+        assert primary_stats.connection_count == 0
+        assert alice_stats.connection_count == 0
+
+
+@pytest.mark.asyncio
+async def test_lynkupremove_returns_not_found_without_connection(test_users) -> None:
+    primary, users = test_users
+    alice = users[0]
+
+    async def _override_get_current_user():
+        return primary
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.request(
+                "DELETE",
+                "/api/v1/lynkupremove",
+                json={"user_id": str(alice.id)},
+            )
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] is False
+            assert body["message"] == "Connection not found"
+            assert body["data"] is None
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
