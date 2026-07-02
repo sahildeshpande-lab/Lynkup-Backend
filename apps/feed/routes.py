@@ -17,6 +17,8 @@ from apps.feed.services import (
     publish_post_service,
     get_post_service,
     delete_post_service,
+    list_draft_posts_service,
+    delete_draft_post_service,
     list_user_posts_service,
     get_feed_service,
     format_post_detail,
@@ -124,6 +126,36 @@ async def list_user_posts(
         [format_post_detail(p) for p in posts],
         response_cls=ApiResponse,
     )
+
+
+@router.get("/draftpost", response_model=ApiResponse)
+async def list_draft_posts(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    posts = await list_draft_posts_service(
+        user_id=current_user.id,
+        db=db,
+    )
+    return success_response(
+        "Draft posts retrieved successfully",
+        [format_post_detail(p) for p in posts],
+        response_cls=ApiResponse,
+    )
+
+
+@router.delete("/draftpost", response_model=ApiResponse)
+async def delete_draft_post(
+    payload: DeletePostRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    await delete_draft_post_service(
+        post_id=payload.id,
+        user_id=current_user.id,
+        db=db,
+    )
+    return success_response("Draft post deleted successfully", response_cls=ApiResponse)
 
 
 @router.get("/feed", response_model=ApiResponse)

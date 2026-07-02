@@ -407,6 +407,49 @@ async def get_post_service(
 
     return post
 
+async def list_draft_posts_service(
+    user_id: UUID,
+    db: AsyncSession,
+) -> list[Post]:
+    """Return draft posts owned by the authenticated user."""
+    stmt = (
+        select(Post)
+        .where(Post.author_user_id == user_id, Post.state == PostState.draft)
+        .order_by(Post.updated_at.desc())
+    )
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def delete_draft_post_service(
+    post_id: UUID,
+    user_id: UUID,
+    db: AsyncSession,
+) -> Post:
+    """Soft-delete a draft post owned by the authenticated user."""
+    result = await db.execute(select(Post).where(Post.id == post_id))
+    post = result.scalar_one_or_none()
+
+    if not post:
+        raise ApiError("Post not found")
+    if post.author_user_id != user_id:
+        raise ApiError("Post does not belong to the authenticated user")
+    if post.state != PostState.draft:
+        raise ApiError("Only draft posts can be deleted through this endpoint")
+
+    post.state = PostState.deleted
+    post.updated_at = utc_now()
+
+    try:
+        await db.commit()
+        await db.refresh(post)
+    except Exception:
+        await db.rollback()
+        raise ApiError("Failed to delete draft post")
+
+    return post
+
+
 async def delete_post_service(
     post_id: UUID,
     user_id: UUID,

@@ -371,3 +371,51 @@ async def test_lynkup_accept_increments_connection_count(test_users) -> None:
         )).scalar_one()
         assert primary_stats.connection_count == 1
         assert alice_stats.connection_count == 1
+
+
+@pytest.mark.asyncio
+async def test_lynkupresponse_accept_increments_connection_count_via_api(test_users) -> None:
+    primary, users = test_users
+    alice = users[0]
+
+    async with async_session_factory() as session:
+        primary_profile = (await session.execute(
+            select(Profile).where(Profile.user_id == primary.id)
+        )).scalar_one()
+        alice_profile = (await session.execute(
+            select(Profile).where(Profile.user_id == alice.id)
+        )).scalar_one()
+        primary_profile_id = primary_profile.id
+        alice_profile_id = alice_profile.id
+        session.add(ProfileStats(profile_id=primary_profile_id, connection_count=0))
+        session.add(ProfileStats(profile_id=alice_profile_id, connection_count=0))
+        await session.commit()
+
+    async def _override_get_current_user():
+        return primary
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.post(
+                "/api/v1/lynkupresponse",
+                json={
+                    "receiver_user_id": str(alice.id),
+                    "response": "accepted",
+                },
+            )
+            assert response.status_code == 200
+            assert response.json()["status"] is True
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    async with async_session_factory() as session:
+        primary_stats = (await session.execute(
+            select(ProfileStats).where(ProfileStats.profile_id == primary_profile_id)
+        )).scalar_one()
+        alice_stats = (await session.execute(
+            select(ProfileStats).where(ProfileStats.profile_id == alice_profile_id)
+        )).scalar_one()
+        assert primary_stats.connection_count == 1
+        assert alice_stats.connection_count == 1

@@ -29,6 +29,8 @@ from apps.feed.services import (
     admin_publish_post_service,
     get_post_service,
     delete_post_service,
+    list_draft_posts_service,
+    delete_draft_post_service,
     list_user_posts_service,
     get_feed_service,
 )
@@ -677,3 +679,127 @@ async def test_routes_post_management_flow(test_users) -> None:
     finally:
         app.dependency_overrides.pop(get_current_user, None)
         app.dependency_overrides.pop(get_current_moderator, None)
+
+
+@pytest.mark.asyncio
+async def test_list_draft_posts_service_returns_only_drafts(test_users) -> None:
+    user, other = test_users
+
+    async with async_session_factory() as session:
+        draft = Post(
+            author_user_id=user.id,
+            content={"caption": "My Draft", "visibility": "public"},
+            state=PostState.draft,
+        )
+        published = Post(
+            author_user_id=user.id,
+            content={"caption": "My Published", "visibility": "public"},
+            state=PostState.published,
+        )
+        other_draft = Post(
+            author_user_id=other.id,
+            content={"caption": "Other Draft", "visibility": "public"},
+            state=PostState.draft,
+        )
+        session.add_all([draft, published, other_draft])
+        await session.commit()
+
+    async with async_session_factory() as session:
+        drafts = await list_draft_posts_service(user.id, session)
+        assert len(drafts) == 1
+        assert drafts[0].caption == "My Draft"
+        assert drafts[0].state == PostState.draft
+
+
+@pytest.mark.asyncio
+async def test_delete_draft_post_service_success(test_users) -> None:
+    user, _ = test_users
+
+    async with async_session_factory() as session:
+        draft = Post(
+            author_user_id=user.id,
+            content={"caption": "Delete Draft", "visibility": "public"},
+            state=PostState.draft,
+        )
+        session.add(draft)
+        await session.commit()
+        await session.refresh(draft)
+        draft_id = draft.id
+
+    async with async_session_factory() as session:
+        await delete_draft_post_service(draft_id, user.id, session)
+
+    async with async_session_factory() as session:
+        post = await get_post_service(draft_id, user.id, session)
+        assert post.state == PostState.deleted
+
+
+@pytest.mark.asyncio
+async def test_delete_draft_post_service_rejects_non_draft(test_users) -> None:
+    user, _ = test_users
+
+    async with async_session_factory() as session:
+        published = Post(
+            author_user_id=user.id,
+            content={"caption": "Published", "visibility": "public"},
+            state=PostState.published,
+        )
+        session.add(published)
+        await session.commit()
+        await session.refresh(published)
+        post_id = published.id
+
+    async with async_session_factory() as session:
+        with pytest.raises(ApiError) as exc_info:
+            await delete_draft_post_service(post_id, user.id, session)
+        assert "Only draft posts" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_draftpost_routes_via_test_client(test_users) -> None:
+    user, other = test_users
+
+    async with async_session_factory() as session:
+        draft = Post(
+            author_user_id=user.id,
+            content={"caption": "Route Draft", "content_html": "<p>draft</p>", "visibility": "public"},
+            state=PostState.draft,
+        )
+        published = Post(
+            author_user_id=user.id,
+            content={"caption": "Route Published", "visibility": "public"},
+            state=PostState.published,
+        )
+        session.add_all([draft, published])
+        await session.commit()
+        await session.refresh(draft)
+        await session.refresh(published)
+        draft_id = draft.id
+        published_id = published.id
+
+    async def _override_get_current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            list_res = await ac.get("/api/v1/draftpost")
+            assert list_res.status_code == 200
+            body = list_res.json()
+            assert body["status"] is True
+            assert len(body["data"]) == 1
+            assert body["data"][0]["id"] == str(draft_id)
+            assert body["data"][0]["state"] == "draft"
+
+            delete_res = await ac.request("DELETE", "/api/v1/draftpost", json={"id": str(draft_id)})
+            assert delete_res.status_code == 200
+            assert delete_res.json()["message"] == "Draft post deleted successfully"
+
+            delete_published = await ac.request(
+                "DELETE", "/api/v1/draftpost", json={"id": str(published_id)}
+            )
+            assert delete_published.status_code == 200
+            assert delete_published.json()["status"] is False
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
