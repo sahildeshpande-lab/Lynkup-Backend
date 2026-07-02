@@ -71,6 +71,25 @@ async def _assign_moderator_if_processing(
         return
     post.moderator_id = await assign_next_moderator_round_robin(db)
 
+
+async def _soft_delete_other_drafts(
+    db: AsyncSession,
+    user_id: UUID,
+    *,
+    exclude_post_id: UUID | None = None,
+) -> None:
+    stmt = select(Post).where(
+        Post.author_user_id == user_id,
+        Post.state == PostState.draft,
+    )
+    if exclude_post_id is not None:
+        stmt = stmt.where(Post.id != exclude_post_id)
+
+    result = await db.execute(stmt)
+    for draft in result.scalars().all():
+        draft.state = PostState.deleted
+        draft.updated_at = utc_now()
+
 async def save_post_service(
     user_id: UUID,
     payload: SavePostRequest,
@@ -102,10 +121,7 @@ async def save_post_service(
         raise ApiError(str(exc))
 
     # Determine state
-    if payload.id is not None and payload.is_draft:
-        post_state = PostState.hidden if payload.content.visibility == "hidden" else PostState.draft
-    else:
-        post_state = PostState.processing
+    post_state = PostState.draft if payload.is_draft else PostState.processing
 
     # ----- CREATE -----
     if payload.id is None:
@@ -115,9 +131,12 @@ async def save_post_service(
             state=post_state,
             revision_number=1,
         )
-        db.add(post)
 
         try:
+            if post_state == PostState.draft:
+                await _soft_delete_other_drafts(db, user_id)
+
+            db.add(post)
             await db.flush()
 
             if payload.media:
@@ -164,6 +183,9 @@ async def save_post_service(
     post.updated_at = utc_now()
 
     try:
+        if post_state == PostState.draft:
+            await _soft_delete_other_drafts(db, user_id, exclude_post_id=post.id)
+
         if payload.media is not None:
             await _verify_and_attach_media(
                 post_id=post.id,
@@ -616,7 +638,7 @@ async def list_processing_posts_service(
 async def list_reviewed_posts_service(
     db: AsyncSession,
     moderator_id: UUID,
-    action: Literal["publish", "flag"] | None = None,
+    status: Literal["publish", "flag"] | None = None,
     page: int | None = None,
     page_size: int | None = None,
 ) -> dict:
@@ -626,7 +648,7 @@ async def list_reviewed_posts_service(
         fetch_reviewed_posts_for_moderator,
     )
 
-    total_items = await count_reviewed_posts_for_moderator(db, moderator_id, action)
+    total_items = await count_reviewed_posts_for_moderator(db, moderator_id, status)
 
     p = page or 1
     if page is None and page_size is None:
@@ -641,7 +663,7 @@ async def list_reviewed_posts_service(
     posts = await fetch_reviewed_posts_for_moderator(
         db,
         moderator_id,
-        action=action,
+        status=status,
         offset=offset,
         limit=limit,
     )

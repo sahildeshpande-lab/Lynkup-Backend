@@ -392,8 +392,8 @@ def test_list_processing_posts_route(monkeypatch) -> None:
 
 
 def test_list_reviewed_posts_route(monkeypatch) -> None:
-    async def _mock_list_reviewed_posts(_db, moderator_id, action=None, page=None, page_size=None):
-        _ = (moderator_id, action, page, page_size)
+    async def _mock_list_reviewed_posts(_db, moderator_id, status=None, page=None, page_size=None):
+        _ = (moderator_id, status, page, page_size)
         return {
             "items": [
                 {
@@ -421,7 +421,7 @@ def test_list_reviewed_posts_route(monkeypatch) -> None:
     import apps.feed.services as feed_services
     monkeypatch.setattr(feed_services, "list_reviewed_posts_service", _mock_list_reviewed_posts)
 
-    response = client.get("/api/v1/admin/posts/reviewed", params={"action": "publish", "page": 1, "pageSize": 10})
+    response = client.get("/api/v1/admin/posts/reviewed", params={"status": "publish", "page": 1, "pageSize": 10})
 
     assert response.status_code == 200
     body = response.json()

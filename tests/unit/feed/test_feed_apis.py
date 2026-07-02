@@ -292,6 +292,87 @@ async def test_create_post_service_visibility_hidden(test_users) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_post_service_saves_draft_when_requested(test_users) -> None:
+    user, _ = test_users
+
+    payload = SavePostRequest(
+        is_draft=True,
+        content=PostContentPayload(caption="Draft from create", visibility="public"),
+        media=[],
+    )
+
+    async with async_session_factory() as session:
+        post = await save_post_service(user.id, payload, session)
+        assert post.state == PostState.draft
+
+    async with async_session_factory() as session:
+        drafts = await list_draft_posts_service(user.id, session)
+        assert len(drafts) == 1
+        assert drafts[0].caption == "Draft from create"
+
+
+@pytest.mark.asyncio
+async def test_create_draft_replaces_existing_draft(test_users) -> None:
+    user, _ = test_users
+
+    first_payload = SavePostRequest(
+        is_draft=True,
+        content=PostContentPayload(caption="First draft", visibility="public"),
+        media=[],
+    )
+    second_payload = SavePostRequest(
+        is_draft=True,
+        content=PostContentPayload(caption="Second draft", visibility="public"),
+        media=[],
+    )
+
+    async with async_session_factory() as session:
+        first = await save_post_service(user.id, first_payload, session)
+        first_id = first.id
+
+    async with async_session_factory() as session:
+        second = await save_post_service(user.id, second_payload, session)
+        second_id = second.id
+
+    async with async_session_factory() as session:
+        drafts = await list_draft_posts_service(user.id, session)
+        assert len(drafts) == 1
+        assert drafts[0].id == second_id
+        assert drafts[0].caption == "Second draft"
+
+        old_draft = (await session.execute(select(Post).where(Post.id == first_id))).scalar_one()
+        assert old_draft.state == PostState.deleted
+
+
+@pytest.mark.asyncio
+async def test_create_processing_post_leaves_existing_draft(test_users) -> None:
+    user, _ = test_users
+
+    draft_payload = SavePostRequest(
+        is_draft=True,
+        content=PostContentPayload(caption="Keep draft", visibility="public"),
+        media=[],
+    )
+    processing_payload = SavePostRequest(
+        is_draft=False,
+        content=PostContentPayload(caption="Processing post", visibility="public"),
+        media=[],
+    )
+
+    async with async_session_factory() as session:
+        draft = await save_post_service(user.id, draft_payload, session)
+        processing = await save_post_service(user.id, processing_payload, session)
+
+        assert draft.state == PostState.draft
+        assert processing.state == PostState.processing
+
+    async with async_session_factory() as session:
+        drafts = await list_draft_posts_service(user.id, session)
+        assert len(drafts) == 1
+        assert drafts[0].caption == "Keep draft"
+
+
+@pytest.mark.asyncio
 async def test_create_post_service_unauthorized_media(test_users) -> None:
     user, other = test_users
 
@@ -520,15 +601,15 @@ async def test_list_reviewed_posts_service_filters_by_moderator_and_action(test_
         captions = {item["caption"] for item in all_for_a["items"]}
         assert captions == {"Published by A", "Flagged by A"}
 
-        publish_only = await list_reviewed_posts_service(session, moderator_a.id, action="publish")
+        publish_only = await list_reviewed_posts_service(session, moderator_a.id, status="publish")
         assert len(publish_only["items"]) == 1
         assert publish_only["items"][0]["review_status"] == "publish"
 
-        flag_only = await list_reviewed_posts_service(session, moderator_a.id, action="flag")
+        flag_only = await list_reviewed_posts_service(session, moderator_a.id, status="flag")
         assert len(flag_only["items"]) == 1
         assert flag_only["items"][0]["review_status"] == "flag"
 
-        publish_for_a = await list_reviewed_posts_service(session, moderator_a.id, action="publish")
+        publish_for_a = await list_reviewed_posts_service(session, moderator_a.id, status="publish")
         assert all(item["caption"] != "Published by B" for item in publish_for_a["items"])
 
 
@@ -554,7 +635,7 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
-            response = await ac.get("/api/v1/admin/posts/reviewed", params={"action": "publish"})
+            response = await ac.get("/api/v1/admin/posts/reviewed", params={"status": "publish"})
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
@@ -901,5 +982,36 @@ async def test_draftpost_routes_via_test_client(test_users) -> None:
             )
             assert delete_published.status_code == 200
             assert delete_published.json()["status"] is False
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_create_draft_route_returns_draftpost(test_users) -> None:
+    user, _ = test_users
+
+    async def _override_get_current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            create_res = await ac.post("/api/v1/post", json={
+                "is_draft": True,
+                "content": {
+                    "caption": "Route created draft",
+                },
+            })
+            assert create_res.status_code == 200
+            assert create_res.json()["message"] == "Post created and saved as draft"
+            draft_id = create_res.json()["data"]["id"]
+
+            list_res = await ac.get("/api/v1/draftpost")
+            assert list_res.status_code == 200
+            body = list_res.json()
+            assert len(body["data"]) == 1
+            assert body["data"][0]["id"] == draft_id
+            assert body["data"][0]["state"] == "draft"
     finally:
         app.dependency_overrides.pop(get_current_user, None)

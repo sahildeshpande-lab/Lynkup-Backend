@@ -58,10 +58,10 @@ async def save_post(
         payload=payload,
         db=db
     )
-    message = (
-        "Post created successfully" if payload.id is None
-        else ("Post updated and saved as draft" if payload.is_draft else "Post updated and processing")
-    )
+    if payload.id is None:
+        message = "Post created and saved as draft" if payload.is_draft else "Post created successfully"
+    else:
+        message = "Post updated and saved as draft" if payload.is_draft else "Post updated and processing"
     return success_response(
         message,
         {"id": post.id, "revision_number": post.revision_number},

@@ -56,11 +56,12 @@ class SavePostRequest(BaseModel):
     """
     Unified create / update-draft request.
 
-    - If ``id`` is omitted or null → create a new post (submitted for processing).
+    - If ``id`` is omitted or null → create a new post.
     - If ``id`` is provided → update the existing post.
 
-    ``is_draft``: when updating (``id`` provided), ``true`` saves as draft
-    (or hidden if visibility is ``hidden``); ``false`` submits for processing.
+    ``is_draft``: ``true`` saves as draft on create or update; ``false``
+    submits for processing. Saving a new draft replaces any existing draft
+    for the same user.
 
     ``revision_number`` is never sent by the frontend;
     the backend manages it entirely.

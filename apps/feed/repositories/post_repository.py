@@ -14,15 +14,15 @@ _PUBLISH_REVIEW_STATES = (PostState.published, PostState.hidden)
 
 def _build_reviewed_posts_filter(
     moderator_id: UUID,
-    action: Literal["publish", "flag"] | None,
+    status: Literal["publish", "flag"] | None,
 ):
     filters = [
         Post.is_moderator_reviewed.is_(True),
         Post.moderator_id == moderator_id,
     ]
-    if action == "publish":
+    if status == "publish":
         filters.append(Post.state.in_(_PUBLISH_REVIEW_STATES))
-    elif action == "flag":
+    elif status == "flag":
         filters.append(Post.state == PostState.flagged)
     return filters
 
@@ -30,9 +30,9 @@ def _build_reviewed_posts_filter(
 async def count_reviewed_posts_for_moderator(
     db: AsyncSession,
     moderator_id: UUID,
-    action: Literal["publish", "flag"] | None = None,
+    status: Literal["publish", "flag"] | None = None,
 ) -> int:
-    filters = _build_reviewed_posts_filter(moderator_id, action)
+    filters = _build_reviewed_posts_filter(moderator_id, status)
     stmt = select(func.count(Post.id)).where(*filters)
     return int((await db.execute(stmt)).scalar_one())
 
@@ -41,13 +41,13 @@ async def fetch_reviewed_posts_for_moderator(
     db: AsyncSession,
     moderator_id: UUID,
     *,
-    action: Literal["publish", "flag"] | None = None,
+    status: Literal["publish", "flag"] | None = None,
     offset: int = 0,
     limit: int | None = None,
 ) -> list[tuple[Post, object | None]]:
     from apps.profiles.db_models import Profile
 
-    filters = _build_reviewed_posts_filter(moderator_id, action)
+    filters = _build_reviewed_posts_filter(moderator_id, status)
     stmt = (
         select(Post, Profile)
         .outerjoin(Profile, Profile.user_id == Post.author_user_id)

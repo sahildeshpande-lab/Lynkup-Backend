@@ -249,9 +249,9 @@ async def list_processing_posts(
 
 @router.get("/admin/posts/reviewed", response_model=ApiResponse)
 async def list_reviewed_posts(
-    action: Literal["publish", "flag"] | None = Query(
+    status: Literal["publish", "flag"] | None = Query(
         default=None,
-        description="Filter reviewed posts by moderator action",
+        description="Filter reviewed posts by moderator status",
     ),
     moderator_id: str | None = Query(
         default=None,
@@ -277,7 +277,7 @@ async def list_reviewed_posts(
     data = await list_reviewed_posts_service(
         db,
         moderator_id=target_moderator_id,
-        action=action,
+        status=status,
         page=page,
         page_size=pageSize,
     )
