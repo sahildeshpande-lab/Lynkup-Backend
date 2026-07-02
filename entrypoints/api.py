@@ -72,15 +72,45 @@ def _error_json(message: str) -> dict:
     return error_response(message).model_dump()
 
 
+def _api_error_status_code(message: str) -> int:
+    lowered = message.lower()
+    if any(
+        phrase in lowered
+        for phrase in (
+            "missing access token",
+            "invalid access token",
+            "invalid firebase",
+        )
+    ):
+        return 401
+    if any(
+        phrase in lowered
+        for phrase in (
+            "account deleted",
+            "account is pending",
+            "account is suspended",
+            "account is banned",
+            "account is not active",
+            "insufficient permissions",
+        )
+    ):
+        return 403
+    return 200
+
+
 @app.exception_handler(HTTPException)
 async def legacy_http_exception_handler(_request, exc: HTTPException):
     detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-    return JSONResponse(status_code=200, content=_error_json(detail))
+    status_code = exc.status_code if exc.status_code in (401, 403) else 200
+    return JSONResponse(status_code=status_code, content=_error_json(detail))
 
 
 @app.exception_handler(ApiError)
 async def api_error_handler(_request, exc: ApiError):
-    return JSONResponse(status_code=200, content=_error_json(exc.message))
+    return JSONResponse(
+        status_code=_api_error_status_code(exc.message),
+        content=_error_json(exc.message),
+    )
 
 
 @app.exception_handler(RequestValidationError)
@@ -112,6 +142,24 @@ app.include_router(build_router())
 _original_openapi = app.openapi
 
 
+def _patch_multipart_file_schemas(schema: dict) -> None:
+    """Ensure Swagger UI renders multipart file fields as file pickers, not string arrays."""
+    components = schema.get("components", {}).get("schemas", {})
+    for body_schema in components.values():
+        if not isinstance(body_schema, dict):
+            continue
+        for prop in body_schema.get("properties", {}).values():
+            if not isinstance(prop, dict):
+                continue
+            if prop.get("type") == "array" and isinstance(prop.get("items"), dict):
+                items = prop["items"]
+                if items.get("type") == "string":
+                    prop["items"] = {"type": "string", "format": "binary"}
+            elif prop.get("type") == "string" and "contentMediaType" in prop:
+                prop["format"] = "binary"
+                prop.pop("contentMediaType", None)
+
+
 def custom_openapi() -> dict:
     if app.openapi_schema:
         return app.openapi_schema
@@ -123,6 +171,8 @@ def custom_openapi() -> dict:
         "bearerFormat": "JWT",
         "description": "Use Firebase ID token in the Authorization header (Format: Bearer <token>).",
     }
+
+    _patch_multipart_file_schemas(schema)
 
     app.openapi_schema = schema
     return schema

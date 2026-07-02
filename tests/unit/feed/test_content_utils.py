@@ -34,4 +34,8 @@ def test_validate_content_enforces_hashtag_limit() -> None:
         "visibility": "public",
     }
     with pytest.raises(ValueError, match="Maximum 5 hashtags"):
-        validate_content(content, has_media=False)
+        validate_content(content)
+
+
+def test_validate_content_allows_caption_only() -> None:
+    validate_content({"caption": "Caption only", "visibility": "public"})

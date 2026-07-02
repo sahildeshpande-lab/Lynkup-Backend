@@ -1,6 +1,6 @@
 from __future__ import annotations
 from fastapi import HTTPException, status
-from core.images import normalize_image_name, generate_download_url
+from core.images import normalize_image_name, generate_profile_image_url
 from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
 from common.enums import OnboardingStatus, EducationLevel
@@ -23,7 +23,7 @@ async def complete_onboarding(
 ) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
     from sqlmodel import select
-    from core.images import generate_download_url, normalize_image_name, file_exists
+    from core.images import generate_profile_image_url, normalize_image_name, file_exists
     from uuid import UUID
     from common.enums import EducationLevel, OnboardingStatus
 
@@ -54,12 +54,12 @@ async def complete_onboarding(
             )
 
         profile.profile_photo_url = normalize_image_name(profile_photo_key)
-        profile_data["profilePhotoUrl"] = generate_download_url(
+        profile_data["profilePhotoUrl"] = generate_profile_image_url(
         profile.profile_photo_url
-    )
+        )
     else:
         profile_data["profilePhotoUrl"] = (
-        generate_download_url(profile.profile_photo_url)
+        generate_profile_image_url(profile.profile_photo_url)
         if profile.profile_photo_url
         else None
     )
@@ -77,7 +77,7 @@ async def complete_onboarding(
 
     else :
         profile_data["bannerPhotoUrl"] = (
-        generate_download_url(profile.banner_photo_url)
+        generate_profile_image_url(profile.banner_photo_url)
         if profile.banner_photo_url
         else None
     )
@@ -149,7 +149,7 @@ async def update_profile_me_form(
 ) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
     from sqlmodel import select
-    from core.images import save_image, settings, generate_download_url, normalize_image_name
+    from core.images import save_image, settings, generate_profile_image_url, normalize_image_name
     import uuid
     import json
 
@@ -177,7 +177,7 @@ async def update_profile_me_form(
                 content_type=profile_photo.content_type or "image/png"
             )
             profile.profile_photo_url = normalize_image_name(file_name)
-            profile_data["profilePhotoUrl"] = generate_download_url(profile.profile_photo_url)
+            profile_data["profilePhotoUrl"] = generate_profile_image_url(profile.profile_photo_url)
 
     if banner_photo is not None and banner_photo.filename:
         content = await banner_photo.read()
@@ -190,7 +190,7 @@ async def update_profile_me_form(
                 content_type=banner_photo.content_type or "image/png"
             )
             profile.banner_photo_url = normalize_image_name(file_name)
-            profile_data["bannerPhotoUrl"] = generate_download_url(profile.banner_photo_url)
+            profile_data["bannerPhotoUrl"] = generate_profile_image_url(profile.banner_photo_url)
 
     if academic_interests is not None:
         interests_list = []

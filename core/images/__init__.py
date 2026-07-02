@@ -1,10 +1,12 @@
 from .config import (
     ImageStorageSettings,
+    apply_base_url_img,
     build_image_key,
     normalize_image_name,
     settings,
     generate_upload_url,
     generate_download_url,
+    generate_profile_image_url,
     delete_file,
     file_exists,
     s3_client,
@@ -14,11 +16,13 @@ from .config import (
 
 __all__ = [
     "ImageStorageSettings",
+    "apply_base_url_img",
     "build_image_key",
     "normalize_image_name",
     "settings",
     "generate_upload_url",
     "generate_download_url",
+    "generate_profile_image_url",
     "delete_file",
     "file_exists",
     "s3_client",

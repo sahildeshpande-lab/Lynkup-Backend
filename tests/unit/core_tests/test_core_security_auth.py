@@ -4,7 +4,7 @@ import pytest
 import uuid
 import jwt
 from datetime import datetime, timezone, timedelta
-from fastapi import HTTPException
+from common.exceptions import ApiError
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,18 +39,16 @@ async def test_get_current_user_failures() -> None:
         await init_db()
         
         # 1. Missing access token
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(ApiError) as exc:
             await get_current_user(None, None)
-        assert exc.value.status_code == 401
-        assert exc.value.detail == "Missing access token"
+        assert exc.value.message == "Missing access token"
 
         # 2. Invalid signature
         creds_invalid = HTTPAuthorizationCredentials(scheme="Bearer", credentials="invalid-sig-token")
         async with async_session_factory() as session:
-            with pytest.raises(HTTPException) as exc:
+            with pytest.raises(ApiError) as exc:
                 await get_current_user(creds_invalid, session)
-            assert exc.value.status_code == 401
-            assert exc.value.detail == "Invalid access token"
+            assert exc.value.message == "Invalid access token"
 
         # 3. Wrong token type (refresh instead of access)
         payload_refresh = {
@@ -61,10 +59,9 @@ async def test_get_current_user_failures() -> None:
         token_refresh = jwt.encode(payload_refresh, auth_settings.jwt_secret, algorithm=auth_settings.jwt_algorithm)
         creds_refresh = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token_refresh)
         async with async_session_factory() as session:
-            with pytest.raises(HTTPException) as exc:
+            with pytest.raises(ApiError) as exc:
                 await get_current_user(creds_refresh, session)
-            assert exc.value.status_code == 401
-            assert exc.value.detail == "Invalid access token"
+            assert exc.value.message == "Invalid access token"
 
     finally:
         await engine.dispose()
@@ -111,10 +108,9 @@ async def test_get_current_user_db_states() -> None:
             await session.commit()
 
         async with async_session_factory() as session:
-            with pytest.raises(HTTPException) as exc:
+            with pytest.raises(ApiError) as exc:
                 await get_current_user(creds_access, session)
-            assert exc.value.status_code == 403
-            assert exc.value.detail == "Account deleted"
+            assert exc.value.message == "Account deleted"
 
         # 3. User suspended state (not active)
         async with async_session_factory() as session:
@@ -126,10 +122,9 @@ async def test_get_current_user_db_states() -> None:
             await session.commit()
 
         async with async_session_factory() as session:
-            with pytest.raises(HTTPException) as exc:
+            with pytest.raises(ApiError) as exc:
                 await get_current_user(creds_access, session)
-            assert exc.value.status_code == 403
-            assert exc.value.detail == "Account is not active"
+            assert exc.value.message == "Account is suspended"
 
     finally:
         await engine.dispose()
@@ -179,8 +174,12 @@ async def test_get_current_moderator() -> None:
 
     superadmin = User()
     superadmin.role = "superadmin"
+    assert await get_current_moderator(superadmin) == superadmin
+
+    user = User()
+    user.role = "user"
     with pytest.raises(ApiError):
-        await get_current_moderator(superadmin)
+        await get_current_moderator(user)
 
 
 @pytest.mark.asyncio
@@ -218,9 +217,9 @@ async def test_get_current_admin_paths() -> None:
             db_admin = await get_current_admin(creds, session)
             assert db_admin.id == admin_id
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(ApiError) as exc:
             await get_current_admin(None, None)
-        assert exc.value.status_code == 401
+        assert exc.value.message == "Missing access token"
 
         refresh_payload = {
             "sub": str(admin_id),
@@ -232,9 +231,9 @@ async def test_get_current_admin_paths() -> None:
         )
         refresh_creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=refresh_token)
         async with async_session_factory() as session:
-            with pytest.raises(HTTPException) as exc:
+            with pytest.raises(ApiError) as exc:
                 await get_current_admin(refresh_creds, session)
-            assert exc.value.status_code == 401
+            assert exc.value.message == "Invalid access token"
 
         async with async_session_factory() as session:
             user = User(
@@ -256,10 +255,9 @@ async def test_get_current_admin_paths() -> None:
             )
             user_creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=user_token)
 
-            with pytest.raises(HTTPException) as exc:
+            with pytest.raises(ApiError) as exc:
                 await get_current_admin(user_creds, session)
-            assert exc.value.status_code == 403
-            assert exc.value.detail == "Insufficient permissions"
+            assert exc.value.message == "Insufficient permissions"
 
     finally:
         await engine.dispose()
@@ -301,10 +299,9 @@ async def test_get_current_user_firebase_paths(monkeypatch) -> None:
             await session.commit()
 
         async with async_session_factory() as session:
-            with pytest.raises(HTTPException) as exc:
+            with pytest.raises(ApiError) as exc:
                 await get_current_user(creds, session)
-            assert exc.value.status_code == 403
-            assert exc.value.detail == "Account is banned"
+            assert exc.value.message == "Account is banned"
 
     finally:
         await engine.dispose()

@@ -1,43 +1,38 @@
 from __future__ import annotations
+
 import uuid
 from pathlib import Path
 from uuid import UUID
+
 from fastapi import UploadFile
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
-from common.enums import MediaType, MediaAssetState
-from common.exceptions import ApiError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from apps.feed.content_utils import (
+    ALLOWED_DOCUMENT_MIMETYPES,
+    validate_media_asset,
+)
 from apps.feed.db_models import MediaAsset, PostAttachment
-from apps.feed.content_utils import validate_media_asset
-from core.images import save_image, generate_download_url
+from common.enums import MediaAssetState, MediaType
+from common.exceptions import ApiError
+from core.images import generate_download_url, save_image
 
-async def upload_post_media_service(
-    user_id: UUID,
-    file: UploadFile,
-    media_type: MediaType,
-    db: AsyncSession
-) -> dict:
-    """
-    Validate uploaded file, save it using the storage utility,
-    and persist metadata in the MediaAsset table.
-    """
-    content = await file.read()
-    file_size = len(content)
-
-    if file_size == 0:
-        raise ApiError("Cannot upload an empty file")
-
-    # Simple content type validation based on MediaType
-    content_type = file.content_type or ""
-    if media_type == MediaType.image and not content_type.startswith("image/"):
+def _validate_content_type(content_type: str, media_type: MediaType) -> None:
+    normalized = (content_type or "").lower()
+    if media_type == MediaType.image and not normalized.startswith("image/"):
         raise ApiError("Invalid file type for image media asset")
-    elif media_type == MediaType.video and not content_type.startswith("video/"):
+    if media_type == MediaType.gif and normalized != "image/gif":
+        raise ApiError("Invalid file type for gif media asset")
+    if media_type == MediaType.video and not normalized.startswith("video/"):
         raise ApiError("Invalid file type for video media asset")
-    elif media_type == MediaType.audio and not content_type.startswith("audio/"):
+    if media_type == MediaType.audio and not normalized.startswith("audio/"):
         raise ApiError("Invalid file type for audio media asset")
+    if media_type == MediaType.document and normalized not in ALLOWED_DOCUMENT_MIMETYPES:
+        raise ApiError("Invalid file type for document media asset")
 
-    # Extract extension
-    ext = Path(file.filename).suffix if file.filename else ""
+
+def _resolve_extension(filename: str | None, content_type: str) -> str:
+    ext = Path(filename).suffix if filename else ""
     if not ext:
         if "jpeg" in content_type or "jpg" in content_type:
             ext = ".jpg"
@@ -55,28 +50,70 @@ async def upload_post_media_service(
     ext = ext.lower()
     if not ext.startswith("."):
         ext = f".{ext}"
+    return ext
 
-    # Generate storage key: posts/<uuid>.<ext>
+
+def _build_media_asset(
+    *,
+    user_id: UUID,
+    file: UploadFile,
+    content: bytes,
+    media_type: MediaType,
+) -> MediaAsset:
+    content_type = file.content_type or ""
+    _validate_content_type(content_type, media_type)
+
+    ext = _resolve_extension(file.filename, content_type)
     file_uuid = uuid.uuid4()
     filename = f"{file_uuid}{ext}"
     key = f"posts/{filename}"
 
-    # Save to storage (S3 or local depending on settings)
     try:
         save_image(file_name=key, content=content, content_type=content_type)
     except Exception:
         raise ApiError("Storage upload failed")
 
-    # Save media metadata in the database
-    media_asset = MediaAsset(
+    return MediaAsset(
         owner_user_id=user_id,
         key=key,
         type=media_type,
         original_filename=file.filename,
         mime_type=content_type,
-        file_size=file_size,
+        file_size=len(content),
         state=MediaAssetState.published,
     )
+
+
+def _media_asset_to_response(media_asset: MediaAsset) -> dict:
+    return {
+        "id": media_asset.id,
+        "key": media_asset.key,
+        "type": media_asset.type,
+        "url": generate_download_url(media_asset.key),
+    }
+
+
+async def upload_post_media_service(
+    user_id: UUID,
+    file: UploadFile,
+    media_type: MediaType,
+    db: AsyncSession,
+) -> dict:
+    """
+    Validate uploaded file, save it using the storage utility,
+    and persist metadata in the MediaAsset table.
+    """
+    content = await file.read()
+    if len(content) == 0:
+        raise ApiError("Cannot upload an empty file")
+
+    media_asset = _build_media_asset(
+        user_id=user_id,
+        file=file,
+        content=content,
+        media_type=media_type,
+    )
+
     db.add(media_asset)
 
     try:
@@ -86,12 +123,8 @@ async def upload_post_media_service(
         await db.rollback()
         raise ApiError("Database error saving media metadata")
 
-    return {
-        "id": media_asset.id,
-        "key": media_asset.key,
-        "type": media_asset.type,
-        "url": generate_download_url(key)
-    }
+    return _media_asset_to_response(media_asset)
+
 
 async def _verify_and_attach_media(
     post_id: UUID,
@@ -120,7 +153,6 @@ async def _verify_and_attach_media(
                 f"Media asset with ID {media_item.id} does not belong to the authenticated user"
             )
 
-        # Validate attachment rules (document/audio size and type)
         media_type_str = media_item.type.value if hasattr(media_item.type, "value") else str(media_item.type)
         try:
             validate_media_asset(media_asset, media_type_str)

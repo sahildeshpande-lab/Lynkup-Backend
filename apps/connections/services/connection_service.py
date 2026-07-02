@@ -3,12 +3,14 @@ from datetime import datetime, timezone
 from uuid import UUID
 from sqlalchemy import or_, and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from apps.accounts.db_models import User
 from apps.connections.db_models import Block, Connection, ConnectionRequest, Follow
 from apps.profiles.db_models.profile_db_model import Profile
 from apps.profiles.db_models import Profile
 from ..schemas import ApiResponse
+from common.enums import UserStatus
 from common.responses import error_response, success_response
-from core.images import generate_download_url
+from core.images import generate_profile_image_url
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -54,6 +56,18 @@ async def send_connection_request(db: AsyncSession, sender_id: UUID, receiver_id
     if sender_id == receiver_id:
         return error_response("Cannot send request to self.", response_cls=ApiResponse)
 
+    receiver = (await db.execute(select(User).where(User.id == receiver_id))).scalar_one_or_none()
+    if receiver is None:
+        return error_response("User not found.", response_cls=ApiResponse)
+    if receiver.deleted_at:
+        return error_response("Cannot send request. User account is deleted.", response_cls=ApiResponse)
+    if receiver.status == UserStatus.suspended:
+        return error_response("Cannot send request. User account is suspended.", response_cls=ApiResponse)
+    if receiver.status == UserStatus.banned:
+        return error_response("Cannot send request. User account is banned.", response_cls=ApiResponse)
+    if receiver.status != UserStatus.active:
+        return error_response("Cannot send request. User account is not active.", response_cls=ApiResponse)
+
     if await is_blocked(db, sender_id, receiver_id):
         return error_response("Cannot send request due to block.", response_cls=ApiResponse)
 
@@ -70,7 +84,18 @@ async def send_connection_request(db: AsyncSession, sender_id: UUID, receiver_id
     db.add(request)
     await db.commit()
     await db.refresh(request)
-    return success_response("Connection request sent successfully.", request, response_cls=ApiResponse)
+    return success_response(
+        "Connection request sent successfully.",
+        {
+            "lynkup_id": request.id,
+            "sender_user_id": request.sender_user_id,
+            "receiver_user_id": request.receiver_user_id,
+            "status": request.status,
+            "request_sent": True,
+            "request_received": False,
+        },
+        response_cls=ApiResponse,
+    )
 
 async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user_id: UUID, response: str) -> ApiResponse:
     if response not in ["accepted", "declined"]:
@@ -175,7 +200,7 @@ async def get_pending_requests(
                 "status": req.status,
                 "first_name": profile.first_name,
                 "last_name": profile.last_name,
-                "profilePhoto_url": generate_download_url(profile.profile_photo_url) if profile.profile_photo_url else None,
+                "profilePhoto_url": generate_profile_image_url(profile.profile_photo_url) if profile.profile_photo_url else None,
             }
             for req, profile in rows
         ]
@@ -198,7 +223,7 @@ async def get_pending_requests(
             "status": req.status,
             "first_name": profile.first_name,
             "last_name": profile.last_name,
-            "profilePhoto_url": generate_download_url(profile.profile_photo_url) if profile.profile_photo_url else None,
+            "profilePhoto_url": generate_profile_image_url(profile.profile_photo_url) if profile.profile_photo_url else None,
         }
         for req, profile in rows
     ]
@@ -258,7 +283,7 @@ async def get_connections_service(
             "status": "accepted",
             "first_name": profile.first_name,
             "last_name": profile.last_name,
-            "profilePhoto_url": generate_download_url(profile.profile_photo_url) if profile.profile_photo_url else None,
+            "profilePhoto_url": generate_profile_image_url(profile.profile_photo_url) if profile.profile_photo_url else None,
         }
 
     if page is None and page_size is None:

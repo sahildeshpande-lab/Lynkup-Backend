@@ -155,7 +155,7 @@ async def test_upload_post_media_service_success(test_users) -> None:
             user_id=user.id,
             file=file,
             media_type=MediaType.image,
-            db=session
+            db=session,
         )
 
         assert res["id"] is not None
@@ -164,7 +164,6 @@ async def test_upload_post_media_service_success(test_users) -> None:
         assert res["type"] == MediaType.image
         assert "/static/uploads/" in res["url"]
 
-        # Verify database record
         media_id = res["id"]
         stmt = select(MediaAsset).where(MediaAsset.id == media_id)
         db_media = (await session.execute(stmt)).scalar_one_or_none()
@@ -186,7 +185,7 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
     file_empty = UploadFile(
         filename="empty.png",
         file=io.BytesIO(b""),
-        headers={"content-type": "image/png"}
+        headers={"content-type": "image/png"},
     )
     async with async_session_factory() as session:
         with pytest.raises(ApiError) as exc_info:
@@ -197,7 +196,7 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
     file_mismatch = UploadFile(
         filename="video.mp4",
         file=io.BytesIO(b"some video bytes"),
-        headers={"content-type": "video/mp4"}
+        headers={"content-type": "video/mp4"},
     )
     async with async_session_factory() as session:
         with pytest.raises(ApiError) as exc_info:
@@ -351,17 +350,18 @@ async def test_routes_endpoints_via_test_client(test_users) -> None:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
             # Test 1: POST /postupload
             file_data = b"image content"
-            files = {
-                "file": ("test.jpg", io.BytesIO(file_data), "image/jpeg")
-            }
+            files = [
+                ("file", ("test.jpg", io.BytesIO(file_data), "image/jpeg")),
+            ]
             data = {
-                "type": "image"
+                "type": "image",
             }
             response = await ac.post("/api/v1/postupload", files=files, data=data)
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
             assert body["message"] == "image uploaded"
+            assert isinstance(body["data"], dict)
             media_id = body["data"]["id"]
 
             # Test 2: POST /post

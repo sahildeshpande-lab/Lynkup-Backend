@@ -6,7 +6,7 @@ from apps.connections.db_models import Block, Connection, ConnectionRequest
 from apps.accounts.db_models import User, UserRole, Role
 from apps.profiles.db_models.profile_db_model import Profile
 from common.enums import ProfileVisibility, UserStatus
-from core.images import generate_download_url
+from core.images import generate_profile_image_url
 
 def get_interest_overlap(interests_1: list[int] | None, interests_2: list[int] | None) -> int:
     if not interests_1 or not interests_2:
@@ -158,7 +158,7 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
             "major": candidate.major,
             "minor": candidate.minor,
             "edu_level": candidate.edu_level,
-            "profilePhoto_url": generate_download_url(candidate.profile_photo_url) if candidate.profile_photo_url else None,
+            "profilePhoto_url": generate_profile_image_url(candidate.profile_photo_url) if candidate.profile_photo_url else None,
         })
 
     scored_candidates.sort(key=lambda x: x["score"], reverse=True)

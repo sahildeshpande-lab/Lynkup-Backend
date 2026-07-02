@@ -14,6 +14,8 @@ class ImageStorageSettings(BaseSettings):
     aws_secret_access_key: str | None = Field(default=None, alias="AWS_SECRET_ACCESS_KEY")
     aws_region: str = Field(default="us-east-1", alias="AWS_REGION")
     aws_s3_bucket: str | None = Field(default=None, alias="AWS_S3_BUCKET")
+    base_url: str | None = Field(default=None, alias="BASE_URL")
+    base_url_img: str | None = Field(default=None, alias="BASE_URL_Img")
 
     class Config:
         env_file = ".env"
@@ -76,6 +78,30 @@ def generate_upload_url(file_name: str, expiration: int = 3600) -> str:
     except ClientError as e:
         print(f"Error generating S3 upload URL: {e}")
         return ""
+
+
+def _public_base_url() -> str | None:
+    base = settings.base_url or settings.base_url_img
+    if not base:
+        return None
+    return base.rstrip("/")
+
+
+def apply_base_url_img(url: str) -> str:
+    """Prefix relative image paths with BASE_URL (or BASE_URL_Img) when configured."""
+    base = _public_base_url()
+    if not url or not base:
+        return url
+    if url.startswith(("http://", "https://")):
+        return url
+    if url.startswith("/"):
+        return f"{base}{url}"
+    return f"{base}/{url}"
+
+
+def generate_profile_image_url(file_name: str, expiration: int = 3600) -> str:
+    """Generate a download URL for profile or banner photos with optional base URL."""
+    return apply_base_url_img(generate_download_url(file_name, expiration))
 
 
 def generate_download_url(file_name: str, expiration: int = 3600) -> str:

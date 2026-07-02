@@ -36,9 +36,13 @@ async def upload_post_media(
         user_id=current_user.id,
         file=file,
         media_type=type,
-        db=db
+        db=db,
     )
-    return success_response(f"{type.value} uploaded", data, response_cls=ApiResponse)
+    return success_response(
+        f"{type.value} uploaded",
+        data,
+        response_cls=ApiResponse,
+    )
 
 
 @router.post("/post", response_model=ApiResponse)

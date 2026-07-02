@@ -9,6 +9,7 @@ from core.images.config import (
     normalize_image_name,
     generate_upload_url,
     generate_download_url,
+    generate_profile_image_url,
     delete_file,
     file_exists,
     upload_image_to_s3,
@@ -51,6 +52,43 @@ def test_generate_upload_url_client_error(monkeypatch):
     monkeypatch.setattr("core.images.config.s3_client", mock_s3)
 
     assert generate_upload_url("test.jpg") == ""
+
+def test_generate_profile_image_url(monkeypatch):
+    monkeypatch.setattr(settings, "aws_s3_bucket", None)
+    monkeypatch.setattr(settings, "base_url", None)
+    monkeypatch.setattr(settings, "base_url_img", None)
+    assert generate_profile_image_url("profiles/test.jpg") == "/static/uploads/profiles/test.jpg"
+
+    monkeypatch.setattr(
+        settings,
+        "base_url",
+        "https://lynkup-backend-l0q3.onrender.com/",
+    )
+    assert (
+        generate_profile_image_url("profiles/test.jpg")
+        == "https://lynkup-backend-l0q3.onrender.com/static/uploads/profiles/test.jpg"
+    )
+    assert (
+        generate_profile_image_url("/static/uploads/banners/test.jpg")
+        == "https://lynkup-backend-l0q3.onrender.com/static/uploads/banners/test.jpg"
+    )
+
+    monkeypatch.setattr(settings, "base_url", None)
+    monkeypatch.setattr(
+        settings,
+        "base_url_img",
+        "https://lynkup-backend-l0q3.onrender.com/",
+    )
+    assert (
+        generate_profile_image_url("profiles/test.jpg")
+        == "https://lynkup-backend-l0q3.onrender.com/static/uploads/profiles/test.jpg"
+    )
+
+    monkeypatch.setattr(settings, "aws_s3_bucket", "test-bucket")
+    mock_s3 = MagicMock()
+    mock_s3.generate_presigned_url.return_value = "https://presigned-download-url"
+    monkeypatch.setattr("core.images.config.s3_client", mock_s3)
+    assert generate_profile_image_url("profiles/test.jpg") == "https://presigned-download-url"
 
 def test_generate_download_url(monkeypatch):
     # Empty bucket or file name

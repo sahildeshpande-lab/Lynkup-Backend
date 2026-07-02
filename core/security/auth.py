@@ -34,6 +34,22 @@ def get_bearer_token(
     return credentials.credentials
 
 
+def _inactive_account_message(status: UserStatus) -> str:
+    messages = {
+        UserStatus.pending: "Account is pending",
+        UserStatus.suspended: "Account is suspended",
+        UserStatus.banned: "Account is banned",
+    }
+    return messages.get(status, "Account is not active")
+
+
+def _ensure_active_user(user: User) -> None:
+    if user.deleted_at:
+        raise ApiError("Account deleted")
+    if user.status != UserStatus.active:
+        raise ApiError(_inactive_account_message(user.status))
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
     db: AsyncSession = Depends(get_session),
@@ -48,10 +64,7 @@ async def get_current_user(
             stmt = select(User).options(selectinload(User.roles)).where(User.id == decoded.get("sub"))
             user = (await db.execute(stmt)).scalar_one_or_none()
             if user:
-                if user.deleted_at:
-                    raise ApiError("Account deleted")
-                if user.status != UserStatus.active:
-                    raise ApiError("Account is not active")
+                _ensure_active_user(user)
                 return user
     except ApiError:
         raise
@@ -80,23 +93,9 @@ async def get_current_user(
     if user.deleted_at:
         raise ApiError("Account deleted")
 
-    messages = {
-        UserStatus.pending: "Account is pending",
-        UserStatus.suspended: "Account is suspended",
-        UserStatus.banned: "Account is banned",
-    }
-
     if user.status != UserStatus.active:
-        raise ApiError(messages.get(user.status, "Account is not active"))
+        raise ApiError(_inactive_account_message(user.status))
 
-    return user
-
-
-async def get_current_app_user(
-    user: User = Depends(get_current_user),
-) -> User:
-    if user.role != "user":
-        raise ApiError("This endpoint is only available to user accounts")
     return user
 
 
@@ -124,7 +123,7 @@ async def get_current_admin(
         raise ApiError("Account deleted")
 
     if user.status != UserStatus.active:
-        raise ApiError("Account is not active")
+        raise ApiError(_inactive_account_message(user.status))
 
     if user.role in ("user",):
         raise ApiError("Insufficient permissions")
@@ -132,10 +131,18 @@ async def get_current_admin(
     return user
 
 
-async def get_current_moderator(
-    user: User = Depends(get_current_admin),
+async def get_current_app_user(
+    user: User = Depends(get_current_user),
 ) -> User:
-    if user.role != "moderator":
+    if user.role != "user":
+        raise ApiError("Insufficient permissions")
+    return user
+
+
+async def get_current_moderator(
+    user: User = Depends(get_current_user),
+) -> User:
+    if user.role not in ("moderator", "superadmin"):
         raise ApiError("Insufficient permissions")
     return user
 

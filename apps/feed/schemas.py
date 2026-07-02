@@ -19,7 +19,7 @@ class PostUploadData(BaseModel):
 
 
 class PostUploadResponse(ApiResponse):
-    data: PostUploadData
+    data: list[PostUploadData]
 
 
 class MediaItem(BaseModel):

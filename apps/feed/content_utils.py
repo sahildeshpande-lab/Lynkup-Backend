@@ -163,7 +163,7 @@ def validate_hashtag_count(
         )
 
 
-def validate_content(content: dict, has_media: bool) -> None:
+def validate_content(content: dict) -> None:
     """
     Validate the content payload before saving.
 
@@ -174,7 +174,6 @@ def validate_content(content: dict, has_media: bool) -> None:
     - ``visibility`` must be ``"public"`` or ``"hidden"``.
     - If ``content_html`` is provided, its normalized text must be ≤ 5 000
       Unicode characters.
-    - If there is no ``content_html`` and no media, reject the post.
     """
     caption = content.get("caption")
     if not caption or not str(caption).strip():
@@ -192,9 +191,6 @@ def validate_content(content: dict, has_media: bool) -> None:
                 f"Content exceeds maximum length of {MAX_CONTENT_CHARS} characters "
                 f"(got {len(normalized)})"
             )
-
-    if not content_html and not has_media:
-        raise ValueError("Post must have either content or media")
 
     validate_hashtag_count(content.get("caption"), content_html)
 

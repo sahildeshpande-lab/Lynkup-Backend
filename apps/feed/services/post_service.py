@@ -10,7 +10,7 @@ from apps.accounts.db_models import User
 from apps.feed.db_models import Post
 from apps.feed.schemas import SavePostRequest, EditPostRequest
 from apps.feed.content_utils import sanitize_html, validate_content, validate_media_count
-from core.images import generate_download_url
+from core.images import generate_download_url, generate_profile_image_url
 from apps.connections.services.connection_service import is_blocked
 
 from .media_service import _verify_and_attach_media
@@ -96,9 +96,8 @@ async def save_post_service(
     content_dict = _build_content_dict(payload.content)
 
     # Validate content
-    has_media = bool(payload.media)
     try:
-        validate_content(content_dict, has_media)
+        validate_content(content_dict)
     except ValueError as exc:
         raise ApiError(str(exc))
 
@@ -224,14 +223,8 @@ async def edit_post_service(
         if payload.content.visibility is not None:
             merged_content["visibility"] = payload.content.visibility
 
-    # Validate final merged content against final media state
-    if payload.media is not None:
-        has_media = len(payload.media) > 0
-    else:
-        has_media = len(post.attachments) > 0
-
     try:
-        validate_content(merged_content, has_media)
+        validate_content(merged_content)
     except ValueError as exc:
         raise ApiError(str(exc))
 
@@ -484,7 +477,7 @@ def _format_processing_post_item(post: Post, profile) -> dict:
         "first_name": profile.first_name if profile else None,
         "last_name": profile.last_name if profile else None,
         "profile_photo_url": (
-            generate_download_url(profile.profile_photo_url)
+            generate_profile_image_url(profile.profile_photo_url)
             if profile and profile.profile_photo_url
             else None
         ),

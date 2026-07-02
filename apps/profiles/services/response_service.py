@@ -1,5 +1,5 @@
 from __future__ import annotations
-from core.images import generate_download_url
+from core.images import generate_profile_image_url
 from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
 from common.enums import OnboardingStatus, EducationLevel
@@ -73,8 +73,8 @@ async def build_user_base_response(
         "email": user.email,
         "role": user.role,
         "loginType": user.registration_type.value if hasattr(user.registration_type, "value") else str(user.registration_type),
-        "profilePhoto_url": generate_download_url(profile.profile_photo_url) if (profile and profile.profile_photo_url) else None,
-        "bannerPhotoUrl": generate_download_url(profile.banner_photo_url) if (profile and profile.banner_photo_url) else None,
+        "profilePhoto_url": generate_profile_image_url(profile.profile_photo_url) if (profile and profile.profile_photo_url) else None,
+        "bannerPhotoUrl": generate_profile_image_url(profile.banner_photo_url) if (profile and profile.banner_photo_url) else None,
         "status": user.status.value if hasattr(user.status, "value") else str(user.status),
         "university": university_name if university_name is not None else (str(profile.university_id) if (profile and profile.university_id) else None),
         "university_details": {

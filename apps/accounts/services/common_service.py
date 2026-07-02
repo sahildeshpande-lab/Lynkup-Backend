@@ -123,7 +123,7 @@ def _build_auth_user_response(user: User, profile: Profile | None) -> AuthUserRe
     first_name = profile.first_name if profile and profile.first_name else ""
     last_name = profile.last_name if profile and profile.last_name else ""
 
-    from core.images import generate_download_url
+    from core.images import generate_profile_image_url
 
     return AuthUserResponse(
         id=str(user.id),
@@ -138,8 +138,8 @@ def _build_auth_user_response(user: User, profile: Profile | None) -> AuthUserRe
         completenessScore=profile.completeness_score if profile else 33,
         createdAt=user.created_at,
         updatedAt=user.updated_at,
-        profilePhoto_url=generate_download_url(profile.profile_photo_url) if (profile and profile.profile_photo_url) else None,
-        bannerPhotoUrl=generate_download_url(profile.banner_photo_url) if (profile and profile.banner_photo_url) else None,
+        profilePhoto_url=generate_profile_image_url(profile.profile_photo_url) if (profile and profile.profile_photo_url) else None,
+        bannerPhotoUrl=generate_profile_image_url(profile.banner_photo_url) if (profile and profile.banner_photo_url) else None,
     )
 
 def _registration_type_from_firebase(firebase_user: dict) -> RegistrationType:
