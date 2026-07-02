@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from apps.accounts.db_models import User
 from apps.feed.db_models import Post
 from common.enums import PostState
 
@@ -60,3 +61,28 @@ async def fetch_reviewed_posts_for_moderator(
         stmt = stmt.limit(limit)
     result = await db.execute(stmt)
     return list(result.all())
+
+
+async def user_exists(db: AsyncSession, user_id: UUID) -> bool:
+    """Return whether a user exists."""
+    result = await db.execute(select(User.id).where(User.id == user_id))
+    return result.scalar_one_or_none() is not None
+
+
+async def fetch_posts_by_state(
+    db: AsyncSession,
+    *,
+    state: PostState,
+    user_id: UUID | None = None,
+) -> list[Post]:
+    """Fetch posts filtered by state and optional author, newest first."""
+    filters = [Post.state == state]
+    if user_id is not None:
+        filters.append(Post.author_user_id == user_id)
+
+    result = await db.execute(
+        select(Post)
+        .where(*filters)
+        .order_by(Post.created_at.desc())
+    )
+    return list(result.scalars().all())

@@ -177,24 +177,26 @@ async def test_upload_post_media_service_success(test_users) -> None:
     async with async_session_factory() as session:
         res = await upload_post_media_service(
             user_id=user.id,
-            file=file,
-            media_type=MediaType.image,
+            files=[file],
+            media_types=[MediaType.image],
             db=session,
         )
 
-        assert res["id"] is not None
-        assert "posts/" in res["key"]
-        assert res["key"].endswith(".png")
-        assert res["type"] == MediaType.image
-        assert "/static/uploads/" in res["url"]
+        assert len(res) == 1
+        item = res[0]
+        assert item["id"] is not None
+        assert "posts/" in item["key"]
+        assert item["key"].endswith(".png")
+        assert item["type"] == MediaType.image
+        assert "/static/uploads/" in item["url"]
 
-        media_id = res["id"]
+        media_id = item["id"]
         stmt = select(MediaAsset).where(MediaAsset.id == media_id)
         db_media = (await session.execute(stmt)).scalar_one_or_none()
 
         assert db_media is not None
         assert db_media.owner_user_id == user.id
-        assert db_media.key == res["key"]
+        assert db_media.key == item["key"]
         assert db_media.original_filename == "test_image.png"
         assert db_media.mime_type == "image/png"
         assert db_media.file_size == len(file_content)
@@ -213,7 +215,7 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
     )
     async with async_session_factory() as session:
         with pytest.raises(ApiError) as exc_info:
-            await upload_post_media_service(user.id, file_empty, MediaType.image, session)
+            await upload_post_media_service(user.id, [file_empty], [MediaType.image], session)
         assert "empty" in exc_info.value.message
 
     # Mismatch media type
@@ -224,8 +226,36 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
     )
     async with async_session_factory() as session:
         with pytest.raises(ApiError) as exc_info:
-            await upload_post_media_service(user.id, file_mismatch, MediaType.image, session)
+            await upload_post_media_service(user.id, [file_mismatch], [MediaType.image], session)
         assert "Invalid file type" in exc_info.value.message
+
+    file_no_type = UploadFile(
+        filename="image.png",
+        file=io.BytesIO(b"image bytes"),
+        headers={"content-type": "image/png"},
+    )
+    async with async_session_factory() as session:
+        with pytest.raises(ApiError) as exc_info:
+            await upload_post_media_service(user.id, [file_no_type], [], session)
+        assert "corresponding type" in exc_info.value.message
+
+    too_many_files = [
+        UploadFile(
+            filename=f"image_{index}.png",
+            file=io.BytesIO(b"image bytes"),
+            headers={"content-type": "image/png"},
+        )
+        for index in range(6)
+    ]
+    async with async_session_factory() as session:
+        with pytest.raises(ApiError) as exc_info:
+            await upload_post_media_service(
+                user.id,
+                too_many_files,
+                [MediaType.image] * len(too_many_files),
+                session,
+            )
+        assert "Maximum 5 files" in exc_info.value.message
 
 
 @pytest.mark.asyncio
@@ -456,18 +486,16 @@ async def test_routes_endpoints_via_test_client(test_users) -> None:
             # Test 1: POST /postupload
             file_data = b"image content"
             files = [
-                ("file", ("test.jpg", io.BytesIO(file_data), "image/jpeg")),
+                ("files", ("test.jpg", io.BytesIO(file_data), "image/jpeg")),
+                ("types", (None, "image")),
             ]
-            data = {
-                "type": "image",
-            }
-            response = await ac.post("/api/v1/postupload", files=files, data=data)
+            response = await ac.post("/api/v1/postupload", files=files)
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
-            assert body["message"] == "image uploaded"
-            assert isinstance(body["data"], dict)
-            media_id = body["data"]["id"]
+            assert body["message"] == "1 media file(s) uploaded"
+            assert isinstance(body["data"], list)
+            media_id = body["data"][0]["id"]
 
             # Test 2: POST /post
             post_payload = {
@@ -489,6 +517,61 @@ async def test_routes_endpoints_via_test_client(test_users) -> None:
             assert body_post["status"] is True
             assert body_post["message"] == "Post created successfully"
             assert "id" in body_post["data"]
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_postupload_accepts_multiple_files_with_matching_types(test_users) -> None:
+    user, _ = test_users
+
+    async def _override_get_current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            files = [
+                ("files", ("beach.jpg", io.BytesIO(b"image one"), "image/jpeg")),
+                ("types", (None, "image")),
+                ("files", ("hotel.jpg", io.BytesIO(b"image two"), "image/jpeg")),
+                ("types", (None, "image")),
+                ("files", ("reel.mp4", io.BytesIO(b"video bytes"), "video/mp4")),
+                ("types", (None, "video")),
+            ]
+            response = await ac.post("/api/v1/postupload", files=files)
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] is True
+            assert body["message"] == "3 media file(s) uploaded"
+            assert [item["type"] for item in body["data"]] == ["image", "image", "video"]
+            assert [item["key"].split(".")[-1] for item in body["data"]] == ["jpg", "jpg", "mp4"]
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_postupload_rejects_mismatched_file_and_type_counts(test_users) -> None:
+    user, _ = test_users
+
+    async def _override_get_current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            files = [
+                ("files", ("beach.jpg", io.BytesIO(b"image one"), "image/jpeg")),
+                ("files", ("hotel.jpg", io.BytesIO(b"image two"), "image/jpeg")),
+                ("types", (None, "image")),
+            ]
+            response = await ac.post("/api/v1/postupload", files=files)
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] is False
+            assert body["message"] == "Each file must have a corresponding type"
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -547,6 +630,9 @@ async def test_publish_post_service_success(test_users) -> None:
         content=PostContentPayload(caption="Original", content_html="Original text", visibility="public")
     )
     async with async_session_factory() as session:
+        session.add(Profile(user_id=user.id, first_name="Post", last_name="Author", posts_count=0))
+        await session.commit()
+
         post = await save_post_service(user.id, payload, session)
         post_id = post.id
 
@@ -555,6 +641,8 @@ async def test_publish_post_service_success(test_users) -> None:
         assert post.state == PostState.published
         assert post.moderator_id == user.id
         assert post.is_moderator_reviewed is True
+        profile = (await session.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one()
+        assert profile.posts_count == 1
 
     async with async_session_factory() as session:
         log = (await session.execute(
@@ -576,6 +664,9 @@ async def test_flag_post_service_success(test_users) -> None:
         content=PostContentPayload(caption="Original", content_html="Original text", visibility="public")
     )
     async with async_session_factory() as session:
+        session.add(Profile(user_id=user.id, first_name="Post", last_name="Author", posts_count=0))
+        await session.commit()
+
         post = await save_post_service(user.id, payload, session)
         post_id = post.id
 
@@ -583,6 +674,8 @@ async def test_flag_post_service_success(test_users) -> None:
         post = await admin_publish_post_service(post_id, "flag", user.id, session)
         assert post.state == PostState.flagged
         assert post.moderator_id == user.id
+        profile = (await session.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one()
+        assert profile.posts_count == 0
 
     async with async_session_factory() as session:
         log = (await session.execute(
@@ -925,14 +1018,133 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
         await session.commit()
     
     async with async_session_factory() as session:
-        posts_owner = await list_user_posts_service(user.id, user.id, session)
-        assert len(posts_owner) == 4
-        captions = {p.caption for p in posts_owner}
-        assert captions == {"Draft Post", "Published Post", "Flagged Post", "Deleted Post"}
+        published_posts = await list_user_posts_service(user, session)
+        assert len(published_posts) == 1
+        assert published_posts[0].caption == "Published Post"
+
+        draft_posts = await list_user_posts_service(user, session, state="draft")
+        assert len(draft_posts) == 1
+        assert draft_posts[0].caption == "Draft Post"
+
+        flagged_posts = await list_user_posts_service(user, session, state="flagged")
+        assert len(flagged_posts) == 1
+        assert flagged_posts[0].caption == "Flagged Post"
         
-        posts_other = await list_user_posts_service(user.id, other.id, session)
-        assert len(posts_other) == 1
-        assert posts_other[0].caption == "Published Post"
+        superadmin = SimpleNamespace(id=other.id, role="superadmin")
+        posts_superadmin = await list_user_posts_service(
+            superadmin,
+            session,
+            target_user_id=user.id,
+            state="published",
+        )
+        assert len(posts_superadmin) == 1
+        assert posts_superadmin[0].caption == "Published Post"
+
+
+@pytest.mark.asyncio
+async def test_posts_route_filters_state_for_current_user(test_users) -> None:
+    user, _ = test_users
+
+    async with async_session_factory() as session:
+        session.add_all([
+            Post(author_user_id=user.id, content={"caption": "Route Draft"}, state=PostState.draft),
+            Post(author_user_id=user.id, content={"caption": "Route Published"}, state=PostState.published),
+        ])
+        await session.commit()
+
+    async def _override_get_current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.get("/api/v1/posts", params={"state": "draft"})
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] is True
+            captions = {item["content"]["caption"] for item in body["data"]}
+            assert captions == {"Route Draft"}
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_posts_route_rejects_normal_user_for_other_user(test_users) -> None:
+    user, other = test_users
+
+    async def _override_get_current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.get("/api/v1/posts", params={"user_id": str(other.id)})
+            assert response.status_code == 403
+            assert response.json()["status"] is False
+            assert response.json()["message"] == "Insufficient permissions"
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_posts_route_superadmin_can_filter_any_user_or_all(test_users) -> None:
+    user, other = test_users
+    superadmin = SimpleNamespace(id=uuid.uuid4(), role="superadmin")
+
+    async with async_session_factory() as session:
+        session.add_all([
+            Post(author_user_id=user.id, content={"caption": "User Published"}, state=PostState.published),
+            Post(author_user_id=other.id, content={"caption": "Other Published"}, state=PostState.published),
+            Post(author_user_id=other.id, content={"caption": "Other Processing"}, state=PostState.processing),
+        ])
+        await session.commit()
+
+    async def _override_get_current_user():
+        return superadmin
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            all_response = await ac.get("/api/v1/posts", params={"state": "published"})
+            assert all_response.status_code == 200
+            all_captions = {item["content"]["caption"] for item in all_response.json()["data"]}
+            assert {"User Published", "Other Published"}.issubset(all_captions)
+
+            user_response = await ac.get(
+                "/api/v1/posts",
+                params={"user_id": str(other.id), "state": "processing"},
+            )
+            assert user_response.status_code == 200
+            user_captions = {item["content"]["caption"] for item in user_response.json()["data"]}
+            assert user_captions == {"Other Processing"}
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_posts_route_validation_errors(test_users) -> None:
+    user, _ = test_users
+    missing_user_id = uuid.uuid4()
+
+    async def _override_get_current_user():
+        return SimpleNamespace(id=uuid.uuid4(), role="superadmin")
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            invalid_state = await ac.get("/api/v1/posts", params={"state": "hidden"})
+            assert invalid_state.status_code == 400
+            assert invalid_state.json()["status"] is False
+
+            missing_user = await ac.get("/api/v1/posts", params={"user_id": str(missing_user_id)})
+            assert missing_user.status_code == 404
+            assert missing_user.json()["message"] == "User not found"
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
 
 
 @pytest.mark.asyncio

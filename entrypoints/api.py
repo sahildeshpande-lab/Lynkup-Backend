@@ -101,7 +101,7 @@ def _api_error_status_code(message: str) -> int:
 @app.exception_handler(HTTPException)
 async def legacy_http_exception_handler(_request, exc: HTTPException):
     detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-    status_code = exc.status_code if exc.status_code in (401, 403) else 200
+    status_code = exc.status_code if exc.status_code in (400, 401, 403, 404) else 200
     return JSONResponse(status_code=status_code, content=_error_json(detail))
 
 
@@ -148,14 +148,14 @@ def _patch_multipart_file_schemas(schema: dict) -> None:
     for body_schema in components.values():
         if not isinstance(body_schema, dict):
             continue
-        for prop in body_schema.get("properties", {}).values():
+        for prop_name, prop in body_schema.get("properties", {}).items():
             if not isinstance(prop, dict):
                 continue
             if prop.get("type") == "array" and isinstance(prop.get("items"), dict):
                 items = prop["items"]
-                if items.get("type") == "string":
+                if prop_name in {"file", "files"} and items.get("type") == "string":
                     prop["items"] = {"type": "string", "format": "binary"}
-            elif prop.get("type") == "string" and "contentMediaType" in prop:
+            elif prop_name in {"file", "files"} and prop.get("type") == "string" and "contentMediaType" in prop:
                 prop["format"] = "binary"
                 prop.pop("contentMediaType", None)
 

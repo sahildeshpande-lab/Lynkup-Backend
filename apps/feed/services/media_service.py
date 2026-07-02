@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.feed.content_utils import (
     ALLOWED_DOCUMENT_MIMETYPES,
+    MAX_MEDIA_COUNT,
     validate_media_asset,
 )
 from apps.feed.db_models import MediaAsset, PostAttachment
@@ -95,35 +96,45 @@ def _media_asset_to_response(media_asset: MediaAsset) -> dict:
 
 async def upload_post_media_service(
     user_id: UUID,
-    file: list[UploadFile],
-    media_type: MediaType,
+    files: list[UploadFile],
+    media_types: list[MediaType],
     db: AsyncSession,
 ) -> list[dict]:
     """
-    Validate uploaded file, save it using the storage utility,
+    Validate uploaded files, save them using the storage utility,
     and persist metadata in the MediaAsset table.
     """
-    content = await file.read()
-    if len(content) == 0:
-        raise ApiError("Cannot upload an empty file")
+    if not files:
+        raise ApiError("At least one file is required")
+    if len(files) > MAX_MEDIA_COUNT:
+        raise ApiError(f"Maximum {MAX_MEDIA_COUNT} files allowed per request")
+    if len(files) != len(media_types):
+        raise ApiError("Each file must have a corresponding type")
 
-    media_asset = _build_media_asset(
-        user_id=user_id,
-        file=file,
-        content=content,
-        media_type=media_type,
-    )
+    media_assets: list[MediaAsset] = []
+    for file, media_type in zip(files, media_types, strict=True):
+        content = await file.read()
+        if len(content) == 0:
+            raise ApiError("Cannot upload an empty file")
 
-    db.add(media_asset)
+        media_asset = _build_media_asset(
+            user_id=user_id,
+            file=file,
+            content=content,
+            media_type=media_type,
+        )
+        db.add(media_asset)
+        media_assets.append(media_asset)
 
     try:
         await db.commit()
-        await db.refresh(media_asset)
+        for media_asset in media_assets:
+            await db.refresh(media_asset)
     except Exception:
         await db.rollback()
         raise ApiError("Database error saving media metadata")
 
-    return _media_asset_to_response(media_asset)
+    return [_media_asset_to_response(media_asset) for media_asset in media_assets]
 
 
 async def _verify_and_attach_media(

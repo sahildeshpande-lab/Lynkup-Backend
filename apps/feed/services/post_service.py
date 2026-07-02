@@ -3,6 +3,7 @@ import logging
 from typing import Literal
 from datetime import datetime, timezone
 from uuid import UUID
+from fastapi import HTTPException, status
 from common.exceptions import ApiError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -332,6 +333,8 @@ async def publish_post_service(
     if post.state not in (PostState.draft, PostState.hidden, PostState.processing):
         raise ApiError(f"Post is in '{post.state.value}' state and cannot be published")
 
+    previous_state = post.state
+
     # State transition: respect visibility stored in content
     visibility = (post.content or {}).get("visibility", "public")
     if visibility == "hidden" or post.state == PostState.hidden:
@@ -344,6 +347,11 @@ async def publish_post_service(
     post.updated_at = utc_now()
 
     try:
+        if previous_state != PostState.published and post.state == PostState.published:
+            from apps.profiles.services.profile_stats_service import increment_posts_count_for_user
+
+            await increment_posts_count_for_user(db, post.author_user_id)
+
         # Create revision audit record
         await _create_revision(post, user_id, db)
 
@@ -388,6 +396,8 @@ async def admin_publish_post_service(
                 part for part in (author_profile.first_name, author_profile.last_name) if part
             ).strip() or None
 
+    previous_state = post.state
+
     if status == "publish":
         # Respect visibility stored in content
         visibility = (post.content or {}).get("visibility", "public")
@@ -409,6 +419,11 @@ async def admin_publish_post_service(
     post.updated_at = utc_now()
 
     try:
+        if previous_state != PostState.published and post.state == PostState.published:
+            from apps.profiles.services.profile_stats_service import increment_posts_count_for_user
+
+            await increment_posts_count_for_user(db, post.author_user_id)
+
         # Create revision audit record with the admin user as the editor
         await _create_revision(post, admin_user_id, db)
 
@@ -541,39 +556,47 @@ async def delete_post_service(
 
     return post
 
-_OWNER_POST_STATES = (
-    PostState.draft,
-    PostState.processing,
-    PostState.published,
-    PostState.flagged,
-    PostState.hidden,
-    PostState.deleted,
-)
+_LIST_POST_STATES: dict[str, PostState] = {
+    "published": PostState.published,
+    "processing": PostState.processing,
+    "flagged": PostState.flagged,
+    "draft": PostState.draft,
+}
 
 async def list_user_posts_service(
-    target_user_id: UUID,
-    current_user_id: UUID,
-    db: AsyncSession
+    current_user: User,
+    db: AsyncSession,
+    target_user_id: UUID | None = None,
+    state: str = "published",
 ) -> list[Post]:
     """
-    List posts for a user.
-    Owners see draft, processing, published, flagged, hidden, and deleted posts.
-    Other users see only published posts.
+    List posts by state for the current user or, for superadmins, any/all users.
     """
-    # Verify user exists
-    user_result = await db.execute(select(User).where(User.id == target_user_id))
-    if not user_result.scalar_one_or_none():
-        raise ApiError("User not found")
+    from apps.feed.repositories.post_repository import fetch_posts_by_state, user_exists
 
-    stmt = select(Post).where(Post.author_user_id == target_user_id)
-    if target_user_id == current_user_id:
-        stmt = stmt.where(Post.state.in_(_OWNER_POST_STATES))
-    else:
-        stmt = stmt.where(Post.state == PostState.published)
+    requested_state = _LIST_POST_STATES.get(state)
+    if requested_state is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid state. Allowed values: published, processing, flagged, draft",
+        )
 
-    stmt = stmt.order_by(Post.created_at.desc())
-    result = await db.execute(stmt)
-    return list(result.scalars().all())
+    role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    is_superadmin = role == "superadmin"
+    effective_user_id = target_user_id
+
+    if not is_superadmin:
+        if target_user_id is not None and target_user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient permissions",
+            )
+        effective_user_id = current_user.id
+
+    if effective_user_id is not None and not await user_exists(db, effective_user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    return await fetch_posts_by_state(db, state=requested_state, user_id=effective_user_id)
 
 
 def _format_reviewed_post_media(post: Post) -> list[dict]:

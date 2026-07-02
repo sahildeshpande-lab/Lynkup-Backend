@@ -67,3 +67,15 @@ async def decrement_connection_counts_for_users(
             continue
         stats = await get_or_create_profile_stats(db, profile.id)
         stats.connection_count = max((stats.connection_count or 0) - 1, 0)
+
+
+async def increment_posts_count_for_user(
+    db: AsyncSession,
+    user_id: UUID,
+) -> None:
+    """Increase the published posts count for a user's profile."""
+    profile_result = await db.execute(select(Profile).where(Profile.user_id == user_id))
+    profile = profile_result.scalar_one_or_none()
+    if not profile:
+        return
+    profile.posts_count = (profile.posts_count or 0) + 1
