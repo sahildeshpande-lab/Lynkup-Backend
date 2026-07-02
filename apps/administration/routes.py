@@ -74,7 +74,7 @@ async def reset_password(
 async def change_password(
     payload: ChangePasswordRequest,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
+    current_user=Depends(get_current_admin),
 ):
     return await services.change_password(
         payload,
@@ -247,7 +247,44 @@ async def list_processing_posts(
     return ApiResponse(message="Processing posts fetched successfully", data=data)
 
 
-@router.post("/posts/publish", response_model=ApiResponse)
+@router.get("/admin/posts/reviewed", response_model=ApiResponse)
+async def list_reviewed_posts(
+    action: Literal["publish", "flag"] | None = Query(
+        default=None,
+        description="Filter reviewed posts by moderator action",
+    ),
+    moderator_id: str | None = Query(
+        default=None,
+        description="Filter posts reviewed by a specific moderator (superadmin only)",
+    ),
+    page: int | None = Query(default=None, ge=1),
+    pageSize: int | None = Query(default=None, ge=1, le=200),
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_moderator),
+) -> ApiResponse:
+    from apps.feed.services import list_reviewed_posts_service
+    from common.exceptions import ApiError
+
+    target_moderator_id = current_user.id
+    if moderator_id is not None:
+        if current_user.role != "superadmin":
+            raise ApiError("Insufficient permissions")
+        try:
+            target_moderator_id = UUID(moderator_id)
+        except ValueError as exc:
+            raise ApiError("Invalid moderator_id") from exc
+
+    data = await list_reviewed_posts_service(
+        db,
+        moderator_id=target_moderator_id,
+        action=action,
+        page=page,
+        page_size=pageSize,
+    )
+    return ApiResponse(message="Posts fetched successfully", data=data)
+
+
+@router.patch("/posts/publish", response_model=ApiResponse)
 async def admin_publish_or_flag_post(
     payload: AdminPublishPostRequest,
     db: AsyncSession = Depends(get_session),
@@ -259,13 +296,13 @@ async def admin_publish_or_flag_post(
     from apps.feed.services import admin_publish_post_service, format_post_detail
     post = await admin_publish_post_service(
         post_id=payload.post_id,
-        action=payload.action,
+        status=payload.status,
         admin_user_id=current_user.id,
         db=db
     )
     return ApiResponse(
         status=True,
-        message=f"Post {payload.action}ed successfully",
+        message=f"Post {payload.status}ed successfully",
         data=format_post_detail(post)
     )
 

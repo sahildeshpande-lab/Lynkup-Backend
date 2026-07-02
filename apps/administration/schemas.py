@@ -108,5 +108,5 @@ class AdminResetPasswordRequest(BaseModel):
 
 class AdminPublishPostRequest(BaseModel):
     post_id: UUID
-    action: Literal["publish", "flag"] = "publish"
+    status: Literal["publish", "flag"] = "publish"
 

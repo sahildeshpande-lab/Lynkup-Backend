@@ -95,10 +95,10 @@ def _media_asset_to_response(media_asset: MediaAsset) -> dict:
 
 async def upload_post_media_service(
     user_id: UUID,
-    file: UploadFile,
+    file: list[UploadFile],
     media_type: MediaType,
     db: AsyncSession,
-) -> dict:
+) -> list[dict]:
     """
     Validate uploaded file, save it using the storage utility,
     and persist metadata in the MediaAsset table.

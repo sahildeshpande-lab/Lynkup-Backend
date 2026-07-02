@@ -390,3 +390,42 @@ def test_list_processing_posts_route(monkeypatch) -> None:
     assert body["data"]["items"][0]["post_id"] == "22222222-2222-2222-2222-222222222222"
     assert body["data"]["items"][0]["is_moderator_reviewed"] is False
 
+
+def test_list_reviewed_posts_route(monkeypatch) -> None:
+    async def _mock_list_reviewed_posts(_db, moderator_id, action=None, page=None, page_size=None):
+        _ = (moderator_id, action, page, page_size)
+        return {
+            "items": [
+                {
+                    "id": "22222222-2222-2222-2222-222222222222",
+                    "user_id": "11111111-1111-1111-1111-111111111111",
+                    "caption": "Reviewed post",
+                    "content_html": "<p>Reviewed</p>",
+                    "review_status": "publish",
+                    "is_moderator_reviewed": True,
+                    "reviewed_at": "2026-01-01T00:00:00+00:00",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "moderator_id": "33333333-3333-3333-3333-333333333333",
+                    "profile_photo_url": "/static/uploads/profiles/jane.jpg",
+                    "first_name": "Jane",
+                    "last_name": "Doe",
+                    "media": [],
+                }
+            ],
+            "page": 1,
+            "pageSize": 1,
+            "totalItems": 1,
+            "totalPages": 1,
+        }
+
+    import apps.feed.services as feed_services
+    monkeypatch.setattr(feed_services, "list_reviewed_posts_service", _mock_list_reviewed_posts)
+
+    response = client.get("/api/v1/admin/posts/reviewed", params={"action": "publish", "page": 1, "pageSize": 10})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is True
+    assert body["message"] == "Posts fetched successfully"
+    assert body["data"]["items"][0]["review_status"] == "publish"
+

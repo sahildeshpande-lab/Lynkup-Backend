@@ -32,6 +32,7 @@ from apps.feed.services import (
     list_draft_posts_service,
     delete_draft_post_service,
     list_user_posts_service,
+    list_reviewed_posts_service,
     get_feed_service,
 )
 
@@ -39,7 +40,12 @@ from apps.feed.services import (
 async def clean_feed_pytest_data(session):
     # Find test users
     result = await session.execute(
-        select(User).where(User.email.in_(["pytest_feed_user@example.com", "pytest_feed_other@example.com", "third@example.com"]))
+        select(User).where(User.email.in_([
+            "pytest_feed_user@example.com",
+            "pytest_feed_other@example.com",
+            "pytest_feed_mod_b@example.com",
+            "third@example.com",
+        ]))
     )
     users = result.scalars().all()
     user_ids = [u.id for u in users]
@@ -450,6 +456,8 @@ async def test_publish_post_service_success(test_users) -> None:
     async with async_session_factory() as session:
         post = await admin_publish_post_service(post_id, "publish", user.id, session)
         assert post.state == PostState.published
+        assert post.moderator_id == user.id
+        assert post.is_moderator_reviewed is True
 
 @pytest.mark.asyncio
 async def test_flag_post_service_success(test_users) -> None:
@@ -464,6 +472,98 @@ async def test_flag_post_service_success(test_users) -> None:
     async with async_session_factory() as session:
         post = await admin_publish_post_service(post_id, "flag", user.id, session)
         assert post.state == PostState.flagged
+        assert post.moderator_id == user.id
+
+
+@pytest.mark.asyncio
+async def test_list_reviewed_posts_service_filters_by_moderator_and_action(test_users) -> None:
+    author, moderator_a = test_users
+    moderator_b = User(
+        email="pytest_feed_mod_b@example.com",
+        role="moderator",
+        firebase_uid=f"uid-feed-mod-b-{uuid.uuid4()}",
+        status="active",
+    )
+
+    async with async_session_factory() as session:
+        session.add(moderator_b)
+        await session.commit()
+        await session.refresh(moderator_b)
+
+        published_by_a = Post(
+            author_user_id=author.id,
+            content={"caption": "Published by A", "visibility": "public"},
+            state=PostState.published,
+            is_moderator_reviewed=True,
+            moderator_id=moderator_a.id,
+        )
+        flagged_by_a = Post(
+            author_user_id=author.id,
+            content={"caption": "Flagged by A", "visibility": "public"},
+            state=PostState.flagged,
+            is_moderator_reviewed=True,
+            moderator_id=moderator_a.id,
+        )
+        published_by_b = Post(
+            author_user_id=author.id,
+            content={"caption": "Published by B", "visibility": "public"},
+            state=PostState.published,
+            is_moderator_reviewed=True,
+            moderator_id=moderator_b.id,
+        )
+        session.add_all([published_by_a, flagged_by_a, published_by_b])
+        await session.commit()
+
+    async with async_session_factory() as session:
+        all_for_a = await list_reviewed_posts_service(session, moderator_a.id)
+        assert len(all_for_a["items"]) == 2
+        captions = {item["caption"] for item in all_for_a["items"]}
+        assert captions == {"Published by A", "Flagged by A"}
+
+        publish_only = await list_reviewed_posts_service(session, moderator_a.id, action="publish")
+        assert len(publish_only["items"]) == 1
+        assert publish_only["items"][0]["review_status"] == "publish"
+
+        flag_only = await list_reviewed_posts_service(session, moderator_a.id, action="flag")
+        assert len(flag_only["items"]) == 1
+        assert flag_only["items"][0]["review_status"] == "flag"
+
+        publish_for_a = await list_reviewed_posts_service(session, moderator_a.id, action="publish")
+        assert all(item["caption"] != "Published by B" for item in publish_for_a["items"])
+
+
+@pytest.mark.asyncio
+async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
+    author, moderator = test_users
+
+    async with async_session_factory() as session:
+        reviewed_post = Post(
+            author_user_id=author.id,
+            content={"caption": "Reviewed via route", "visibility": "public"},
+            state=PostState.published,
+            is_moderator_reviewed=True,
+            moderator_id=moderator.id,
+        )
+        session.add(reviewed_post)
+        await session.commit()
+
+    async def _override_get_current_moderator():
+        return moderator
+
+    app.dependency_overrides[get_current_moderator] = _override_get_current_moderator
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.get("/api/v1/admin/posts/reviewed", params={"action": "publish"})
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] is True
+            assert body["message"] == "Posts fetched successfully"
+            assert len(body["data"]["items"]) == 1
+            assert body["data"]["items"][0]["caption"] == "Reviewed via route"
+            assert body["data"]["items"][0]["review_status"] == "publish"
+    finally:
+        app.dependency_overrides.pop(get_current_moderator, None)
 
 
 @pytest.mark.asyncio
@@ -632,10 +732,10 @@ async def test_routes_post_management_flow(test_users) -> None:
 
             # 3. POST /posts/publish (admin route)
             publish_res = await ac.post(
-                "/api/v1/posts/publish",
+                "/api/v1/patch/publish",
                 json={
                     "post_id": str(post_id),
-                    "action": "publish"
+                    "status": "publish"
                 }
             )
             assert publish_res.status_code == 200

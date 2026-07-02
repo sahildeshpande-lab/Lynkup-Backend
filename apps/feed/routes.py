@@ -29,19 +29,19 @@ router = APIRouter(tags=["6] Feed / Posts"])
 
 @router.post("/postupload", response_model=ApiResponse)
 async def upload_post_media(
-    file: UploadFile = File(...),
+    files:  list[UploadFile] = File(...),
     type: MediaType = Form(...),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     data = await upload_post_media_service(
         user_id=current_user.id,
-        file=file,
+        files=files,
         media_type=type,
         db=db,
     )
     return success_response(
-        f"{type.value} uploaded",
+        f"{len(data)} {type.value}(s) uploaded",
         data,
         response_cls=ApiResponse,
     )

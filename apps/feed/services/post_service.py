@@ -321,12 +321,12 @@ async def publish_post_service(
 
 async def admin_publish_post_service(
     post_id: UUID,
-    action: Literal["publish", "flag"],
+    status: Literal["publish", "flag"],
     admin_user_id: UUID,
     db: AsyncSession
 ) -> Post:
     """
-    Publish or flag a post by an admin.
+    Publish or flag a post by a moderator/admin.
     """
     result = await db.execute(select(Post).where(Post.id == post_id))
     post = result.scalar_one_or_none()
@@ -334,18 +334,19 @@ async def admin_publish_post_service(
     if not post:
         raise ApiError("Post not found")
 
-    if action == "publish":
+    if status == "publish":
         # Respect visibility stored in content
         visibility = (post.content or {}).get("visibility", "public")
         if visibility == "hidden" or post.state == PostState.hidden:
             post.state = PostState.hidden
         else:
             post.state = PostState.published
-    elif action == "flag":
+    elif status == "flag":
         post.state = PostState.flagged
     else:
-        raise ApiError(f"Invalid action: {action}")
+        raise ApiError(f"Invalid status: {status}")
 
+    post.moderator_id = admin_user_id
     post.is_moderator_reviewed = True
     post.reviewed_at = utc_now()
 
@@ -513,6 +514,52 @@ async def list_user_posts_service(
     return list(result.scalars().all())
 
 
+def _format_reviewed_post_media(post: Post) -> list[dict]:
+    media_data = []
+    if post.attachments:
+        for attachment in post.attachments:
+            asset = attachment.media_asset
+            if asset:
+                media_data.append({
+                    "url": generate_download_url(asset.key),
+                    "type": asset.type.value if hasattr(asset.type, "value") else str(asset.type),
+                    "mime_type": asset.mime_type,
+                    "original_filename": asset.original_filename,
+                    "file_size": asset.file_size,
+                    "key": asset.key,
+                })
+    return media_data
+
+
+def _review_status_from_post(post: Post) -> str:
+    if post.state == PostState.flagged:
+        return "flag"
+    return "publish"
+
+
+def _format_reviewed_post_item(post: Post, profile) -> dict:
+    content = post.content or {}
+    return {
+        "id": post.id,
+        "user_id": post.author_user_id,
+        "caption": content.get("caption"),
+        "content_html": content.get("content_html") or "",
+        "review_status": _review_status_from_post(post),
+        "is_moderator_reviewed": post.is_moderator_reviewed,
+        "reviewed_at": post.reviewed_at,
+        "created_at": post.created_at,
+        "moderator_id": post.moderator_id,
+        "profile_photo_url": (
+            generate_profile_image_url(profile.profile_photo_url)
+            if profile and profile.profile_photo_url
+            else None
+        ),
+        "first_name": profile.first_name if profile else None,
+        "last_name": profile.last_name if profile else None,
+        "media": _format_reviewed_post_media(post),
+    }
+
+
 def _format_processing_post_item(post: Post, profile) -> dict:
     content = post.content or {}
     return {
@@ -564,3 +611,39 @@ async def list_processing_posts_service(
     p = page or 1
     ps = page_size if page_size is not None else (len(items) if items else 1)
     return build_paginated_response(items, p, ps, total_items).model_dump()
+
+
+async def list_reviewed_posts_service(
+    db: AsyncSession,
+    moderator_id: UUID,
+    action: Literal["publish", "flag"] | None = None,
+    page: int | None = None,
+    page_size: int | None = None,
+) -> dict:
+    from common.pagination import build_paginated_response
+    from apps.feed.repositories.post_repository import (
+        count_reviewed_posts_for_moderator,
+        fetch_reviewed_posts_for_moderator,
+    )
+
+    total_items = await count_reviewed_posts_for_moderator(db, moderator_id, action)
+
+    p = page or 1
+    if page is None and page_size is None:
+        ps = total_items if total_items > 0 else 1
+        offset = 0
+        limit = None
+    else:
+        ps = page_size or 20
+        offset = (p - 1) * ps
+        limit = ps
+
+    posts = await fetch_reviewed_posts_for_moderator(
+        db,
+        moderator_id,
+        action=action,
+        offset=offset,
+        limit=limit,
+    )
+    formatted = [_format_reviewed_post_item(post, profile) for post, profile in posts]
+    return build_paginated_response(formatted, p, ps, total_items).model_dump()
