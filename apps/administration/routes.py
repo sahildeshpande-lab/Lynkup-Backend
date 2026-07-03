@@ -238,15 +238,16 @@ async def update_user_profile(
 async def list_processing_posts(
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
+    moderator_id: UUID | None = Query(default=None),
     db: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_moderator),
 ) -> ApiResponse:
     from apps.feed.services import list_processing_posts_service
     role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
-    moderator_id = None if role == "superadmin" else current_user.id
+    target_moderator_id = moderator_id if role == "superadmin" else current_user.id
     data = await list_processing_posts_service(
         db,
-        moderator_id=moderator_id,
+        moderator_id=target_moderator_id,
         page=page,
         page_size=pageSize,
     )

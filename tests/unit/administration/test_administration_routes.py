@@ -35,21 +35,23 @@ async def _override_session():
 
 
 async def _override_admin():
-    return User(
+    u = User(
         id="11111111-1111-1111-1111-111111111111",
         email="admin@example.com",
-        role="superadmin",
         firebase_uid="admin-uid",
     )
+    u.role = "superadmin"
+    return u
 
 
 async def _override_moderator():
-    return User(
+    u = User(
         id="22222222-2222-2222-2222-222222222222",
         email="moderator@example.com",
-        role="moderator",
         firebase_uid="moderator-uid",
     )
+    u.role = "moderator"
+    return u
 
 
 def setup_module() -> None:
@@ -206,7 +208,7 @@ def test_update_completeness_weights(monkeypatch) -> None:
 
 
 def test_admin_create_user_route(monkeypatch) -> None:
-    async def _mock_admin_create_user(payload, db):
+    async def _mock_admin_create_user(payload, db, background_tasks=None):
         role_name = payload.role.value if hasattr(payload.role, "value") else str(payload.role)
         return ApiResponse(
             status=True,
@@ -390,6 +392,67 @@ def test_list_processing_posts_route(monkeypatch) -> None:
     assert body["data"]["items"][0]["first_name"] == "Jane"
     assert body["data"]["items"][0]["post_id"] == "22222222-2222-2222-2222-222222222222"
     assert body["data"]["items"][0]["is_moderator_reviewed"] is False
+
+
+def test_list_processing_posts_route_superadmin_with_moderator_id(monkeypatch) -> None:
+    from uuid import UUID
+    app.dependency_overrides[get_current_moderator] = _override_admin
+
+    called_moderator_id = None
+
+    async def _mock_list_processing_posts(_db, moderator_id=None, page=None, page_size=None):
+        nonlocal called_moderator_id
+        called_moderator_id = moderator_id
+        return {
+            "items": [],
+            "page": 1,
+            "pageSize": 1,
+            "totalItems": 0,
+            "totalPages": 1,
+        }
+
+    import apps.feed.services as feed_services
+    monkeypatch.setattr(feed_services, "list_processing_posts_service", _mock_list_processing_posts)
+
+    try:
+        # Call with moderator_id query param
+        target_uuid = "33333333-3333-3333-3333-333333333333"
+        response = client.get("/api/v1/posts/processing", params={"moderator_id": target_uuid})
+        assert response.status_code == 200
+        assert called_moderator_id == UUID(target_uuid)
+
+        # Call without moderator_id query param
+        response = client.get("/api/v1/posts/processing")
+        assert response.status_code == 200
+        assert called_moderator_id is None
+    finally:
+        app.dependency_overrides[get_current_moderator] = _override_moderator
+
+
+def test_list_processing_posts_route_moderator_ignores_moderator_id(monkeypatch) -> None:
+    from uuid import UUID
+    called_moderator_id = None
+
+    async def _mock_list_processing_posts(_db, moderator_id=None, page=None, page_size=None):
+        nonlocal called_moderator_id
+        called_moderator_id = moderator_id
+        return {
+            "items": [],
+            "page": 1,
+            "pageSize": 1,
+            "totalItems": 0,
+            "totalPages": 1,
+        }
+
+    import apps.feed.services as feed_services
+    monkeypatch.setattr(feed_services, "list_processing_posts_service", _mock_list_processing_posts)
+
+    # Call with moderator_id query param as a standard moderator.
+    # It should use current_user.id ("22222222-2222-2222-2222-222222222222") instead of the passed target_uuid.
+    target_uuid = "33333333-3333-3333-3333-333333333333"
+    response = client.get("/api/v1/posts/processing", params={"moderator_id": target_uuid})
+    assert response.status_code == 200
+    assert str(called_moderator_id) == "22222222-2222-2222-2222-222222222222"
 
 
 def test_list_reviewed_posts_route(monkeypatch) -> None:
