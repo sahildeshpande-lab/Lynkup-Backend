@@ -340,6 +340,91 @@ async def test_logout_sets_pending(db_session: AsyncSession, monkeypatch):
     assert refreshed.status == UserStatus.active
 
 @pytest.mark.asyncio
+async def test_logout_deletes_device_so_next_login_requires_otp(db_session: AsyncSession, monkeypatch):
+    from apps.accounts.services import _hash_password
+    from apps.accounts.schemas import LoginRequest, LogoutRequest
+    from apps.accounts.db_models import UserInstallation
+
+    sent_emails = []
+
+    async def mock_send_otp_email(to_email, otp, otp_purpose):
+        sent_emails.append((to_email, otp, otp_purpose))
+        return True
+
+    monkeypatch.setattr("apps.accounts.services.send_otp_email", mock_send_otp_email)
+    monkeypatch.setattr("apps.accounts.services.revoke_firebase_tokens", lambda *args, **kwargs: None)
+
+    uid = str(uuid.uuid4())
+    email = f"logout_device_{uid[:8]}@example.com"
+    user = User(
+        firebase_uid=uid,
+        email=email,
+        password_hash=_hash_password("ValidPassword123"),
+        status=UserStatus.active,
+        onboarding_status="not_started",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        email_verified_at=datetime.now(timezone.utc),
+    )
+    db_session.add(user)
+    await db_session.flush()
+
+    db_session.add(UserInstallation(
+        user_id=user.id,
+        device_id="device-otp-again",
+        platform=None,
+        app_version=None,
+        installed_at=datetime.now(timezone.utc),
+        last_active_at=datetime.now(timezone.utc),
+    ))
+    await db_session.commit()
+
+    first_login = await login(
+        payload=LoginRequest(
+            email=email,
+            password="ValidPassword123",
+            firebaseId="valid-id-token",
+            device_id="device-otp-again",
+        ),
+        firebase_user={"uid": uid, "email": email},
+        db=db_session,
+    )
+    assert first_login.status is True
+    assert first_login.message == "Login successful"
+    assert first_login.data["emailSent"] is False
+
+    await logout(
+        payload=LogoutRequest(firebaseId="firebase-token", device_id="device-otp-again"),
+        firebase_user={"uid": uid},
+        db=db_session,
+    )
+
+    deleted_installation = (
+        await db_session.execute(
+            select(UserInstallation).where(
+                UserInstallation.user_id == user.id,
+                UserInstallation.device_id == "device-otp-again",
+            )
+        )
+    ).scalar_one_or_none()
+    assert deleted_installation is None
+
+    second_login = await login(
+        payload=LoginRequest(
+            email=email,
+            password="ValidPassword123",
+            firebaseId="valid-id-token",
+            device_id="device-otp-again",
+        ),
+        firebase_user={"uid": uid, "email": email},
+        db=db_session,
+    )
+    assert second_login.status is True
+    assert second_login.message == "Verification email sent. Please verify your OTP."
+    assert second_login.data["emailSent"] is True
+    assert sent_emails
+
+@pytest.mark.asyncio
 async def test_logout_all_sets_pending(db_session: AsyncSession):
     # Create an active user
     uid = str(uuid.uuid4())
@@ -354,6 +439,15 @@ async def test_logout_all_sets_pending(db_session: AsyncSession):
     )
     db_session.add(user)
     await db_session.flush()
+    from apps.accounts.db_models import UserInstallation
+    db_session.add(UserInstallation(
+        user_id=user.id,
+        device_id="logout-all-device",
+        platform=None,
+        app_version=None,
+        installed_at=datetime.now(timezone.utc),
+        last_active_at=datetime.now(timezone.utc),
+    ))
     await db_session.commit()
 
     response = await logout_all(current_user=user, db=db_session)
@@ -362,6 +456,12 @@ async def test_logout_all_sets_pending(db_session: AsyncSession):
 
     refreshed = await db_session.get(User, user.id)
     assert refreshed.status == UserStatus.active
+    installation = (
+        await db_session.execute(
+            select(UserInstallation).where(UserInstallation.user_id == user.id)
+        )
+    ).scalar_one_or_none()
+    assert installation is None
 
 @pytest.mark.asyncio
 async def test_email_queue_and_cron_worker(db_session: AsyncSession, monkeypatch):

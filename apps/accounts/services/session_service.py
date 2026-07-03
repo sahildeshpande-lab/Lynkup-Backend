@@ -48,9 +48,7 @@ async def logout(
     ).scalar_one_or_none()
 
     if installation:
-        installation.is_active = False
-        installation.last_active_at = _now()
-        db.add(installation)
+        await db.delete(installation)
     else:
         logger.info(
             "Logout requested for user %s with unknown device_id %s",
@@ -90,6 +88,12 @@ async def logout_all(current_user: User, db: AsyncSession) -> dict:
     rows = (await db.execute(select(RefreshToken).where(RefreshToken.user_id == current_user.id, RefreshToken.revoked_at == None))).scalars().all()
     for row in rows:
         await _revoke_refresh_token_row(db, row)
+
+    installation_rows = (
+        await db.execute(select(UserInstallation).where(UserInstallation.user_id == current_user.id))
+    ).scalars().all()
+    for installation in installation_rows:
+        await db.delete(installation)
 
     # current_user.status = UserStatus.pending
     current_user.updated_at = _now()
