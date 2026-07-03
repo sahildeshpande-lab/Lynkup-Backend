@@ -30,19 +30,6 @@ def _credentials_or_401(
     return credentials
 
 
-# async def get_current_firebase_user(
-#     credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
-# ) -> dict:
-#     """Verify a Firebase ID token without a revocation network call."""
-#     credentials = _credentials_or_401(credentials)
-#     try:
-#         return verify_firebase_token(credentials.credentials, check_revoked=False)
-#     except Exception as exc:
-#         raise HTTPException(
-#             status_code=status.HTTP_401_UNAUTHORIZED,
-#             detail="Invalid Firebase ID token",
-#         ) from exc
-
 async def get_current_firebase_user(
     credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
 ) -> dict:

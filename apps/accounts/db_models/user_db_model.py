@@ -131,10 +131,3 @@ class PasswordResetToken(SQLModel, table=True):
     used_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
 
-
-# UserRole.model_rebuild()
-# RolePermission.model_rebuild()
-# User.model_rebuild()
-# Role.model_rebuild()
-# Permission.model_rebuild()
-# PasswordResetToken.model_rebuild()
