@@ -4,7 +4,7 @@ import sys
 from types import ModuleType
 
 from . import media_service as _service_module_0
-from .media_service import upload_post_media_service, _verify_and_attach_media
+from .media_service import upload_post_media_service, _verify_and_attach_media, get_media_type
 
 from . import revision_service as _service_module_1
 from .revision_service import _build_content_dict, _build_media_snapshot, _create_revision, _sync_hashtags
@@ -31,6 +31,7 @@ sys.modules[__name__].__class__ = _ServicesModule
 __all__ = [
     "upload_post_media_service",
     "_verify_and_attach_media",
+    "get_media_type",
     "_build_content_dict",
     "_build_media_snapshot",
     "_create_revision",

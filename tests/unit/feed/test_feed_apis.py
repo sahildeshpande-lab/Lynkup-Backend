@@ -24,6 +24,7 @@ from apps.profiles.db_models import Profile
 from common.enums import MediaType, MediaAssetState, PostState
 from apps.feed.schemas import SavePostRequest, EditPostRequest, MediaItem, PostContentPayload, EditPostContentPayload, DeletePostRequest
 from apps.feed.services import (
+    get_media_type,
     upload_post_media_service,
     save_post_service,
     edit_post_service,
@@ -178,7 +179,6 @@ async def test_upload_post_media_service_success(test_users) -> None:
         res = await upload_post_media_service(
             user_id=user.id,
             files=[file],
-            media_types=[MediaType.image],
             db=session,
         )
 
@@ -187,7 +187,7 @@ async def test_upload_post_media_service_success(test_users) -> None:
         assert item["id"] is not None
         assert "posts/" in item["key"]
         assert item["key"].endswith(".png")
-        assert item["type"] == MediaType.image
+        assert item["type"] == "image"
         assert "/static/uploads/" in item["url"]
 
         media_id = item["id"]
@@ -215,29 +215,8 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
     )
     async with async_session_factory() as session:
         with pytest.raises(ApiError) as exc_info:
-            await upload_post_media_service(user.id, [file_empty], [MediaType.image], session)
+            await upload_post_media_service(user.id, [file_empty], session)
         assert "empty" in exc_info.value.message
-
-    # Mismatch media type
-    file_mismatch = UploadFile(
-        filename="video.mp4",
-        file=io.BytesIO(b"some video bytes"),
-        headers={"content-type": "video/mp4"},
-    )
-    async with async_session_factory() as session:
-        with pytest.raises(ApiError) as exc_info:
-            await upload_post_media_service(user.id, [file_mismatch], [MediaType.image], session)
-        assert "Invalid file type" in exc_info.value.message
-
-    file_no_type = UploadFile(
-        filename="image.png",
-        file=io.BytesIO(b"image bytes"),
-        headers={"content-type": "image/png"},
-    )
-    async with async_session_factory() as session:
-        with pytest.raises(ApiError) as exc_info:
-            await upload_post_media_service(user.id, [file_no_type], [], session)
-        assert "corresponding type" in exc_info.value.message
 
     too_many_files = [
         UploadFile(
@@ -252,10 +231,20 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
             await upload_post_media_service(
                 user.id,
                 too_many_files,
-                [MediaType.image] * len(too_many_files),
                 session,
             )
         assert "Maximum 5 files" in exc_info.value.message
+
+
+def test_get_media_type_maps_content_types() -> None:
+    assert get_media_type("image/gif") == "gif"
+    assert get_media_type("image/png") == "image"
+    assert get_media_type("video/mp4") == "video"
+    assert get_media_type("audio/mpeg") == "audio"
+    assert get_media_type("application/pdf") == "document"
+    assert get_media_type("text/plain") == "document"
+    assert get_media_type("application/octet-stream") == "document"
+    assert get_media_type("") == "document"
 
 
 @pytest.mark.asyncio
@@ -487,13 +476,12 @@ async def test_routes_endpoints_via_test_client(test_users) -> None:
             file_data = b"image content"
             files = [
                 ("files", ("test.jpg", io.BytesIO(file_data), "image/jpeg")),
-                ("types", (None, "image")),
             ]
             response = await ac.post("/api/v1/postupload", files=files)
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
-            assert body["message"] == "1 media file(s) uploaded"
+            assert body["message"] == "Files uploaded successfully"
             assert isinstance(body["data"], list)
             media_id = body["data"][0]["id"]
 
@@ -522,7 +510,7 @@ async def test_routes_endpoints_via_test_client(test_users) -> None:
 
 
 @pytest.mark.asyncio
-async def test_postupload_accepts_multiple_files_with_matching_types(test_users) -> None:
+async def test_postupload_accepts_multiple_files_and_infers_types(test_users) -> None:
     user, _ = test_users
 
     async def _override_get_current_user():
@@ -534,25 +522,23 @@ async def test_postupload_accepts_multiple_files_with_matching_types(test_users)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
             files = [
                 ("files", ("beach.jpg", io.BytesIO(b"image one"), "image/jpeg")),
-                ("types", (None, "image")),
-                ("files", ("hotel.jpg", io.BytesIO(b"image two"), "image/jpeg")),
-                ("types", (None, "image")),
+                ("files", ("animation.gif", io.BytesIO(b"gif bytes"), "image/gif")),
                 ("files", ("reel.mp4", io.BytesIO(b"video bytes"), "video/mp4")),
-                ("types", (None, "video")),
+                ("files", ("notes.txt", io.BytesIO(b"text bytes"), "text/plain")),
             ]
             response = await ac.post("/api/v1/postupload", files=files)
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
-            assert body["message"] == "3 media file(s) uploaded"
-            assert [item["type"] for item in body["data"]] == ["image", "image", "video"]
-            assert [item["key"].split(".")[-1] for item in body["data"]] == ["jpg", "jpg", "mp4"]
+            assert body["message"] == "Files uploaded successfully"
+            assert [item["type"] for item in body["data"]] == ["image", "gif", "video", "document"]
+            assert [item["key"].split(".")[-1] for item in body["data"]] == ["jpg", "gif", "mp4", "txt"]
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
 
 @pytest.mark.asyncio
-async def test_postupload_rejects_mismatched_file_and_type_counts(test_users) -> None:
+async def test_postupload_rejects_too_many_files(test_users) -> None:
     user, _ = test_users
 
     async def _override_get_current_user():
@@ -563,15 +549,14 @@ async def test_postupload_rejects_mismatched_file_and_type_counts(test_users) ->
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
             files = [
-                ("files", ("beach.jpg", io.BytesIO(b"image one"), "image/jpeg")),
-                ("files", ("hotel.jpg", io.BytesIO(b"image two"), "image/jpeg")),
-                ("types", (None, "image")),
+                ("files", (f"image_{index}.jpg", io.BytesIO(b"image bytes"), "image/jpeg"))
+                for index in range(6)
             ]
             response = await ac.post("/api/v1/postupload", files=files)
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is False
-            assert body["message"] == "Each file must have a corresponding type"
+            assert body["message"] == "Maximum 5 files allowed per request"
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 

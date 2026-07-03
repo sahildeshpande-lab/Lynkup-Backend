@@ -9,7 +9,6 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.feed.content_utils import (
-    ALLOWED_DOCUMENT_MIMETYPES,
     MAX_MEDIA_COUNT,
     validate_media_asset,
 )
@@ -18,18 +17,21 @@ from common.enums import MediaAssetState, MediaType
 from common.exceptions import ApiError
 from core.images import generate_download_url, save_image
 
-def _validate_content_type(content_type: str, media_type: MediaType) -> None:
+
+def get_media_type(content_type: str) -> str:
+    """Infer the media type used by feed media assets from a MIME type."""
     normalized = (content_type or "").lower()
-    if media_type == MediaType.image and not normalized.startswith("image/"):
-        raise ApiError("Invalid file type for image media asset")
-    if media_type == MediaType.gif and normalized != "image/gif":
-        raise ApiError("Invalid file type for gif media asset")
-    if media_type == MediaType.video and not normalized.startswith("video/"):
-        raise ApiError("Invalid file type for video media asset")
-    if media_type == MediaType.audio and not normalized.startswith("audio/"):
-        raise ApiError("Invalid file type for audio media asset")
-    if media_type == MediaType.document and normalized not in ALLOWED_DOCUMENT_MIMETYPES:
-        raise ApiError("Invalid file type for document media asset")
+    if normalized == "image/gif":
+        return MediaType.gif.value
+    if normalized.startswith("image/"):
+        return MediaType.image.value
+    if normalized.startswith("video/"):
+        return MediaType.video.value
+    if normalized.startswith("audio/"):
+        return MediaType.audio.value
+    if normalized.startswith("application/") or normalized.startswith("text/"):
+        return MediaType.document.value
+    return MediaType.document.value
 
 
 def _resolve_extension(filename: str | None, content_type: str) -> str:
@@ -59,10 +61,9 @@ def _build_media_asset(
     user_id: UUID,
     file: UploadFile,
     content: bytes,
-    media_type: MediaType,
 ) -> MediaAsset:
     content_type = file.content_type or ""
-    _validate_content_type(content_type, media_type)
+    media_type = MediaType(get_media_type(content_type))
 
     ext = _resolve_extension(file.filename, content_type)
     file_uuid = uuid.uuid4()
@@ -89,15 +90,14 @@ def _media_asset_to_response(media_asset: MediaAsset) -> dict:
     return {
         "id": media_asset.id,
         "key": media_asset.key,
-        "type": media_asset.type,
         "url": generate_download_url(media_asset.key),
+        "type": media_asset.type.value if hasattr(media_asset.type, "value") else str(media_asset.type),
     }
 
 
 async def upload_post_media_service(
     user_id: UUID,
     files: list[UploadFile],
-    media_types: list[MediaType],
     db: AsyncSession,
 ) -> list[dict]:
     """
@@ -108,11 +108,9 @@ async def upload_post_media_service(
         raise ApiError("At least one file is required")
     if len(files) > MAX_MEDIA_COUNT:
         raise ApiError(f"Maximum {MAX_MEDIA_COUNT} files allowed per request")
-    if len(files) != len(media_types):
-        raise ApiError("Each file must have a corresponding type")
 
     media_assets: list[MediaAsset] = []
-    for file, media_type in zip(files, media_types, strict=True):
+    for file in files:
         content = await file.read()
         if len(content) == 0:
             raise ApiError("Cannot upload an empty file")
@@ -121,7 +119,6 @@ async def upload_post_media_service(
             user_id=user_id,
             file=file,
             content=content,
-            media_type=media_type,
         )
         db.add(media_asset)
         media_assets.append(media_asset)

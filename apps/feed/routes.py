@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 
 from core.database.session import get_session
 from core.security.auth import get_current_app_user, get_current_user
 from apps.accounts.db_models import User
-from common.enums import MediaType
-from common.exceptions import ApiError
 from common.responses import success_response
 from apps.feed.schemas import ApiResponse, SavePostRequest, DeletePostRequest, EditPostRequest
 from apps.feed.services import (
@@ -31,21 +29,16 @@ router = APIRouter(tags=["6] Feed / Posts"])
 @router.post("/postupload", response_model=ApiResponse)
 async def upload_post_media(
     files: list[UploadFile] = File(...),
-    types: list[MediaType] = Form(...),
     current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    if len(files) != len(types):
-        raise ApiError("Each file must have a corresponding type")
-
     data = await upload_post_media_service(
         user_id=current_user.id,
         files=files,
-        media_types=types,
         db=db,
     )
     return success_response(
-        f"{len(data)} media file(s) uploaded",
+        "Files uploaded successfully",
         data,
         response_cls=ApiResponse,
     )
