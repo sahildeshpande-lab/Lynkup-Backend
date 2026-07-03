@@ -93,7 +93,12 @@ def test_generate_profile_image_url(monkeypatch):
 def test_generate_download_url(monkeypatch):
     # Empty bucket or file name
     monkeypatch.setattr(settings, "aws_s3_bucket", None)
+    monkeypatch.setattr(settings, "base_url", None)
+    monkeypatch.setattr(settings, "base_url_img", None)
     assert generate_download_url("test.jpg") == "/static/uploads/test.jpg"
+    monkeypatch.setattr(settings, "base_url", "https://lynkup-backend-l0q3.onrender.com/")
+    assert generate_download_url("posts/test.jpg") == "https://lynkup-backend-l0q3.onrender.com/static/uploads/posts/test.jpg"
+    assert generate_download_url("/static/uploads/posts/test.jpg") == "https://lynkup-backend-l0q3.onrender.com/static/uploads/posts/test.jpg"
     
     monkeypatch.setattr(settings, "aws_s3_bucket", "test-bucket")
     assert generate_download_url("") == ""

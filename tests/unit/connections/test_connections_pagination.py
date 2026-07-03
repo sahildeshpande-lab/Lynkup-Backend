@@ -158,18 +158,26 @@ async def test_get_recommendations_no_pagination(test_users) -> None:
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
-            # Recommend Eve (5) because she has no pending connection request
+            # Return all active normal users with relationship flags.
             data = body["data"]
             assert isinstance(data, dict)
             assert "items" in data
             assert data["page"] == 1
-            assert data["pageSize"] >= 1
-            assert data["totalItems"] >= 1
+            assert data["pageSize"] >= 5
+            assert data["totalItems"] >= 5
             assert data["totalPages"] == 1
             eve_recommendation = next((item for item in data["items"] if item["first_name"] == "Eve"), None)
             assert eve_recommendation is not None
-            assert eve_recommendation["profilePhoto_url"] == "/static/uploads/photo_eve.png"
+            assert eve_recommendation["profilePhoto_url"].endswith("/static/uploads/photo_eve.png")
             assert eve_recommendation["first_name"] == "Eve"
+            assert eve_recommendation["is_deleted"] is False
+            assert eve_recommendation["request_received"] is False
+
+            alice_recommendation = next((item for item in data["items"] if item["first_name"] == "Alice"), None)
+            assert alice_recommendation is not None
+            assert alice_recommendation["is_deleted"] is False
+            assert alice_recommendation["request_received"] is True
+            assert alice_recommendation["request_sent"] is False
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -185,8 +193,7 @@ async def test_get_recommendations_with_pagination(test_users) -> None:
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
-            # We want more recommendations to test pagination. Let's make Eve (5) the only one still.
-            # But let's verify pagination envelope is returned.
+            # Verify all visible users are paginated with flags.
             response = await ac.get("/api/v1/recommendations/connections", params={"page": 1, "pageSize": 200})
             assert response.status_code == 200
             body = response.json()
@@ -196,11 +203,12 @@ async def test_get_recommendations_with_pagination(test_users) -> None:
             assert "items" in data
             assert data["page"] == 1
             assert data["pageSize"] == 200
-            assert data["totalItems"] >= 1
+            assert data["totalItems"] >= 5
             # Find Eve in items
             eve_recommendation = next((item for item in data["items"] if item["first_name"] == "Eve"), None)
             assert eve_recommendation is not None
-            assert eve_recommendation["profilePhoto_url"] == "/static/uploads/photo_eve.png"
+            assert eve_recommendation["profilePhoto_url"].endswith("/static/uploads/photo_eve.png")
+            assert eve_recommendation["is_deleted"] is False
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -230,6 +238,48 @@ async def test_get_pending_requests_no_pagination(test_users) -> None:
             assert "Charlie" in first_names
             assert "David" in first_names
             assert data[0]["profilePhoto_url"] is not None
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_lynkup_lists_sent_and_received_pending_requests(test_users) -> None:
+    primary, users = test_users
+    alice = users[0]
+
+    async def _override_primary():
+        return primary
+
+    app.dependency_overrides[get_current_user] = _override_primary
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            primary_response = await ac.get("/api/v1/lynkup")
+            assert primary_response.status_code == 200
+            primary_items = primary_response.json()["data"]
+            alice_item = next(item for item in primary_items if item["user_id"] == str(alice.id))
+            assert alice_item["request_received"] is True
+            assert alice_item["request_sent"] is False
+            assert alice_item["is_request"] is True
+            assert alice_item["is_sent"] is False
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    async def _override_alice():
+        return alice
+
+    app.dependency_overrides[get_current_user] = _override_alice
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            alice_response = await ac.get("/api/v1/lynkup")
+            assert alice_response.status_code == 200
+            alice_items = alice_response.json()["data"]
+            primary_item = next(item for item in alice_items if item["user_id"] == str(primary.id))
+            assert primary_item["request_sent"] is True
+            assert primary_item["request_received"] is False
+            assert primary_item["is_sent"] is True
+            assert primary_item["is_request"] is False
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -288,7 +338,7 @@ async def test_get_pending_requests_with_search(test_users) -> None:
             data_charlie = response_charlie.json()["data"]
             assert len(data_charlie) == 1
             assert data_charlie[0]["first_name"] == "Charlie"
-            assert data_charlie[0]["profilePhoto_url"] == "/static/uploads/photo_charlie.png"
+            assert data_charlie[0]["profilePhoto_url"].endswith("/static/uploads/photo_charlie.png")
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -362,6 +412,7 @@ async def test_lynkup_accept_increments_connection_count(test_users) -> None:
     async with async_session_factory() as session:
         response = await respond_connection_request(session, primary.id, alice.id, "accepted")
         assert response.status is True
+        assert response.data["is_connected"] is True
 
         primary_stats = (await session.execute(
             select(ProfileStats).where(ProfileStats.profile_id == primary_profile_id)
@@ -406,7 +457,9 @@ async def test_lynkupresponse_accept_increments_connection_count_via_api(test_us
                 },
             )
             assert response.status_code == 200
-            assert response.json()["status"] is True
+            body = response.json()
+            assert body["status"] is True
+            assert body["data"]["is_connected"] is True
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -437,6 +490,11 @@ async def test_lynkupremove_deletes_connection_and_decrements_counts(test_users)
         primary_profile_id = primary_profile.id
         alice_profile_id = alice_profile.id
         session.add(Connection(user_low_id=low_id, user_high_id=high_id, is_active=True))
+        session.add(ConnectionRequest(
+            sender_user_id=primary.id,
+            receiver_user_id=alice.id,
+            status="accepted",
+        ))
         session.add(ProfileStats(profile_id=primary_profile_id, connection_count=1))
         session.add(ProfileStats(profile_id=alice_profile_id, connection_count=1))
         await session.commit()
@@ -457,7 +515,11 @@ async def test_lynkupremove_deletes_connection_and_decrements_counts(test_users)
             body = response.json()
             assert body["status"] is True
             assert body["message"] == "Connection removed successfully"
-            assert body["data"] is None
+            assert body["data"]["is_connected"] is False
+            assert body["data"]["request_sent"] is False
+            assert body["data"]["request_received"] is False
+            assert body["data"]["is_sent"] is False
+            assert body["data"]["is_request"] is False
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -469,6 +531,14 @@ async def test_lynkupremove_deletes_connection_and_decrements_counts(test_users)
             )
         )).scalar_one_or_none()
         assert connection is None
+        request = (await session.execute(
+            select(ConnectionRequest).where(
+                ConnectionRequest.sender_user_id == primary.id,
+                ConnectionRequest.receiver_user_id == alice.id,
+                ConnectionRequest.status == "accepted",
+            )
+        )).scalar_one_or_none()
+        assert request is None
 
         primary_stats = (await session.execute(
             select(ProfileStats).where(ProfileStats.profile_id == primary_profile_id)
@@ -483,7 +553,33 @@ async def test_lynkupremove_deletes_connection_and_decrements_counts(test_users)
 @pytest.mark.asyncio
 async def test_lynkupremove_returns_not_found_without_connection(test_users) -> None:
     primary, users = test_users
-    alice = users[0]
+    eve = users[4]  # Eve has no pending request or active connection
+
+    async def _override_get_current_user():
+        return primary
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.request(
+                "DELETE",
+                "/api/v1/lynkupremove",
+                json={"user_id": str(eve.id)},
+            )
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] is False
+            assert body["message"] == "Connection not found"
+            assert body["data"] is None
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_lynkupremove_deletes_pending_request(test_users) -> None:
+    primary, users = test_users
+    alice = users[0]  # Alice has a pending request to primary
 
     async def _override_get_current_user():
         return primary
@@ -499,8 +595,20 @@ async def test_lynkupremove_returns_not_found_without_connection(test_users) -> 
             )
             assert response.status_code == 200
             body = response.json()
-            assert body["status"] is False
-            assert body["message"] == "Connection not found"
-            assert body["data"] is None
+            assert body["status"] is True
+            assert body["message"] == "Connection removed successfully"
+            assert body["data"]["is_connected"] is False
+            assert body["data"]["request_sent"] is False
+            assert body["data"]["request_received"] is False
     finally:
         app.dependency_overrides.pop(get_current_user, None)
+
+    async with async_session_factory() as session:
+        # Check request is deleted from DB
+        req = (await session.execute(
+            select(ConnectionRequest).where(
+                ConnectionRequest.sender_user_id == alice.id,
+                ConnectionRequest.receiver_user_id == primary.id,
+            )
+        )).scalar_one_or_none()
+        assert req is None

@@ -136,14 +136,11 @@ async def search_users(
     page: Optional[int] = None,
     page_size: Optional[int] = None,
 ) -> dict:
-    from uuid import UUID
     from sqlmodel import select
-    from sqlalchemy import func, and_, or_, exists, distinct
+    from sqlalchemy import func, and_, or_, exists
     from apps.accounts.db_models import User, UserRole, Role
-    from apps.profiles.db_models.profile_db_model import Profile, ProfileVisibility
+    from apps.profiles.db_models.profile_db_model import Profile
     from apps.profiles.db_models.university_db_model import University
-    from apps.connections.db_models.block import Block
-    from apps.connections.db_models.connection import Connection
     from common.enums import UserStatus
     from apps.profiles.services import build_user_base_response
 
@@ -173,32 +170,6 @@ async def search_users(
 
     # Exclude current user
     stmt = stmt.where(User.id != current_user.id)
-
-    # Blocks filter
-    blocked_ids_stmt = select(Block.blocked_user_id).where(Block.blocker_user_id == current_user.id, Block.is_active == True)
-    blocker_ids_stmt = select(Block.blocker_user_id).where(Block.blocked_user_id == current_user.id, Block.is_active == True)
-    stmt = stmt.where(User.id.notin_(blocked_ids_stmt))
-    stmt = stmt.where(User.id.notin_(blocker_ids_stmt))
-
-    # Connection visibility subquery
-    is_connected_expr = exists(
-        select(1).where(
-            Connection.is_active == True,
-            or_(
-                and_(Connection.user_low_id == current_user.id, Connection.user_high_id == User.id),
-                and_(Connection.user_low_id == User.id, Connection.user_high_id == current_user.id)
-            )
-        )
-    )
-
-    visibility_condition = or_(
-        Profile.profile_visibility == ProfileVisibility.public,
-        and_(
-            Profile.profile_visibility == ProfileVisibility.connections_only,
-            is_connected_expr
-        )
-    )
-    stmt = stmt.where(visibility_condition)
 
     # Fuzzy search query (pg_trgm)
     if query and query.strip():
@@ -245,10 +216,6 @@ async def search_users(
         User.deleted_at.is_(None)
     )
     count_stmt = count_stmt.where(User.id != current_user.id)
-    count_stmt = count_stmt.where(User.id.notin_(blocked_ids_stmt))
-    count_stmt = count_stmt.where(User.id.notin_(blocker_ids_stmt))
-    count_stmt = count_stmt.where(visibility_condition)
-
     if query and query.strip():
         normalized_query = query.strip()
         search_terms = normalized_query.split()

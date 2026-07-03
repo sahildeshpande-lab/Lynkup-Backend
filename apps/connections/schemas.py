@@ -89,6 +89,7 @@ class RecommendedUserResponse(BaseModel):
     minor: str | None = None
     edu_level: str | None = None
     profilePhoto_url: str | None = None
+    is_deleted: bool = False
     is_connected: bool = False
     is_followed: bool = False
     is_blocked: bool = False

@@ -108,11 +108,13 @@ def generate_download_url(file_name: str, expiration: int = 3600) -> str:
     """Generate a presigned URL to download a file from S3 or return local path."""
     if not file_name:
         return ""
-    # If it is a full HTTP URL or static path already, return it
-    if file_name.startswith(("http://", "https://")) or file_name.startswith("/static/"):
+    # If it is a full HTTP URL already, return it
+    if file_name.startswith(("http://", "https://")):
         return file_name
+    if file_name.startswith("/static/"):
+        return apply_base_url_img(file_name)
     if not settings.aws_s3_bucket:
-        return f"/static/uploads/{file_name}"
+        return apply_base_url_img(f"/static/uploads/{file_name}")
     try:
         response = s3_client.generate_presigned_url(
             "get_object",

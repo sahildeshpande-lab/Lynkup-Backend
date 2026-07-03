@@ -33,7 +33,7 @@ class PostContentPayload(BaseModel):
     """Content payload for creating or updating a post."""
     caption: str = Field(..., max_length=255)
     content_html: Optional[str] = None
-    visibility: Literal["public", "private"] = "public"
+    visibility: Literal["public", "hidden"] = "public"
 
 
 # ---- Request schemas ----
@@ -42,7 +42,7 @@ class EditPostContentPayload(BaseModel):
     """Payload for editing existing post fields, where all fields are optional."""
     caption: Optional[str] = Field(default=None, max_length=255)
     content_html: Optional[str] = None
-    visibility: Optional[Literal["public", "private"]] = None
+    visibility: Optional[Literal["public", "hidden"]] = None
 
 
 class EditPostRequest(BaseModel):

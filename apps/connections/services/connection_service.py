@@ -162,7 +162,22 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
     except Exception as e:
         logger.exception("Failed to queue Lynkup response email: %s", e)
 
-    return success_response(f"Request {response} successfully.", req, response_cls=ApiResponse)
+    is_connected = response == "accepted"
+    return success_response(
+        "You are now connected." if is_connected else "Request declined successfully.",
+        {
+            "lynkup_id": req.id,
+            "sender_user_id": req.sender_user_id,
+            "receiver_user_id": req.receiver_user_id,
+            "status": req.status,
+            "is_connected": is_connected,
+            "request_sent": False,
+            "request_received": False,
+            "is_sent": False,
+            "is_request": False,
+        },
+        response_cls=ApiResponse,
+    )
 
 
 async def remove_connection(
@@ -170,7 +185,7 @@ async def remove_connection(
     current_user_id: UUID,
     other_user_id: UUID,
 ) -> ApiResponse:
-    """Remove an accepted connection and decrement both users' connection counts."""
+    """Remove an accepted connection and/or any pending/accepted connection requests, then update connection counts."""
     if current_user_id == other_user_id:
         return error_response("Connection not found", response_cls=ApiResponse)
 
@@ -178,18 +193,50 @@ async def remove_connection(
     from apps.profiles.services.profile_stats_service import decrement_connection_counts_for_users
 
     connection = await get_active_connection_between(db, current_user_id, other_user_id)
-    if connection is None:
+    request_rows = (
+        await db.execute(
+            select(ConnectionRequest).where(
+                ConnectionRequest.status.in_(["pending", "accepted"]),
+                or_(
+                    and_(
+                        ConnectionRequest.sender_user_id == current_user_id,
+                        ConnectionRequest.receiver_user_id == other_user_id,
+                    ),
+                    and_(
+                        ConnectionRequest.sender_user_id == other_user_id,
+                        ConnectionRequest.receiver_user_id == current_user_id,
+                    ),
+                ),
+            )
+        )
+    ).scalars().all()
+
+    if connection is None and not request_rows:
         return error_response("Connection not found", response_cls=ApiResponse)
 
     try:
-        await delete_connection(db, connection)
-        await decrement_connection_counts_for_users(db, current_user_id, other_user_id)
+        if connection is not None:
+            await delete_connection(db, connection)
+            await decrement_connection_counts_for_users(db, current_user_id, other_user_id)
+        for request_row in request_rows:
+            await db.delete(request_row)
         await db.commit()
     except Exception:
         await db.rollback()
+        from core.errors import ApiError
         raise ApiError("Failed to remove connection")
 
-    return success_response("Connection removed successfully", response_cls=ApiResponse)
+    return success_response(
+        "Connection removed successfully",
+        {
+            "is_connected": False,
+            "request_sent": False,
+            "request_received": False,
+            "is_sent": False,
+            "is_request": False,
+        },
+        response_cls=ApiResponse,
+    )
 
 
 async def get_pending_requests(
@@ -203,10 +250,23 @@ async def get_pending_requests(
     from sqlalchemy import func
 
     base_stmt = select(ConnectionRequest, Profile).join(
-        Profile, Profile.user_id == ConnectionRequest.sender_user_id
+        Profile,
+        or_(
+            and_(
+                ConnectionRequest.receiver_user_id == user_id,
+                Profile.user_id == ConnectionRequest.sender_user_id,
+            ),
+            and_(
+                ConnectionRequest.sender_user_id == user_id,
+                Profile.user_id == ConnectionRequest.receiver_user_id,
+            ),
+        ),
     ).where(
-        ConnectionRequest.receiver_user_id == user_id,
-        ConnectionRequest.status == "pending"
+        ConnectionRequest.status == "pending",
+        or_(
+            ConnectionRequest.receiver_user_id == user_id,
+            ConnectionRequest.sender_user_id == user_id,
+        ),
     )
 
     if search:
@@ -218,20 +278,27 @@ async def get_pending_requests(
             )
         )
 
+    def _build_pending_item(req: ConnectionRequest, profile: Profile) -> dict:
+        request_sent = req.sender_user_id == user_id
+        request_received = req.receiver_user_id == user_id
+        other_user_id = req.receiver_user_id if request_sent else req.sender_user_id
+        return {
+            "lynkup_id": req.id,
+            "user_id": other_user_id,
+            "status": req.status,
+            "first_name": profile.first_name,
+            "last_name": profile.last_name,
+            "profilePhoto_url": generate_profile_image_url(profile.profile_photo_url) if profile.profile_photo_url else None,
+            "request_sent": request_sent,
+            "request_received": request_received,
+            "is_sent": request_sent,
+            "is_request": request_received,
+        }
+
     if page is None and page_size is None:
         result = await db.execute(base_stmt.order_by(ConnectionRequest.created_at.desc()))
         rows = result.all()
-        data = [
-            {
-                "lynkup_id": req.id,
-                "user_id": req.sender_user_id,
-                "status": req.status,
-                "first_name": profile.first_name,
-                "last_name": profile.last_name,
-                "profilePhoto_url": generate_profile_image_url(profile.profile_photo_url) if profile.profile_photo_url else None,
-            }
-            for req, profile in rows
-        ]
+        data = [_build_pending_item(req, profile) for req, profile in rows]
         return success_response("Lynkup Request pending", data, response_cls=ApiResponse)
 
     p = page or 1
@@ -244,17 +311,7 @@ async def get_pending_requests(
     result = await db.execute(stmt)
     rows = result.all()
 
-    data = [
-        {
-            "lynkup_id": req.id,
-            "user_id": req.sender_user_id,
-            "status": req.status,
-            "first_name": profile.first_name,
-            "last_name": profile.last_name,
-            "profilePhoto_url": generate_profile_image_url(profile.profile_photo_url) if profile.profile_photo_url else None,
-        }
-        for req, profile in rows
-    ]
+    data = [_build_pending_item(req, profile) for req, profile in rows]
 
     paginated = build_paginated_response(data, p, ps, total_items)
     return success_response("Lynkup Request pending", paginated.model_dump(), response_cls=ApiResponse)

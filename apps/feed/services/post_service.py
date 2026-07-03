@@ -599,6 +599,7 @@ async def get_profile_visibility_block_message(
             return "profile is connection_only"
     return None
 
+
 async def list_user_posts_service(
     current_user: User,
     db: AsyncSession,

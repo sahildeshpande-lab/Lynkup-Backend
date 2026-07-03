@@ -230,6 +230,7 @@ async def test_search_users_service_logic(monkeypatch) -> None:
             session.add(prof_searcher)
             session.add(prof_target1)
             session.add(prof_inactive)
+            session.add(Block(blocker_user_id=searcher.id, blocked_user_id=target1.id, is_active=True))
             await session.commit()
 
 
@@ -246,6 +247,12 @@ async def test_search_users_service_logic(monkeypatch) -> None:
             assert len(results["items"]) == 1
             assert results["items"][0]["firstName"] == f"Target_{unique_id}"
             assert results["items"][0]["email"] == f"target1_{unique_id}@example.com"
+            assert results["items"][0]["is_deleted"] is False
+            assert results["items"][0]["is_connected"] is False
+            assert results["items"][0]["is_followed"] is False
+            assert results["items"][0]["is_blocked"] is True
+            assert results["items"][0]["request_sent"] is False
+            assert results["items"][0]["request_received"] is False
 
             # Test 2: Search by university name "Kampu_{unique_id}"
             results_uni = await search_users(

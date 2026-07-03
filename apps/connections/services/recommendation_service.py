@@ -2,7 +2,7 @@ from __future__ import annotations
 from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from apps.connections.db_models import Block, Connection, ConnectionRequest
+from apps.connections.db_models import Connection
 from apps.accounts.db_models import User, UserRole, Role
 from apps.profiles.db_models.profile_db_model import Profile
 from common.enums import ProfileVisibility, UserStatus
@@ -90,35 +90,7 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
     if not current_profile:
         return []
 
-    current_connections = await get_user_connections(db, user_id)
     connection_adjacency = await _build_connection_adjacency(db)
-
-    blocked_stmt = select(Block).where(
-        Block.is_active == True,
-        or_(Block.blocker_user_id == user_id, Block.blocked_user_id == user_id)
-    )
-    blocked_res = await db.execute(blocked_stmt)
-    blocked_ids = set()
-    for b in blocked_res.scalars().all():
-        if b.blocker_user_id == user_id:
-            blocked_ids.add(b.blocked_user_id)
-        else:
-            blocked_ids.add(b.blocker_user_id)
-
-    req_stmt = select(ConnectionRequest).where(
-        ConnectionRequest.status == "pending",
-        or_(ConnectionRequest.sender_user_id == user_id, ConnectionRequest.receiver_user_id == user_id)
-    )
-    req_res = await db.execute(req_stmt)
-    pending_ids = set()
-    for r in req_res.scalars().all():
-        if r.sender_user_id == user_id:
-            pending_ids.add(r.receiver_user_id)
-        else:
-            pending_ids.add(r.sender_user_id)
-
-    excluded_ids = current_connections.union(blocked_ids).union(pending_ids)
-    excluded_ids.add(user_id)
 
     from apps.profiles.db_models.university_db_model import University
     profiles_stmt = (
@@ -128,7 +100,7 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
         .join(Role, Role.id == UserRole.role_id)
         .outerjoin(University, Profile.university_id == University.id)
         .where(
-            Profile.user_id.notin_(excluded_ids),
+            Profile.user_id != user_id,
             User.status == UserStatus.active,
             User.is_deleted == False,
             User.deleted_at.is_(None),
@@ -141,9 +113,6 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
     scored_candidates = []
 
     for candidate, university_name in candidates_with_uni:
-        if not validate_visibility(candidate):
-            continue
-
         mutuals = get_mutual_connections_count_from_adjacency(
             connection_adjacency, user_id, candidate.user_id
         )
@@ -159,6 +128,7 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
             "minor": candidate.minor,
             "edu_level": candidate.edu_level,
             "profilePhoto_url": generate_profile_image_url(candidate.profile_photo_url) if candidate.profile_photo_url else None,
+            "is_deleted": False,
         })
 
     scored_candidates.sort(key=lambda x: x["score"], reverse=True)
