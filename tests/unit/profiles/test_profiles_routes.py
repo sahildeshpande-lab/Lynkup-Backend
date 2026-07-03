@@ -109,7 +109,8 @@ def test_get_me_requires_bearer_token() -> None:
 def test_get_me_returns_user_payload(monkeypatch) -> None:
     from apps.profiles import services as profiles_services
 
-    async def _mock_get_my_profile_service(user, db):
+    async def _mock_get_my_profile_service(user, db, target_user_id=None):
+        assert target_user_id is None
         return {"user": {
             "email": "jane@example.com",
             "is_onboarding_completed": False
@@ -124,6 +125,33 @@ def test_get_me_returns_user_payload(monkeypatch) -> None:
     assert body["status"] is True
     assert body["data"]["user"]["email"] == "jane@example.com"
     assert body["data"]["user"]["is_onboarding_completed"] is False
+
+
+def test_get_me_accepts_user_id_query(monkeypatch) -> None:
+    from uuid import UUID
+
+    from apps.profiles import services as profiles_services
+
+    requested_user_id = UUID("11111111-1111-1111-1111-111111111111")
+
+    async def _mock_get_my_profile_service(user, db, target_user_id=None):
+        assert target_user_id == requested_user_id
+        return {"user": {
+            "id": str(target_user_id),
+            "email": "other@example.com",
+        }}
+
+    monkeypatch.setattr(profiles_services, "get_my_profile_service", _mock_get_my_profile_service)
+
+    response = client.get(
+        f"/api/v1/myprofile?user_id={requested_user_id}",
+        headers={"Authorization": "Bearer access_jane@example.com"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is True
+    assert body["data"]["user"]["email"] == "other@example.com"
 
 
 def test_get_me_completeness_returns_score(monkeypatch) -> None:

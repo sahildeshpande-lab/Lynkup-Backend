@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +16,24 @@ from apps.feed.db_models import MediaAsset, PostAttachment
 from common.enums import MediaAssetState, MediaType
 from common.exceptions import ApiError
 from core.images import generate_download_url, save_image
+
+MAX_IMAGE_UPLOAD_SIZE = 10 * 1024 * 1024
+MAX_GIF_UPLOAD_SIZE = 15 * 1024 * 1024
+MAX_VIDEO_UPLOAD_SIZE = 100 * 1024 * 1024
+MAX_AUDIO_UPLOAD_SIZE = 25 * 1024 * 1024
+MAX_DOCUMENT_UPLOAD_SIZE = 20 * 1024 * 1024
+MAX_OTHER_UPLOAD_SIZE = 20 * 1024 * 1024
+
+_MAX_UPLOAD_SIZE_BY_TYPE = {
+    MediaType.image.value: MAX_IMAGE_UPLOAD_SIZE,
+    MediaType.gif.value: MAX_GIF_UPLOAD_SIZE,
+    MediaType.video.value: MAX_VIDEO_UPLOAD_SIZE,
+    MediaType.audio.value: MAX_AUDIO_UPLOAD_SIZE,
+    MediaType.document.value: MAX_DOCUMENT_UPLOAD_SIZE,
+    MediaType.other.value: MAX_OTHER_UPLOAD_SIZE,
+}
+
+_SUPPORTED_MEDIA_TYPES = {media_type.value for media_type in MediaType}
 
 
 def get_media_type(content_type: str) -> str:
@@ -31,7 +49,29 @@ def get_media_type(content_type: str) -> str:
         return MediaType.audio.value
     if normalized.startswith("application/") or normalized.startswith("text/"):
         return MediaType.document.value
-    return MediaType.document.value
+    return MediaType.other.value
+
+
+def _validate_upload_file(file: UploadFile, content: bytes, media_type: str) -> None:
+    filename = file.filename or "uploaded file"
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{filename} is empty",
+        )
+    if media_type not in _SUPPORTED_MEDIA_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type for {filename}",
+        )
+
+    max_size = _MAX_UPLOAD_SIZE_BY_TYPE[media_type]
+    if len(content) > max_size:
+        max_size_mb = max_size // (1024 * 1024)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{filename} exceeds maximum upload size of {max_size_mb} MB for {media_type} files",
+        )
 
 
 def _resolve_extension(filename: str | None, content_type: str) -> str:
@@ -89,8 +129,8 @@ def _build_media_asset(
 def _media_asset_to_response(media_asset: MediaAsset) -> dict:
     return {
         "id": media_asset.id,
-        "key": media_asset.key,
         "url": generate_download_url(media_asset.key),
+        "key": media_asset.key,
         "type": media_asset.type.value if hasattr(media_asset.type, "value") else str(media_asset.type),
     }
 
@@ -105,15 +145,21 @@ async def upload_post_media_service(
     and persist metadata in the MediaAsset table.
     """
     if not files:
-        raise ApiError("At least one file is required")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one file is required",
+        )
     if len(files) > MAX_MEDIA_COUNT:
-        raise ApiError(f"Maximum {MAX_MEDIA_COUNT} files allowed per request")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Maximum {MAX_MEDIA_COUNT} files allowed per request",
+        )
 
     media_assets: list[MediaAsset] = []
     for file in files:
         content = await file.read()
-        if len(content) == 0:
-            raise ApiError("Cannot upload an empty file")
+        media_type = get_media_type(file.content_type or "")
+        _validate_upload_file(file, content, media_type)
 
         media_asset = _build_media_asset(
             user_id=user_id,

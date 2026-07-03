@@ -10,7 +10,7 @@ from . import revision_service as _service_module_1
 from .revision_service import _build_content_dict, _build_media_snapshot, _create_revision, _sync_hashtags
 
 from . import post_service as _service_module_2
-from .post_service import utc_now, format_post_detail, save_post_service, edit_post_service, publish_post_service, admin_publish_post_service, get_post_service, delete_post_service, list_draft_posts_service, delete_draft_post_service, list_user_posts_service, list_processing_posts_service, list_reviewed_posts_service
+from .post_service import utc_now, format_post_detail, save_post_service, edit_post_service, publish_post_service, admin_publish_post_service, get_post_service, delete_post_service, list_draft_posts_service, delete_draft_post_service, list_user_posts_service, get_profile_visibility_block_message, list_processing_posts_service, list_reviewed_posts_service
 
 from . import feed_service as _service_module_3
 from .feed_service import get_feed_service
@@ -47,6 +47,7 @@ __all__ = [
     "list_draft_posts_service",
     "delete_draft_post_service",
     "list_user_posts_service",
+    "get_profile_visibility_block_message",
     "list_processing_posts_service",
     "list_reviewed_posts_service",
     "get_feed_service",

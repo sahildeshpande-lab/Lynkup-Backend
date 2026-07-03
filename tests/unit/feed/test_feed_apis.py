@@ -5,7 +5,7 @@ import uuid
 from types import SimpleNamespace
 import pytest
 import pytest_asyncio
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from common.exceptions import ApiError
 import httpx
 from httpx import AsyncClient
@@ -21,7 +21,7 @@ from apps.accounts.db_models import TransactionalEmailLog, User
 from apps.feed.db_models import Post, MediaAsset, PostAttachment
 from apps.connections.db_models import Connection
 from apps.profiles.db_models import Profile
-from common.enums import MediaType, MediaAssetState, PostState
+from common.enums import MediaType, MediaAssetState, PostState, ProfileVisibility
 from apps.feed.schemas import SavePostRequest, EditPostRequest, MediaItem, PostContentPayload, EditPostContentPayload, DeletePostRequest
 from apps.feed.services import (
     get_media_type,
@@ -214,9 +214,10 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
         headers={"content-type": "image/png"},
     )
     async with async_session_factory() as session:
-        with pytest.raises(ApiError) as exc_info:
+        with pytest.raises(HTTPException) as exc_info:
             await upload_post_media_service(user.id, [file_empty], session)
-        assert "empty" in exc_info.value.message
+        assert exc_info.value.status_code == 400
+        assert "empty" in exc_info.value.detail
 
     too_many_files = [
         UploadFile(
@@ -227,13 +228,25 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
         for index in range(6)
     ]
     async with async_session_factory() as session:
-        with pytest.raises(ApiError) as exc_info:
+        with pytest.raises(HTTPException) as exc_info:
             await upload_post_media_service(
                 user.id,
                 too_many_files,
                 session,
             )
-        assert "Maximum 5 files" in exc_info.value.message
+        assert exc_info.value.status_code == 400
+        assert "Maximum 5 files" in exc_info.value.detail
+
+    oversized_image = UploadFile(
+        filename="large.png",
+        file=io.BytesIO(b"x" * (10 * 1024 * 1024 + 1)),
+        headers={"content-type": "image/png"},
+    )
+    async with async_session_factory() as session:
+        with pytest.raises(HTTPException) as exc_info:
+            await upload_post_media_service(user.id, [oversized_image], session)
+        assert exc_info.value.status_code == 400
+        assert "exceeds maximum upload size" in exc_info.value.detail
 
 
 def test_get_media_type_maps_content_types() -> None:
@@ -244,7 +257,8 @@ def test_get_media_type_maps_content_types() -> None:
     assert get_media_type("application/pdf") == "document"
     assert get_media_type("text/plain") == "document"
     assert get_media_type("application/octet-stream") == "document"
-    assert get_media_type("") == "document"
+    assert get_media_type("chemical/x-mdl-molfile") == "other"
+    assert get_media_type("") == "other"
 
 
 @pytest.mark.asyncio
@@ -309,14 +323,14 @@ async def test_create_post_service_success(test_users) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_post_service_visibility_hidden(test_users) -> None:
+async def test_create_post_service_visibility_private(test_users) -> None:
     user, _ = test_users
 
     payload = SavePostRequest(
         content=PostContentPayload(
-            caption="Hidden post",
+            caption="Private post",
             content_html="Invisible",
-            visibility="hidden"
+            visibility="private"
         ),
         media=[]
     )
@@ -553,7 +567,7 @@ async def test_postupload_rejects_too_many_files(test_users) -> None:
                 for index in range(6)
             ]
             response = await ac.post("/api/v1/postupload", files=files)
-            assert response.status_code == 200
+            assert response.status_code == 400
             body = response.json()
             assert body["status"] is False
             assert body["message"] == "Maximum 5 files allowed per request"
@@ -575,7 +589,7 @@ async def test_update_post_service_success(test_users) -> None:
     # Edit via general edit service (edit_post_service)
     edit_payload = EditPostRequest(
         id=post_id,
-        content=EditPostContentPayload(caption="Updated Caption", content_html="Updated text", visibility="hidden")
+        content=EditPostContentPayload(caption="Updated Caption", content_html="Updated text", visibility="private")
     )
     async with async_session_factory() as session:
         post = await edit_post_service(user.id, edit_payload, session)
@@ -1055,8 +1069,15 @@ async def test_posts_route_filters_state_for_current_user(test_users) -> None:
 
 
 @pytest.mark.asyncio
-async def test_posts_route_rejects_normal_user_for_other_user(test_users) -> None:
+async def test_posts_route_allows_normal_user_to_view_other_users_published_posts(test_users) -> None:
     user, other = test_users
+
+    async with async_session_factory() as session:
+        session.add_all([
+            Post(author_user_id=other.id, content={"caption": "Other Route Published"}, state=PostState.published),
+            Post(author_user_id=other.id, content={"caption": "Other Route Draft"}, state=PostState.draft),
+        ])
+        await session.commit()
 
     async def _override_get_current_user():
         return user
@@ -1066,9 +1087,97 @@ async def test_posts_route_rejects_normal_user_for_other_user(test_users) -> Non
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
             response = await ac.get("/api/v1/posts", params={"user_id": str(other.id)})
-            assert response.status_code == 403
-            assert response.json()["status"] is False
-            assert response.json()["message"] == "Insufficient permissions"
+            assert response.status_code == 200
+            captions = {item["content"]["caption"] for item in response.json()["data"]}
+            assert captions == {"Other Route Published"}
+
+            draft_response = await ac.get(
+                "/api/v1/posts",
+                params={"user_id": str(other.id), "state": "draft"},
+            )
+            assert draft_response.status_code == 403
+            assert draft_response.json()["message"] == "Insufficient permissions"
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_posts_route_respects_target_profile_visibility(test_users) -> None:
+    user, other = test_users
+
+    async with async_session_factory() as session:
+        private_profile = Profile(
+            user_id=other.id,
+            first_name="Private",
+            last_name="User",
+            profile_visibility=ProfileVisibility.private,
+        )
+        session.add_all([
+            private_profile,
+            Post(author_user_id=other.id, content={"caption": "Private Profile Post"}, state=PostState.published),
+        ])
+        await session.commit()
+
+    async def _override_get_current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.get("/api/v1/posts", params={"user_id": str(other.id)})
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] is True
+            assert body["message"] == "Profile visibility is private"
+            assert body["data"] == []
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_posts_route_respects_connection_only_profile_visibility(test_users) -> None:
+    user, other = test_users
+
+    async with async_session_factory() as session:
+        connection_only_profile = Profile(
+            user_id=other.id,
+            first_name="Connection",
+            last_name="Only",
+            profile_visibility=ProfileVisibility.connections_only,
+        )
+        post = Post(
+            author_user_id=other.id,
+            content={"caption": "Connection Only Post"},
+            state=PostState.published,
+        )
+        session.add_all([connection_only_profile, post])
+        await session.commit()
+
+    async def _override_get_current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            blocked = await ac.get("/api/v1/posts", params={"user_id": str(other.id)})
+            assert blocked.status_code == 200
+            assert blocked.json()["status"] is True
+            assert blocked.json()["message"] == "profile is connection_only"
+            assert blocked.json()["data"] == []
+
+        low_id, high_id = (user.id, other.id) if user.id < other.id else (other.id, user.id)
+        async with async_session_factory() as session:
+            session.add(Connection(user_low_id=low_id, user_high_id=high_id, is_active=True))
+            await session.commit()
+
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            allowed = await ac.get("/api/v1/posts", params={"user_id": str(other.id)})
+            assert allowed.status_code == 200
+            assert allowed.json()["status"] is True
+            captions = {item["content"]["caption"] for item in allowed.json()["data"]}
+            assert captions == {"Connection Only Post"}
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -1158,22 +1267,18 @@ async def test_get_feed_service_success(test_users) -> None:
         
     async with async_session_factory() as session:
         feed = await get_feed_service(user.id, session)
-        assert len(feed) >= 2
         captions = {f.caption for f in feed}
-        assert "Published Post 1" in captions
+        assert "Published Post 1" not in captions
         assert "Published Post 2" in captions
         formatted = [format_post_detail(post) for post in feed]
         by_caption = {item["content"]["caption"]: item for item in formatted}
-        assert by_caption["Published Post 1"]["first_name"] == "Feed"
-        assert by_caption["Published Post 1"]["last_name"] == "User"
-        assert by_caption["Published Post 1"]["profile_photo_url"].endswith("/static/uploads/profiles/feed-user.jpg")
         assert by_caption["Published Post 2"]["first_name"] == "Other"
 
 
 @pytest.mark.asyncio
 async def test_feed_route_accessible_to_superadmin_and_includes_author_profile(test_users) -> None:
     user, _ = test_users
-    superadmin = SimpleNamespace(id=user.id, role="superadmin")
+    superadmin = SimpleNamespace(id=uuid.uuid4(), role="superadmin")
 
     async with async_session_factory() as session:
         profile = Profile(
@@ -1322,7 +1427,7 @@ async def test_routes_post_management_flow(test_users) -> None:
                 "content": {
                     "caption": "General Updated Caption",
                     "content_html": "General updated text",
-                    "visibility": "hidden"
+                    "visibility": "private"
                 }
             })
             assert patch_res.status_code == 200

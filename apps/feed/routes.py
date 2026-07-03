@@ -8,7 +8,7 @@ from core.database.session import get_session
 from core.security.auth import get_current_app_user, get_current_user
 from apps.accounts.db_models import User
 from common.responses import success_response
-from apps.feed.schemas import ApiResponse, SavePostRequest, DeletePostRequest, EditPostRequest
+from apps.feed.schemas import ApiResponse, PostUploadResponse, SavePostRequest, DeletePostRequest, EditPostRequest
 from apps.feed.services import (
     upload_post_media_service,
     save_post_service,
@@ -19,6 +19,7 @@ from apps.feed.services import (
     list_draft_posts_service,
     delete_draft_post_service,
     list_user_posts_service,
+    get_profile_visibility_block_message,
     get_feed_service,
     format_post_detail,
 )
@@ -26,9 +27,12 @@ from apps.feed.services import (
 router = APIRouter(tags=["6] Feed / Posts"])
 
 
-@router.post("/postupload", response_model=ApiResponse)
+@router.post("/postupload", response_model=PostUploadResponse)
 async def upload_post_media(
-    files: list[UploadFile] = File(...),
+    files: list[UploadFile] = File(
+        ...,
+        description="Upload one or more media files using repeated form field name 'files'.",
+    ),
     current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
@@ -119,6 +123,18 @@ async def list_user_posts(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
+    block_message = await get_profile_visibility_block_message(
+        current_user=current_user,
+        target_user_id=user_id,
+        db=db,
+    )
+    if block_message:
+        return success_response(
+            block_message,
+            [],
+            response_cls=ApiResponse,
+        )
+
     posts = await list_user_posts_service(
         current_user=current_user,
         target_user_id=user_id,

@@ -271,7 +271,7 @@ async def edit_post_service(
 
     # Determine state from visibility if provided
     if payload.content is not None and payload.content.visibility is not None:
-        if payload.content.visibility == "hidden":
+        if payload.content.visibility == "private":
             post.state = PostState.hidden
         elif payload.content.visibility == "public" and post.state == PostState.hidden:
             post.state = PostState.draft
@@ -317,9 +317,9 @@ async def publish_post_service(
 
     State transitions:
     - draft   → published
-    - hidden  → hidden  (stays hidden)
+    - private → hidden  (stays private)
 
-    If visibility inside content is ``"hidden"`` the post stays ``PostState.hidden``.
+    If visibility inside content is ``"private"`` the post stays ``PostState.hidden``.
     """
     result = await db.execute(select(Post).where(Post.id == post_id))
     post = result.scalar_one_or_none()
@@ -337,7 +337,7 @@ async def publish_post_service(
 
     # State transition: respect visibility stored in content
     visibility = (post.content or {}).get("visibility", "public")
-    if visibility == "hidden" or post.state == PostState.hidden:
+    if visibility == "private" or post.state == PostState.hidden:
         post.state = PostState.hidden
     else:
         post.state = PostState.published
@@ -401,7 +401,7 @@ async def admin_publish_post_service(
     if status == "publish":
         # Respect visibility stored in content
         visibility = (post.content or {}).get("visibility", "public")
-        if visibility == "hidden" or post.state == PostState.hidden:
+        if visibility == "private" or post.state == PostState.hidden:
             post.state = PostState.hidden
         else:
             post.state = PostState.published
@@ -476,7 +476,7 @@ async def get_post_service(
             raise ApiError("Post is not accessible")
 
         visibility = (post.content or {}).get("visibility", "public")
-        if visibility == "hidden":
+        if visibility == "private":
             raise ApiError("Post is not accessible")
         if visibility == "connections_only":
             from apps.connections.services.connection_service import are_connected
@@ -563,6 +563,42 @@ _LIST_POST_STATES: dict[str, PostState] = {
     "draft": PostState.draft,
 }
 
+
+async def get_profile_visibility_block_message(
+    current_user: User,
+    target_user_id: UUID | None,
+    db: AsyncSession,
+) -> str | None:
+    """Return a success-response message when profile visibility blocks post listing."""
+    if target_user_id is None or target_user_id == current_user.id:
+        return None
+
+    role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    if role == "superadmin":
+        return None
+
+    from apps.connections.services.connection_service import are_connected
+    from apps.profiles.db_models import Profile
+    from common.enums import ProfileVisibility
+
+    profile = (
+        await db.execute(select(Profile).where(Profile.user_id == target_user_id))
+    ).scalar_one_or_none()
+    if not profile:
+        return None
+
+    visibility = (
+        profile.profile_visibility.value
+        if hasattr(profile.profile_visibility, "value")
+        else str(profile.profile_visibility)
+    )
+    if visibility == ProfileVisibility.private.value:
+        return "Profile visibility is private"
+    if visibility == ProfileVisibility.connections_only.value:
+        if not await are_connected(db, current_user.id, target_user_id):
+            return "profile is connection_only"
+    return None
+
 async def list_user_posts_service(
     current_user: User,
     db: AsyncSession,
@@ -586,12 +622,16 @@ async def list_user_posts_service(
     effective_user_id = target_user_id
 
     if not is_superadmin:
-        if target_user_id is not None and target_user_id != current_user.id:
+        if (
+            target_user_id is not None
+            and target_user_id != current_user.id
+            and requested_state != PostState.published
+        ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Insufficient permissions",
             )
-        effective_user_id = current_user.id
+        effective_user_id = target_user_id or current_user.id
 
     if effective_user_id is not None and not await user_exists(db, effective_user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")

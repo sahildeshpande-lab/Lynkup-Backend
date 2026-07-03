@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database.session import get_session
@@ -29,12 +31,13 @@ def _require_bearer_token(token: str | None = Depends(get_bearer_token)) -> str:
 
 @router.get("/myprofile", response_model=ApiResponse)
 async def get_my_profile(
+    user_id: UUID | None = Query(default=None, description="Optional user id to fetch another user's profile"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     return ApiResponse(
         message="Profile retrieved successfully",
-        data=await services.get_my_profile_service(current_user, db)
+        data=await services.get_my_profile_service(current_user, db, target_user_id=user_id)
     )
 
 

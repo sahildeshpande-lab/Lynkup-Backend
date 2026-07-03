@@ -13,9 +13,9 @@ from common.schemas import ApiResponse
 
 class PostUploadData(BaseModel):
     id: UUID
+    url: str
     key: str
     type: MediaType
-    url: str
 
 
 class PostUploadResponse(ApiResponse):
@@ -33,7 +33,7 @@ class PostContentPayload(BaseModel):
     """Content payload for creating or updating a post."""
     caption: str = Field(..., max_length=255)
     content_html: Optional[str] = None
-    visibility: Literal["public", "hidden"] = "public"
+    visibility: Literal["public", "private"] = "public"
 
 
 # ---- Request schemas ----
@@ -42,7 +42,7 @@ class EditPostContentPayload(BaseModel):
     """Payload for editing existing post fields, where all fields are optional."""
     caption: Optional[str] = Field(default=None, max_length=255)
     content_html: Optional[str] = None
-    visibility: Optional[Literal["public", "hidden"]] = None
+    visibility: Optional[Literal["public", "private"]] = None
 
 
 class EditPostRequest(BaseModel):

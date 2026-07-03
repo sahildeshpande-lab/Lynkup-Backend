@@ -22,7 +22,10 @@ async def get_feed_service(
     stmt = (
         select(Post, Profile)
         .outerjoin(Profile, Profile.user_id == Post.author_user_id)
-        .where(Post.state == PostState.published)
+        .where(
+            Post.state == PostState.published,
+            Post.author_user_id != current_user_id,
+        )
         .order_by(Post.created_at.desc())
     )
     result = await db.execute(stmt)

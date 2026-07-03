@@ -171,7 +171,7 @@ def validate_content(content: dict) -> None:
 
     Rules:
     - ``caption`` is mandatory.
-    - ``visibility`` must be ``"public"`` or ``"hidden"``.
+    - ``visibility`` must be ``"public"`` or ``"private"``.
     - If ``content_html`` is provided, its normalized text must be ≤ 5 000
       Unicode characters.
     """
@@ -180,8 +180,8 @@ def validate_content(content: dict) -> None:
         raise ValueError("Caption is required")
 
     visibility = content.get("visibility", "public")
-    if visibility not in ("public", "hidden"):
-        raise ValueError(f"Invalid visibility value: {visibility}. Must be 'public' or 'hidden'")
+    if visibility not in ("public", "private"):
+        raise ValueError(f"Invalid visibility value: {visibility}. Must be 'public' or 'private'")
 
     content_html = content.get("content_html")
     if content_html:

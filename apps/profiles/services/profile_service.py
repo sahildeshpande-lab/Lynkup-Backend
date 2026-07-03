@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 from core.images import normalize_image_name
 from apps.accounts.schemas import UserBaseResponse
 from ..schemas import ProfileUpdateRequest, ProfileVisibilityRequest, UpdateProfileMeRequest, UpdateProfileRequest
@@ -204,20 +204,34 @@ async def get_me_completeness(user_id: UUID, db: AsyncSession) -> dict:
     score = profile.completeness_score if profile else 0
     return {"completeness_score": score}
 
-async def get_my_profile_service(user: User, db: AsyncSession) -> dict:
+async def get_my_profile_service(
+    user: User,
+    db: AsyncSession,
+    target_user_id: UUID | None = None,
+) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
+    from fastapi import HTTPException, status
     from sqlmodel import select
 
-    stmt = select(Profile).where(Profile.user_id == user.id)
+    effective_user_id = target_user_id or user.id
+    target_user = user
+    if effective_user_id != user.id:
+        target_user = (
+            await db.execute(select(User).where(User.id == effective_user_id))
+        ).scalar_one_or_none()
+        if not target_user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    stmt = select(Profile).where(Profile.user_id == effective_user_id)
     profile = (await db.execute(stmt)).scalar_one_or_none()
 
-    if not profile:
+    if not profile and effective_user_id == user.id:
         profile = Profile(user_id=user.id, first_name="", last_name="", completeness_score=0)
         db.add(profile)
         await db.commit()
         await db.refresh(profile)
 
-    user_data = await build_user_base_response(user, profile, db)
+    user_data = await build_user_base_response(target_user, profile, db)
     return {"user": user_data}
 
 async def update_my_profile_service(user: User, payload: UpdateProfileRequest, db: AsyncSession) -> dict:
