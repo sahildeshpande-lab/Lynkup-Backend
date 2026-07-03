@@ -113,7 +113,6 @@ async def complete_onboarding(
     try:
         education_level = EducationLevel.from_id(education_level_id)
     except (TypeError, ValueError) as exc:
-        from fastapi import HTTPException, status
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid education_level_id"
