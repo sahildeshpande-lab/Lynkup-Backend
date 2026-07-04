@@ -70,6 +70,12 @@ async def _purge_pytest_data(session: AsyncSession) -> None:
                 user_params,
             )
 
+        # Delete from profile_stats first since it references profiles
+        await session.execute(
+            text("DELETE FROM profile_stats WHERE profile_id IN (SELECT id FROM profiles WHERE user_id IN :user_ids)").bindparams(user_filter),
+            user_params,
+        )
+
         for table in (
             "security_events",
             "refresh_tokens",

@@ -271,7 +271,7 @@ async def edit_post_service(
 
     # Determine state from visibility if provided
     if payload.content is not None and payload.content.visibility is not None:
-        if payload.content.visibility == "private":
+        if payload.content.visibility in ("private", "hidden"):
             post.state = PostState.hidden
         elif payload.content.visibility == "public" and post.state == PostState.hidden:
             post.state = PostState.draft
@@ -337,7 +337,7 @@ async def publish_post_service(
 
     # State transition: respect visibility stored in content
     visibility = (post.content or {}).get("visibility", "public")
-    if visibility == "private" or post.state == PostState.hidden:
+    if visibility in ("private", "hidden") or post.state == PostState.hidden:
         post.state = PostState.hidden
     else:
         post.state = PostState.published
@@ -401,7 +401,7 @@ async def admin_publish_post_service(
     if status == "publish":
         # Respect visibility stored in content
         visibility = (post.content or {}).get("visibility", "public")
-        if visibility == "private" or post.state == PostState.hidden:
+        if visibility in ("private", "hidden") or post.state == PostState.hidden:
             post.state = PostState.hidden
         else:
             post.state = PostState.published
@@ -605,11 +605,17 @@ async def list_user_posts_service(
     db: AsyncSession,
     target_user_id: UUID | None = None,
     state: str = "published",
-) -> list[Post]:
+    page: int | None = None,
+    page_size: int | None = None,
+) -> tuple[list[Post], int]:
     """
     List posts by state for the current user or, for superadmins, any/all users.
     """
-    from apps.feed.repositories.post_repository import fetch_posts_by_state, user_exists
+    from apps.feed.repositories.post_repository import (
+        fetch_posts_by_state,
+        count_posts_by_state,
+        user_exists,
+    )
 
     requested_state = _LIST_POST_STATES.get(state)
     if requested_state is None:
@@ -626,7 +632,6 @@ async def list_user_posts_service(
         if (
             target_user_id is not None
             and target_user_id != current_user.id
-            and requested_state != PostState.published
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -637,7 +642,25 @@ async def list_user_posts_service(
     if effective_user_id is not None and not await user_exists(db, effective_user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    return await fetch_posts_by_state(db, state=requested_state, user_id=effective_user_id)
+    total_items = await count_posts_by_state(db, state=requested_state, user_id=effective_user_id)
+
+    if page is None and page_size is None:
+        offset = 0
+        limit = None
+    else:
+        p = page or 1
+        ps = page_size or 20
+        offset = (p - 1) * ps
+        limit = ps
+
+    posts = await fetch_posts_by_state(
+        db,
+        state=requested_state,
+        user_id=effective_user_id,
+        offset=offset,
+        limit=limit,
+    )
+    return posts, total_items
 
 
 def _format_reviewed_post_media(post: Post) -> list[dict]:
@@ -663,8 +686,19 @@ def _review_status_from_post(post: Post) -> str:
     return "publish"
 
 
-def _format_reviewed_post_item(post: Post, profile) -> dict:
+def _format_reviewed_post_item(post: Post, profile, moderator_user=None, moderator_profile=None) -> dict:
     content = post.content or {}
+    
+    moderator_name = None
+    if post.moderator_id is not None:
+        if moderator_profile:
+            from apps.profiles.services.response_service import _compose_full_name
+            moderator_name = _compose_full_name(moderator_profile.first_name, moderator_profile.last_name)
+        if not moderator_name and moderator_user:
+            moderator_name = moderator_user.email
+        if not moderator_name:
+            moderator_name = "Moderator"
+
     return {
         "id": post.id,
         "user_id": post.author_user_id,
@@ -675,6 +709,7 @@ def _format_reviewed_post_item(post: Post, profile) -> dict:
         "reviewed_at": post.reviewed_at,
         "created_at": post.created_at,
         "moderator_id": post.moderator_id,
+        "moderator_name": moderator_name,
         "profile_photo_url": (
             generate_profile_image_url(profile.profile_photo_url)
             if profile and profile.profile_photo_url
@@ -686,8 +721,15 @@ def _format_reviewed_post_item(post: Post, profile) -> dict:
     }
 
 
-def _format_processing_post_item(post: Post, profile) -> dict:
+def _format_processing_post_item(post: Post, profile, mod_user=None, mod_profile=None) -> dict:
     content = post.content or {}
+    moderator_name = None
+    if mod_profile:
+        parts = [part for part in (mod_profile.first_name, mod_profile.last_name) if part]
+        moderator_name = " ".join(parts).strip() or None
+    if not moderator_name and mod_user:
+        moderator_name = mod_user.email
+
     return {
         "user_id": post.author_user_id,
         "first_name": profile.first_name if profile else None,
@@ -703,6 +745,7 @@ def _format_processing_post_item(post: Post, profile) -> dict:
         "media": _extract_post_media(post),
         "is_moderator_reviewed": post.is_moderator_reviewed,
         "moderator_id": post.moderator_id,
+        "moderator_name": moderator_name,
         "reviewed_at": post.reviewed_at,
     }
 
@@ -714,9 +757,10 @@ async def list_processing_posts_service(
     page_size: int | None = None,
 ) -> dict:
     from sqlalchemy import func
-    from sqlalchemy.orm import selectinload
+    from sqlalchemy.orm import selectinload, aliased
     from apps.feed.db_models import PostAttachment
     from apps.profiles.db_models import Profile
+    from apps.accounts.db_models import User
     from common.pagination import build_paginated_response
 
     filters = [Post.state == PostState.processing]
@@ -725,9 +769,14 @@ async def list_processing_posts_service(
 
     total_items = int((await db.execute(select(func.count(Post.id)).where(*filters))).scalar_one())
 
+    mod_user_alias = aliased(User)
+    mod_profile_alias = aliased(Profile)
+
     stmt = (
-        select(Post, Profile)
+        select(Post, Profile, mod_user_alias, mod_profile_alias)
         .outerjoin(Profile, Profile.user_id == Post.author_user_id)
+        .outerjoin(mod_user_alias, mod_user_alias.id == Post.moderator_id)
+        .outerjoin(mod_profile_alias, mod_profile_alias.user_id == Post.moderator_id)
         .where(*filters)
         .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
         .order_by(Post.created_at.desc())
@@ -736,7 +785,10 @@ async def list_processing_posts_service(
         stmt = stmt.offset((page - 1) * page_size).limit(page_size)
 
     rows = (await db.execute(stmt)).all()
-    items = [_format_processing_post_item(post, profile) for post, profile in rows]
+    items = [
+        _format_processing_post_item(post, profile, mod_user, mod_profile)
+        for post, profile, mod_user, mod_profile in rows
+    ]
 
     p = page or 1
     ps = page_size if page_size is not None else (len(items) if items else 1)
@@ -775,5 +827,8 @@ async def list_reviewed_posts_service(
         offset=offset,
         limit=limit,
     )
-    formatted = [_format_reviewed_post_item(post, profile) for post, profile in posts]
+    formatted = [
+        _format_reviewed_post_item(post, profile, mod_user, mod_profile)
+        for post, profile, mod_user, mod_profile in posts
+    ]
     return build_paginated_response(formatted, p, ps, total_items).model_dump()

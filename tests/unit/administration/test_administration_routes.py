@@ -372,6 +372,8 @@ def test_list_processing_posts_route(monkeypatch) -> None:
                     "content_html": "<p>Hello</p>",
                     "media": [],
                     "is_moderator_reviewed": False,
+                    "moderator_id": "22222222-2222-2222-2222-222222222222",
+                    "moderator_name": "Mod Name",
                 }
             ],
             "page": 1,
@@ -392,6 +394,7 @@ def test_list_processing_posts_route(monkeypatch) -> None:
     assert body["data"]["items"][0]["first_name"] == "Jane"
     assert body["data"]["items"][0]["post_id"] == "22222222-2222-2222-2222-222222222222"
     assert body["data"]["items"][0]["is_moderator_reviewed"] is False
+    assert body["data"]["items"][0]["moderator_name"] == "Mod Name"
 
 
 def test_list_processing_posts_route_superadmin_with_moderator_id(monkeypatch) -> None:
@@ -470,6 +473,7 @@ def test_list_reviewed_posts_route(monkeypatch) -> None:
                     "reviewed_at": "2026-01-01T00:00:00+00:00",
                     "created_at": "2026-01-01T00:00:00+00:00",
                     "moderator_id": "33333333-3333-3333-3333-333333333333",
+                    "moderator_name": "Jane Doe",
                     "profile_photo_url": "/static/uploads/profiles/jane.jpg",
                     "first_name": "Jane",
                     "last_name": "Doe",

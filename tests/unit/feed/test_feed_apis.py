@@ -946,6 +946,7 @@ async def test_processing_posts_route_filters_for_moderator_and_allows_superadmi
             moderator_body = moderator_response.json()
             assert moderator_body["data"]["totalItems"] == 1
             assert moderator_body["data"]["items"][0]["caption"] == "Route assigned to A"
+            assert moderator_body["data"]["items"][0]["moderator_name"] == moderator_a.email
     finally:
         app.dependency_overrides.pop(get_current_moderator, None)
 
@@ -1017,20 +1018,20 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
         await session.commit()
     
     async with async_session_factory() as session:
-        published_posts = await list_user_posts_service(user, session)
+        published_posts, total = await list_user_posts_service(user, session)
         assert len(published_posts) == 1
         assert published_posts[0].caption == "Published Post"
 
-        draft_posts = await list_user_posts_service(user, session, state="draft")
+        draft_posts, total = await list_user_posts_service(user, session, state="draft")
         assert len(draft_posts) == 1
         assert draft_posts[0].caption == "Draft Post"
 
-        flagged_posts = await list_user_posts_service(user, session, state="flagged")
+        flagged_posts, total = await list_user_posts_service(user, session, state="flagged")
         assert len(flagged_posts) == 1
         assert flagged_posts[0].caption == "Flagged Post"
         
         superadmin = SimpleNamespace(id=other.id, role="superadmin")
-        posts_superadmin = await list_user_posts_service(
+        posts_superadmin, total = await list_user_posts_service(
             superadmin,
             session,
             target_user_id=user.id,
@@ -1062,7 +1063,7 @@ async def test_posts_route_filters_state_for_current_user(test_users) -> None:
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
-            captions = {item["content"]["caption"] for item in body["data"]}
+            captions = {item["content"]["caption"] for item in body["data"]["items"]}
             assert captions == {"Route Draft"}
     finally:
         app.dependency_overrides.pop(get_current_user, None)
@@ -1109,7 +1110,7 @@ async def test_posts_route_superadmin_can_filter_any_user_or_all(test_users) -> 
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
             all_response = await ac.get("/api/v1/posts", params={"state": "published"})
             assert all_response.status_code == 200
-            all_captions = {item["content"]["caption"] for item in all_response.json()["data"]}
+            all_captions = {item["content"]["caption"] for item in all_response.json()["data"]["items"]}
             assert {"User Published", "Other Published"}.issubset(all_captions)
 
             user_response = await ac.get(
@@ -1117,7 +1118,7 @@ async def test_posts_route_superadmin_can_filter_any_user_or_all(test_users) -> 
                 params={"user_id": str(other.id), "state": "processing"},
             )
             assert user_response.status_code == 200
-            user_captions = {item["content"]["caption"] for item in user_response.json()["data"]}
+            user_captions = {item["content"]["caption"] for item in user_response.json()["data"]["items"]}
             assert user_captions == {"Other Processing"}
     finally:
         app.dependency_overrides.pop(get_current_user, None)
@@ -1149,8 +1150,15 @@ async def test_posts_route_validation_errors(test_users) -> None:
 @pytest.mark.asyncio
 async def test_get_feed_service_success(test_users) -> None:
     user, other = test_users
+    visitor = User(
+        email="pytest_visitor@example.com",
+        role="user",
+        firebase_uid="visitor-uid",
+        status="active"
+    )
     
     async with async_session_factory() as session:
+        session.add(visitor)
         user_profile = Profile(
             user_id=user.id,
             first_name="Feed",
@@ -1171,7 +1179,7 @@ async def test_get_feed_service_success(test_users) -> None:
         await session.commit()
         
     async with async_session_factory() as session:
-        feed = await get_feed_service(user.id, session)
+        feed, total = await get_feed_service(visitor.id, session)
         assert len(feed) >= 2
         captions = {f.caption for f in feed}
         assert "Published Post 1" in captions
@@ -1186,8 +1194,8 @@ async def test_get_feed_service_success(test_users) -> None:
 
 @pytest.mark.asyncio
 async def test_feed_route_accessible_to_superadmin_and_includes_author_profile(test_users) -> None:
-    user, _ = test_users
-    superadmin = SimpleNamespace(id=user.id, role="superadmin")
+    user, other = test_users
+    superadmin = SimpleNamespace(id=other.id, role="superadmin")
 
     async with async_session_factory() as session:
         profile = Profile(
@@ -1220,7 +1228,7 @@ async def test_feed_route_accessible_to_superadmin_and_includes_author_profile(t
             body = response.json()
             assert body["status"] is True
             matching = [
-                item for item in body["data"]
+                item for item in body["data"]["items"]
                 if item["content"]["caption"] == "Admin accessible feed"
             ]
             assert len(matching) == 1
@@ -1267,7 +1275,7 @@ async def test_feed_service_connection_priority(test_users) -> None:
         await session.commit()
         
     async with async_session_factory() as session:
-        feed = await get_feed_service(user.id, session)
+        feed, total = await get_feed_service(user.id, session)
         assert len(feed) >= 2
         # Connection post must appear first despite being older
         assert feed[0].caption == "Connection Post"
@@ -1313,9 +1321,9 @@ async def test_routes_post_management_flow(test_users) -> None:
             # save_post endpoint returns SavePostData (id, revision_number)
             assert draft_res.json()["data"]["revision_number"] == 2
 
-            # 3. POST /posts/publish (admin route)
-            publish_res = await ac.post(
-                "/api/v1/patch/publish",
+            # 3. PATCH /posts/publish (admin route)
+            publish_res = await ac.patch(
+                "/api/v1/posts/publish",
                 json={
                     "post_id": str(post_id),
                     "status": "publish"
@@ -1336,16 +1344,16 @@ async def test_routes_post_management_flow(test_users) -> None:
                 "content": {
                     "caption": "General Updated Caption",
                     "content_html": "General updated text",
-                    "visibility": "hidden"
+                    "visibility": "public"
                 }
             })
             assert patch_res.status_code == 200
-            assert patch_res.json()["data"]["state"] == "hidden"
+            assert patch_res.json()["data"]["state"] == "published"
 
             # 6. GET /posts (user posts)
             list_res = await ac.get("/api/v1/posts")
             assert list_res.status_code == 200
-            assert len(list_res.json()["data"]) >= 1
+            assert len(list_res.json()["data"]["items"]) >= 1
 
             # 7. GET /feed
             feed_res = await ac.get("/api/v1/feed")

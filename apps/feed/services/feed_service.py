@@ -9,8 +9,10 @@ from apps.profiles.db_models import Profile
 
 async def get_feed_service(
     current_user_id: UUID,
-    db: AsyncSession
-) -> list[Post]:
+    db: AsyncSession,
+    page: int | None = None,
+    page_size: int | None = None,
+) -> tuple[list[Post], int]:
     """
     Get public feed posts. Connection posts first (by created_at DESC),
     then non-connection posts (by created_at DESC).
@@ -39,4 +41,16 @@ async def get_feed_service(
     non_connection_posts = [p for p in posts if p.author_user_id not in connection_ids]
 
     # Combine them (both lists are already ordered by created_at DESC)
-    return connection_posts + non_connection_posts
+    combined = connection_posts + non_connection_posts
+    total_items = len(combined)
+
+    if page is None and page_size is None:
+        sliced_posts = combined
+    else:
+        p = page or 1
+        ps = page_size or 20
+        start = (p - 1) * ps
+        end = start + ps
+        sliced_posts = combined[start:end]
+
+    return sliced_posts, total_items

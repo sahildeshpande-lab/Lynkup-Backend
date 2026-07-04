@@ -120,6 +120,8 @@ async def list_user_posts(
         description="Filter posts by state",
         enum=["published", "processing", "flagged", "draft"],
     ),
+    page: int | None = Query(default=None, ge=1),
+    pageSize: int | None = Query(default=None, ge=1, le=200),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
@@ -129,21 +131,33 @@ async def list_user_posts(
         db=db,
     )
     if block_message:
+        from common.pagination import build_paginated_response
         return success_response(
             block_message,
-            [],
+            build_paginated_response([], 1, 1, 0),
             response_cls=ApiResponse,
         )
 
-    posts = await list_user_posts_service(
+    posts, total_items = await list_user_posts_service(
         current_user=current_user,
         target_user_id=user_id,
         state=state,
+        page=page,
+        page_size=pageSize,
         db=db
+    )
+    from common.pagination import build_paginated_response
+    p = page or 1
+    ps = pageSize if pageSize is not None else (total_items if total_items > 0 else 1)
+    paginated = build_paginated_response(
+        [format_post_detail(post) for post in posts],
+        p,
+        ps,
+        total_items
     )
     return success_response(
         "User posts retrieved successfully",
-        [format_post_detail(p) for p in posts],
+        paginated,
         response_cls=ApiResponse,
     )
 
@@ -180,15 +194,28 @@ async def delete_draft_post(
 
 @router.get("/feed", response_model=ApiResponse)
 async def get_feed(
+    page: int | None = Query(default=None, ge=1),
+    pageSize: int | None = Query(default=None, ge=1, le=200),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    posts = await get_feed_service(
+    posts, total_items = await get_feed_service(
         current_user_id=current_user.id,
+        page=page,
+        page_size=pageSize,
         db=db
+    )
+    from common.pagination import build_paginated_response
+    p = page or 1
+    ps = pageSize if pageSize is not None else (total_items if total_items > 0 else 1)
+    paginated = build_paginated_response(
+        [format_post_detail(post) for post in posts],
+        p,
+        ps,
+        total_items
     )
     return success_response(
         "Feed retrieved successfully",
-        [format_post_detail(p) for p in posts],
+        paginated,
         response_cls=ApiResponse,
     )

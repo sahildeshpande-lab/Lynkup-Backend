@@ -46,13 +46,21 @@ async def fetch_reviewed_posts_for_moderator(
     status: Literal["publish", "flag"] | None = None,
     offset: int = 0,
     limit: int | None = None,
-) -> list[tuple[Post, object | None]]:
+) -> list[tuple[Post, object | None, object | None, object | None]]:
     from apps.profiles.db_models import Profile
+    from apps.accounts.db_models import User
+    from sqlalchemy.orm import aliased
+
+    AuthorProfile = aliased(Profile, name="author_profile")
+    ModeratorUser = aliased(User, name="moderator_user")
+    ModeratorProfile = aliased(Profile, name="moderator_profile")
 
     filters = _build_reviewed_posts_filter(moderator_id, status)
     stmt = (
-        select(Post, Profile)
-        .outerjoin(Profile, Profile.user_id == Post.author_user_id)
+        select(Post, AuthorProfile, ModeratorUser, ModeratorProfile)
+        .outerjoin(AuthorProfile, AuthorProfile.user_id == Post.author_user_id)
+        .outerjoin(ModeratorUser, ModeratorUser.id == Post.moderator_id)
+        .outerjoin(ModeratorProfile, ModeratorProfile.user_id == Post.moderator_id)
         .where(*filters)
         .order_by(Post.reviewed_at.desc(), Post.updated_at.desc())
         .offset(offset)
@@ -69,20 +77,41 @@ async def user_exists(db: AsyncSession, user_id: UUID) -> bool:
     return result.scalar_one_or_none() is not None
 
 
+async def count_posts_by_state(
+    db: AsyncSession,
+    *,
+    state: PostState,
+    user_id: UUID | None = None,
+) -> int:
+    """Count posts filtered by state and optional author."""
+    filters = [Post.state == state]
+    if user_id is not None:
+        filters.append(Post.author_user_id == user_id)
+    stmt = select(func.count(Post.id)).where(*filters)
+    return int((await db.execute(stmt)).scalar_one())
+
+
 async def fetch_posts_by_state(
     db: AsyncSession,
     *,
     state: PostState,
     user_id: UUID | None = None,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> list[Post]:
     """Fetch posts filtered by state and optional author, newest first."""
     filters = [Post.state == state]
     if user_id is not None:
         filters.append(Post.author_user_id == user_id)
 
-    result = await db.execute(
+    stmt = (
         select(Post)
         .where(*filters)
         .order_by(Post.created_at.desc())
+        .offset(offset)
     )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+
+    result = await db.execute(stmt)
     return list(result.scalars().all())

@@ -180,8 +180,8 @@ def validate_content(content: dict) -> None:
         raise ValueError("Caption is required")
 
     visibility = content.get("visibility", "public")
-    if visibility not in ("public", "private"):
-        raise ValueError(f"Invalid visibility value: {visibility}. Must be 'public' or 'private'")
+    if visibility not in ("public", "private", "hidden"):
+        raise ValueError(f"Invalid visibility value: {visibility}. Must be 'public', 'private', or 'hidden'")
 
     content_html = content.get("content_html")
     if content_html:
