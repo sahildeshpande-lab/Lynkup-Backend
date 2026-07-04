@@ -15,14 +15,15 @@ from apps.feed.content_utils import (
 from apps.feed.db_models import MediaAsset, PostAttachment
 from common.enums import MediaAssetState, MediaType
 from common.exceptions import ApiError
-from core.images import generate_download_url, save_image
+from core.images import generate_download_url
+from core.images.storage_service import storage_service
 
-MAX_IMAGE_UPLOAD_SIZE = 10 * 1024 * 1024
-MAX_GIF_UPLOAD_SIZE = 15 * 1024 * 1024
-MAX_VIDEO_UPLOAD_SIZE = 100 * 1024 * 1024
-MAX_AUDIO_UPLOAD_SIZE = 25 * 1024 * 1024
-MAX_DOCUMENT_UPLOAD_SIZE = 20 * 1024 * 1024
-MAX_OTHER_UPLOAD_SIZE = 20 * 1024 * 1024
+MAX_IMAGE_UPLOAD_SIZE = 5 * 1024 * 1024
+MAX_GIF_UPLOAD_SIZE = 5 * 1024 * 1024
+MAX_VIDEO_UPLOAD_SIZE = 5 * 1024 * 1024
+MAX_AUDIO_UPLOAD_SIZE = 5 * 1024 * 1024
+MAX_DOCUMENT_UPLOAD_SIZE = 5 * 1024 * 1024
+MAX_OTHER_UPLOAD_SIZE = 5 * 1024 * 1024
 
 _MAX_UPLOAD_SIZE_BY_TYPE = {
     MediaType.image.value: MAX_IMAGE_UPLOAD_SIZE,
@@ -96,7 +97,7 @@ def _resolve_extension(filename: str | None, content_type: str) -> str:
     return ext
 
 
-def _build_media_asset(
+async def _build_media_asset(
     *,
     user_id: UUID,
     file: UploadFile,
@@ -105,13 +106,16 @@ def _build_media_asset(
     content_type = file.content_type or ""
     media_type = MediaType(get_media_type(content_type))
 
-    ext = _resolve_extension(file.filename, content_type)
     file_uuid = uuid.uuid4()
-    filename = f"{file_uuid}{ext}"
-    key = f"posts/{filename}"
 
     try:
-        save_image(file_name=key, content=content, content_type=content_type)
+        res = await storage_service.upload_post_media(
+            file=content,
+            file_uuid=file_uuid,
+            content_type=content_type,
+            filename=file.filename,
+        )
+        key = res["data"]["key"]
     except Exception:
         raise ApiError("Storage upload failed")
 
@@ -161,7 +165,7 @@ async def upload_post_media_service(
         media_type = get_media_type(file.content_type or "")
         _validate_upload_file(file, content, media_type)
 
-        media_asset = _build_media_asset(
+        media_asset = await _build_media_asset(
             user_id=user_id,
             file=file,
             content=content,

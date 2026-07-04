@@ -1,6 +1,5 @@
 from .config import (
     ImageStorageSettings,
-    apply_base_url_img,
     build_image_key,
     normalize_image_name,
     settings,
@@ -16,7 +15,6 @@ from .config import (
 
 __all__ = [
     "ImageStorageSettings",
-    "apply_base_url_img",
     "build_image_key",
     "normalize_image_name",
     "settings",

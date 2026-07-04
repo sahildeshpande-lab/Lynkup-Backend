@@ -1,42 +1,47 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.profiles.schemas import ApiResponse
-from common.exceptions import ApiError
-from common.responses import success_response
-from core.images import save_image, generate_download_url
-import uuid
+from core.database.session import get_session
+from core.security.auth import get_current_user
+from apps.accounts.db_models import User
+from apps.uploads.schemas import UploadResponse
+from core.images.storage_service import storage_service
 
-MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB
 ALLOWED_PREFIXES = {"profiles", "banners"}
-ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 
 router = APIRouter(tags=["2] User Management"])
 
 
-@router.post("/uploads/image", response_model=ApiResponse)
+@router.post("/uploads/image", response_model=UploadResponse)
 async def upload_image(
     file: UploadFile = File(...),
     prefix: str = Form("profiles"),
-):
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> UploadResponse:
     if prefix not in ALLOWED_PREFIXES:
-        raise ApiError(f"Invalid prefix. Must be one of: {', '.join(ALLOWED_PREFIXES)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid prefix. Must be one of: {', '.join(sorted(ALLOWED_PREFIXES))}",
+        )
 
-    if file.content_type not in ALLOWED_CONTENT_TYPES:
-        raise ApiError(f"Invalid file type. Must be one of: {', '.join(ALLOWED_CONTENT_TYPES)}")
+    user_identifier = getattr(current_user, "id", "user_1")
 
-    content = await file.read()
+    if prefix == "banners":
+        result = await storage_service.upload_banner(
+            file=file,
+            banner_id=user_identifier,
+        )
+    else:
+        result = await storage_service.upload_profile(
+            file=file,
+            user_id=user_identifier,
+        )
 
-    if len(content) > MAX_IMAGE_SIZE:
-        raise ApiError("File size exceeds 5MB limit")
-
-    ext = file.filename.split(".")[-1] if file.filename and "." in file.filename else "png"
-    file_name = f"{prefix}/{uuid.uuid4()}.{ext}"
-    save_image(file_name=file_name, content=content, content_type=file.content_type or "image/png")
-
-    return success_response(
-        "image uploaded",
-        {"key": file_name, "url": generate_download_url(file_name)},
-        response_cls=ApiResponse,
+    return UploadResponse(
+        status=result["status"],
+        message=result["message"],
+        data=result["data"],
     )

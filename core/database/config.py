@@ -28,3 +28,6 @@ class DatabaseSettings(BaseSettings):
 
 
 settings = DatabaseSettings()
+# print("=" * 50)
+# print("DATABASE_URL:", settings.database_url)
+# print("=" * 50)

@@ -188,7 +188,7 @@ async def test_upload_post_media_service_success(test_users) -> None:
         assert "posts/" in item["key"]
         assert item["key"].endswith(".png")
         assert item["type"] == "image"
-        assert "/static/uploads/" in item["url"]
+        assert item["key"] in item["url"]
 
         media_id = item["id"]
         stmt = select(MediaAsset).where(MediaAsset.id == media_id)
@@ -239,14 +239,14 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
 
     oversized_image = UploadFile(
         filename="large.png",
-        file=io.BytesIO(b"x" * (10 * 1024 * 1024 + 1)),
+        file=io.BytesIO(b"x" * (5 * 1024 * 1024 + 1)),
         headers={"content-type": "image/png"},
     )
     async with async_session_factory() as session:
         with pytest.raises(HTTPException) as exc_info:
             await upload_post_media_service(user.id, [oversized_image], session)
         assert exc_info.value.status_code == 400
-        assert "exceeds maximum upload size" in exc_info.value.detail
+        assert "exceeds maximum upload size of 5 MB" in exc_info.value.detail
 
 
 def test_get_media_type_maps_content_types() -> None:
@@ -1070,7 +1070,7 @@ async def test_posts_route_filters_state_for_current_user(test_users) -> None:
 
 
 @pytest.mark.asyncio
-async def test_posts_route_rejects_normal_user_for_other_user(test_users) -> None:
+async def test_posts_route_allows_normal_user_for_other_user(test_users) -> None:
     user, other = test_users
 
     async def _override_get_current_user():
@@ -1081,9 +1081,8 @@ async def test_posts_route_rejects_normal_user_for_other_user(test_users) -> Non
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
             response = await ac.get("/api/v1/posts", params={"user_id": str(other.id)})
-            assert response.status_code == 403
-            assert response.json()["status"] is False
-            assert response.json()["message"] == "Insufficient permissions"
+            assert response.status_code == 200
+            assert response.json()["status"] is True
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -1188,7 +1187,7 @@ async def test_get_feed_service_success(test_users) -> None:
         by_caption = {item["content"]["caption"]: item for item in formatted}
         assert by_caption["Published Post 1"]["first_name"] == "Feed"
         assert by_caption["Published Post 1"]["last_name"] == "User"
-        assert by_caption["Published Post 1"]["profile_photo_url"].endswith("/static/uploads/profiles/feed-user.jpg")
+        assert by_caption["Published Post 1"]["profile_photo_url"].endswith("profiles/feed-user.jpg")
         assert by_caption["Published Post 2"]["first_name"] == "Other"
 
 
@@ -1234,7 +1233,7 @@ async def test_feed_route_accessible_to_superadmin_and_includes_author_profile(t
             assert len(matching) == 1
             assert matching[0]["first_name"] == "Admin"
             assert matching[0]["last_name"] == "Feed"
-            assert matching[0]["profile_photo_url"].endswith("/static/uploads/profiles/admin-feed.jpg")
+            assert matching[0]["profile_photo_url"].endswith("profiles/admin-feed.jpg")
     finally:
         app.dependency_overrides.pop(get_current_user, None)
         app.dependency_overrides.pop(get_current_app_user, None)
@@ -1525,3 +1524,56 @@ async def test_create_draft_route_returns_draftpost(test_users) -> None:
             assert body["data"][0]["state"] == "draft"
     finally:
         app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_list_other_user_posts_visibility(test_users) -> None:
+    user, other = test_users
+
+    async with async_session_factory() as session:
+        # Create other profile (visibility: public)
+        profile_public = Profile(
+            user_id=other.id,
+            first_name="Public",
+            last_name="User",
+            profile_visibility="public",
+        )
+        post_public = Post(
+            author_user_id=other.id,
+            content={"caption": "Other public post", "visibility": "public"},
+            state=PostState.published,
+        )
+        session.add_all([profile_public, post_public])
+        await session.commit()
+
+    async def _override_get_current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            res = await ac.get(f"/api/v1/posts?user_id={other.id}")
+            assert res.status_code == 200
+            body = res.json()
+            assert body["status"] is True
+            assert len(body["data"]["items"]) == 1
+            assert body["data"]["items"][0]["content"]["caption"] == "Other public post"
+
+            # Update other profile visibility to private
+            async with async_session_factory() as session:
+                other_profile_db = (
+                    await session.execute(select(Profile).where(Profile.user_id == other.id))
+                ).scalar_one()
+                other_profile_db.profile_visibility = "private"
+                await session.commit()
+
+            res_blocked = await ac.get(f"/api/v1/posts?user_id={other.id}")
+            assert res_blocked.status_code == 200
+            body_blocked = res_blocked.json()
+            assert body_blocked["status"] is True
+            assert "visibility is private" in body_blocked["message"].lower()
+            assert len(body_blocked["data"]["items"]) == 0
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+

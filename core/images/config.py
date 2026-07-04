@@ -10,35 +10,62 @@ from pydantic import Field
 
 
 class ImageStorageSettings(BaseSettings):
+    S3_BUCKET: str | None = Field(default=None, alias="S3_BUCKET")
+    S3_ACCESS_KEY: str | None = Field(default=None, alias="S3_ACCESS_KEY")
+    S3_SECRET_KEY: str | None = Field(default=None, alias="S3_SECRET_KEY")
+    S3_ENDPOINT: str | None = Field(default=None, alias="S3_ENDPOINT")
+    S3_FILE_ENDPOINT: str | None = Field(default=None, alias="S3_FILE_ENDPOINT")
+    S3_CDN_ENDPOINT: str | None = Field(default=None, alias="S3_CDN_ENDPOINT")
+
+    # Legacy fallback fields
     aws_access_key_id: str | None = Field(default=None, alias="AWS_ACCESS_KEY_ID")
     aws_secret_access_key: str | None = Field(default=None, alias="AWS_SECRET_ACCESS_KEY")
     aws_region: str = Field(default="us-east-1", alias="AWS_REGION")
     aws_s3_bucket: str | None = Field(default=None, alias="AWS_S3_BUCKET")
-    base_url: str | None = Field(default=None, alias="BASE_URL")
-    base_url_img: str | None = Field(default=None, alias="BASE_URL_Img")
 
     class Config:
         env_file = ".env"
         extra = "ignore"
         populate_by_name = True
 
+    @property
+    def effective_bucket(self) -> str | None:
+        return self.S3_BUCKET or self.aws_s3_bucket
+
+    @property
+    def effective_access_key(self) -> str | None:
+        return self.S3_ACCESS_KEY or self.aws_access_key_id
+
+    @property
+    def effective_secret_key(self) -> str | None:
+        return self.S3_SECRET_KEY or self.aws_secret_access_key
+
 
 settings = ImageStorageSettings()
 
+
+def create_s3_client(s_settings: ImageStorageSettings = settings):
+    kwargs: dict[str, Any] = {
+        "service_name": "s3",
+        "aws_access_key_id": s_settings.effective_access_key,
+        "aws_secret_access_key": s_settings.effective_secret_key,
+        "config": Config(signature_version="s3v4"),
+    }
+    if s_settings.S3_ENDPOINT:
+        kwargs["endpoint_url"] = s_settings.S3_ENDPOINT
+    elif s_settings.aws_region:
+        kwargs["region_name"] = s_settings.aws_region
+    return boto3.client(**kwargs)
+
+
 # Initialize boto3 client
-s3_client = boto3.client(
-    "s3",
-    aws_access_key_id=settings.aws_access_key_id,
-    aws_secret_access_key=settings.aws_secret_access_key,
-    region_name=settings.aws_region,
-    config=Config(signature_version="s3v4")
-)
+s3_client = create_s3_client(settings)
 
 
 def save_image(file_name: str, content: bytes, content_type: str = "image/png") -> None:
-    if settings.aws_s3_bucket:
+    if settings.effective_bucket:
         s3_client.put_object(
-            Bucket=settings.aws_s3_bucket,
+            Bucket=settings.effective_bucket,
             Key=file_name,
             Body=content,
             ContentType=content_type
@@ -66,12 +93,12 @@ def normalize_image_name(image_name: str) -> str:
 
 def generate_upload_url(file_name: str, expiration: int = 3600) -> str:
     """Generate a presigned URL to upload a file to S3."""
-    if not settings.aws_s3_bucket:
+    if not settings.effective_bucket:
         return ""
     try:
         response = s3_client.generate_presigned_url(
             "put_object",
-            Params={"Bucket": settings.aws_s3_bucket, "Key": file_name},
+            Params={"Bucket": settings.effective_bucket, "Key": file_name},
             ExpiresIn=expiration
         )
         return response
@@ -80,45 +107,28 @@ def generate_upload_url(file_name: str, expiration: int = 3600) -> str:
         return ""
 
 
-def _public_base_url() -> str | None:
-    base = settings.base_url or settings.base_url_img
-    if not base:
-        return None
-    return base.rstrip("/")
-
-
-def apply_base_url_img(url: str) -> str:
-    """Prefix relative image paths with BASE_URL (or BASE_URL_Img) when configured."""
-    base = _public_base_url()
-    if not url or not base:
-        return url
-    if url.startswith(("http://", "https://")):
-        return url
-    if url.startswith("/"):
-        return f"{base}{url}"
-    return f"{base}/{url}"
-
-
 def generate_profile_image_url(file_name: str, expiration: int = 3600) -> str:
     """Generate a download URL for profile or banner photos with optional base URL."""
-    return apply_base_url_img(generate_download_url(file_name, expiration))
+    return generate_download_url(file_name, expiration)
 
 
 def generate_download_url(file_name: str, expiration: int = 3600) -> str:
     """Generate a presigned URL to download a file from S3 or return local path."""
     if not file_name:
         return ""
-    # If it is a full HTTP URL already, return it
-    if file_name.startswith(("http://", "https://")):
+    # If it is a full HTTP URL or static path already, return it
+    if file_name.startswith("http://") or file_name.startswith("https://") or file_name.startswith("/static/"):
         return file_name
-    if file_name.startswith("/static/"):
-        return apply_base_url_img(file_name)
-    if not settings.aws_s3_bucket:
-        return apply_base_url_img(f"/static/uploads/{file_name}")
+    if settings.S3_CDN_ENDPOINT:
+        cdn_endpoint = settings.S3_CDN_ENDPOINT.rstrip("/")
+        clean_key = file_name.lstrip("/")
+        return f"{cdn_endpoint}/{clean_key}"
+    if not settings.effective_bucket:
+        return f"/static/uploads/{file_name}"
     try:
         response = s3_client.generate_presigned_url(
             "get_object",
-            Params={"Bucket": settings.aws_s3_bucket, "Key": file_name},
+            Params={"Bucket": settings.effective_bucket, "Key": file_name},
             ExpiresIn=expiration
         )
         return response
@@ -131,7 +141,7 @@ def delete_file(file_name: str) -> None:
     """Delete a file from S3 or local directory."""
     if not file_name:
         return
-    if not settings.aws_s3_bucket:
+    if not settings.effective_bucket:
         from pathlib import Path
         base_static_dir = Path(__file__).resolve().parents[2] / "entrypoints" / "static" / "uploads"
         target_path = base_static_dir / file_name
@@ -142,7 +152,7 @@ def delete_file(file_name: str) -> None:
             print(f"Error deleting local file: {e}")
         return
     try:
-        s3_client.delete_object(Bucket=settings.aws_s3_bucket, Key=file_name)
+        s3_client.delete_object(Bucket=settings.effective_bucket, Key=file_name)
     except ClientError as e:
         print(f"Error deleting file from S3: {e}")
 
@@ -151,13 +161,13 @@ def file_exists(file_name: str) -> bool:
     """Check if a file exists in S3 or local directory."""
     if not file_name:
         return False
-    if not settings.aws_s3_bucket:
+    if not settings.effective_bucket:
         from pathlib import Path
         base_static_dir = Path(__file__).resolve().parents[2] / "entrypoints" / "static" / "uploads"
         target_path = base_static_dir / file_name
         return target_path.exists()
     try:
-        s3_client.head_object(Bucket=settings.aws_s3_bucket, Key=file_name)
+        s3_client.head_object(Bucket=settings.effective_bucket, Key=file_name)
         return True
     except ClientError as e:
         # Check if error is 404 Not Found

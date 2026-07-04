@@ -626,17 +626,10 @@ async def list_user_posts_service(
 
     role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
     is_superadmin = role == "superadmin"
-    effective_user_id = target_user_id
 
-    if not is_superadmin:
-        if (
-            target_user_id is not None
-            and target_user_id != current_user.id
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient permissions",
-            )
+    if is_superadmin:
+        effective_user_id = target_user_id
+    else:
         effective_user_id = target_user_id or current_user.id
 
     if effective_user_id is not None and not await user_exists(db, effective_user_id):

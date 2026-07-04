@@ -17,8 +17,11 @@ from apps.profiles.db_models import Profile
 from sqlalchemy.orm import selectinload
 import secrets
 import string
+import logging
+
 PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 ADMIN_MANAGED_ROLES = ["user", "moderator", "viewer"]
+logger = logging.getLogger(__name__)
 
 def _generate_temporary_password() -> str:
     alphabet = string.ascii_letters + string.digits + "@#$%"

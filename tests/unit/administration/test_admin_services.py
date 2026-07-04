@@ -116,7 +116,13 @@ async def test_admin_create_user_via_signup_removed_uses_admin_create_user(monke
         async def _mock_temp_password_email(*_args, **_kwargs):
             return True
 
+        def _mock_create_firebase_user(email, password, display_name=None):
+            class MockFirebaseUser:
+                uid = "mock-firebase-uid"
+            return MockFirebaseUser()
+
         monkeypatch.setattr("core.email_service.send_temporary_password_email", _mock_temp_password_email)
+        monkeypatch.setattr("core.auth.services.create_firebase_user", _mock_create_firebase_user)
 
         email = f"user_admin_create_{uuid.uuid4()}@example.com"
         payload = AdminUserCreateRequest(
