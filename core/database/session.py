@@ -12,6 +12,9 @@ engine = create_async_engine(
     echo=settings.echo_sql,
     future=True,
     pool_pre_ping=True,
+    connect_args={
+        "ssl": ssl.create_default_context()
+    },
 )
 
 async_session_factory = async_sessionmaker(
