@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from .config import settings
 from . import models as _models  # noqa: F401
+import ssl
 
 engine = create_async_engine(
     settings.async_database_url,
