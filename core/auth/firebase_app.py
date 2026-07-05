@@ -46,6 +46,10 @@ def initialize_firebase_app() -> None:
     firebase_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
 
     if firebase_json:
+        data = json.loads(firebase_json)
+
+        print("FIREBASE PROJECT:", data.get("project_id"))
+        print("SERVICE ACCOUNT:", data.get("client_email"))
         cred = credentials.Certificate(json.loads(firebase_json))
     else:
         credential_path = settings.firebase_credential_path

@@ -133,7 +133,7 @@ class StorageService:
         else:
             config.save_image(file_name=key, content=content, content_type=content_type)
         return key
-    
+
     @classmethod
     async def _extract_content(
         cls, file_input
