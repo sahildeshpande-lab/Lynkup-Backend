@@ -119,10 +119,10 @@ def generate_download_url(file_name: str, expiration: int = 3600) -> str:
     # If it is a full HTTP URL or static path already, return it
     if file_name.startswith("http://") or file_name.startswith("https://") or file_name.startswith("/static/"):
         return file_name
-    if settings.S3_CDN_ENDPOINT:
-        cdn_endpoint = settings.S3_CDN_ENDPOINT.rstrip("/")
+    if settings.S3_FILE_ENDPOINT:
+        endpoint = settings.S3_FILE_ENDPOINT.rstrip("/")
         clean_key = file_name.lstrip("/")
-        return f"{cdn_endpoint}/{clean_key}"
+        return f"{endpoint}/{clean_key}"
     if not settings.effective_bucket:
         return f"/static/uploads/{file_name}"
     try:

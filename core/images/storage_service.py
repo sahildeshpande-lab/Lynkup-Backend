@@ -35,9 +35,10 @@ def get_media_url(key: str) -> str:
         return key
     
     clean_key = key.lstrip("/")
-    cdn_endpoint = (config.settings.S3_CDN_ENDPOINT or "").rstrip("/")
-    if cdn_endpoint:
-        return f"{cdn_endpoint}/{clean_key}"
+    image_endpoint = (config.settings.S3_FILE_ENDPOINT
+            or config.settings.S3_CDN_ENDPOINT or "").rstrip("/")
+    if image_endpoint:
+        return f"{image_endpoint}/{clean_key}"
     return f"/{clean_key}"
 
 
@@ -130,10 +131,6 @@ class StorageService:
                 ContentType=content_type,
                 ACL="public-read",
             )
-            print("Upload ",response)
-            print("Uploading:", key)
-            print("Content Type:", content_type)
-            print("Content Size:", len(content))
                
         else:
             config.save_image(file_name=key, content=content, content_type=content_type)
@@ -149,10 +146,6 @@ class StorageService:
             content_type = getattr(file_input, "content_type", None)
             filename = getattr(file_input, "filename", None)
 
-            print("FILENAME:", getattr(file_input, "filename", None))
-            print("CONTENT_TYPE:", getattr(file_input, "content_type", None))
-            print("SIZE:", len(content))
-            print("FIRST_20_BYTES:", content[:20])
         elif isinstance(file_input, bytes):
             content = file_input
             content_type = None
