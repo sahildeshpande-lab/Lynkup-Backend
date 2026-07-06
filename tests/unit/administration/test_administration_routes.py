@@ -566,3 +566,29 @@ def test_list_reviewed_posts_route_viewer(monkeypatch) -> None:
         app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
 
 
+def test_list_users_route_viewer(monkeypatch) -> None:
+    app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
+    monkeypatch.setattr(admin_routes.services, "list_users", _list_users)
+    try:
+        response = client.get("/api/v1/users", params={"page": 1, "pageSize": 10})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] is True
+    finally:
+        app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
+
+
+def test_get_user_route_viewer(monkeypatch) -> None:
+    app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
+    monkeypatch.setattr(admin_routes.services, "admin_get_user", _get_user)
+    user_id = "11111111-1111-1111-1111-111111111111"
+    try:
+        response = client.get(f"/api/v1/users/{user_id}")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] is True
+        assert body["data"]["userId"] == user_id
+    finally:
+        app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
+
+

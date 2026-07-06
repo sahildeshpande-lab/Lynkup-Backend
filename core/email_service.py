@@ -106,6 +106,11 @@ async def _deliver_email_via_sendgrid(to_email: str, subject: str, html_body: st
         )
         client = SendGridAPIClient(api_key)
         response = client.send(message)
+
+
+        print("STATUS:", response.status_code)
+        print("BODY:", response.body)
+        print("HEADERS:", response.headers)
         success = 200 <= response.status_code < 300
         if not success:
             message = f"SendGrid rejected email with status {getattr(response, 'status_code', None)}"
@@ -113,22 +118,24 @@ async def _deliver_email_via_sendgrid(to_email: str, subject: str, html_body: st
             return False, message
         return True, None
     except Exception as exc:
-        message = str(exc)
-        exc_name = type(exc).__name__
-        if "UnauthorizedError" in exc_name or "401" in message or "Unauthorized" in message:
-            logger.warning(
-                "SendGrid API Key is unauthorized or invalid (401). "
-                "Simulating email delivery. Email details:\n"
-                "To: %s\n"
-                "Subject: %s\n"
-                "Body:\n%s\n",
-                to_email,
-                subject,
-                html_body,
-            )
-            return True, None
-        logger.exception("Email send failed while delivering to %s", to_email)
-        return False, message
+            logger.exception("SendGrid exception")
+            return False, str(exc)
+        # message = str(exc)
+        # exc_name = type(exc).__name__
+        # if "UnauthorizedError" in exc_name or "401" in message or "Unauthorized" in message:
+        #     logger.warning(
+        #         "SendGrid API Key is unauthorized or invalid (401). "
+        #         "Simulating email delivery. Email details:\n"
+        #         "To: %s\n"
+        #         "Subject: %s\n"
+        #         "Body:\n%s\n",
+        #         to_email,
+        #         subject,
+        #         html_body,
+        #     )
+        #     return True, None
+        # logger.exception("Email send failed while delivering to %s", to_email)
+        # return False, message
 
 
 async def _actually_send_email_via_sendgrid(to_email: str, subject: str, html_body: str, from_email: str) -> bool:

@@ -366,3 +366,77 @@ async def test_update_user_profile_by_admin_service(monkeypatch) -> None:
     finally:
         await engine.dispose()
 
+
+@pytest.mark.asyncio
+async def test_get_my_profile_service_relationship_flags() -> None:
+    from apps.profiles.services import get_my_profile_service
+    from apps.connections.db_models import ConnectionRequest
+
+    try:
+        await init_db()
+        async with async_session_factory() as session:
+            user1 = User(
+                email="user1_flag_test@example.com",
+                role="user",
+                firebase_uid="uid_user1_flag_test",
+            )
+            user2 = User(
+                email="user2_flag_test@example.com",
+                role="user",
+                firebase_uid="uid_user2_flag_test",
+            )
+            session.add(user1)
+            session.add(user2)
+            await session.commit()
+            await session.refresh(user1)
+            await session.refresh(user2)
+
+            # Create a pending connection request where user1 is the sender, user2 is the receiver
+            req = ConnectionRequest(
+                sender_user_id=user1.id,
+                receiver_user_id=user2.id,
+                status="pending"
+            )
+            session.add(req)
+            await session.commit()
+
+        async with async_session_factory() as session:
+            # 1. Fetch own profile (user1 fetching user1)
+            res1 = await get_my_profile_service(user1, session, target_user_id=None)
+            u1_data = res1["user"]
+            assert u1_data["is_connected"] is False
+            assert u1_data["request_sent"] is False
+            assert u1_data["request_send"] is False
+            assert u1_data["request_received"] is False
+            assert u1_data["is_sent"] is False
+            assert u1_data["is_request"] is False
+
+            # 2. Fetch other profile (user1 fetching user2)
+            # Since user1 sent a request to user2:
+            # - request_sent / request_send / is_sent should be True
+            # - request_received / is_request should be False
+            res2 = await get_my_profile_service(user1, session, target_user_id=user2.id)
+            u2_data = res2["user"]
+            assert u2_data["is_connected"] is False
+            assert u2_data["request_sent"] is True
+            assert u2_data["request_send"] is True
+            assert u2_data["request_received"] is False
+            assert u2_data["is_sent"] is True
+            assert u2_data["is_request"] is False
+
+            # 3. Fetch other profile (user2 fetching user1)
+            # Since user2 received a request from user1:
+            # - request_sent / request_send / is_sent should be False
+            # - request_received / is_request should be True
+            res3 = await get_my_profile_service(user2, session, target_user_id=user1.id)
+            u3_data = res3["user"]
+            assert u3_data["is_connected"] is False
+            assert u3_data["request_sent"] is False
+            assert u3_data["request_send"] is False
+            assert u3_data["request_received"] is True
+            assert u3_data["is_sent"] is False
+            assert u3_data["is_request"] is True
+
+    finally:
+        await engine.dispose()
+

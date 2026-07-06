@@ -88,7 +88,7 @@ async def list_users(
     pageSize: int | None = Query(default=None, ge=1, le=200),
     search: str | None = Query(default=None, description="Search across university, name, or email"),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return ApiResponse(
         message="users listed",
@@ -150,7 +150,7 @@ async def create_user_by_admin(
 async def get_user_by_admin(
     userId: UUID,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return ApiResponse(message="user fetched", data=await services.admin_get_user(userId, db))
 

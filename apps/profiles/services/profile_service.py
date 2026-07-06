@@ -232,6 +232,29 @@ async def get_my_profile_service(
         await db.refresh(profile)
 
     user_data = await build_user_base_response(target_user, profile, db)
+
+    # Inject relationship flags
+    if effective_user_id == user.id:
+        user_data.update({
+            "is_connected": False,
+            "request_sent": False,
+            "request_send": False,
+            "request_received": False,
+            "is_sent": False,
+            "is_request": False,
+        })
+    else:
+        from apps.connections.services import get_relationship_flags
+        flags_map = await get_relationship_flags(db, user.id, [effective_user_id])
+        flags = flags_map.get(effective_user_id, {})
+        user_data.update({
+            "is_connected": flags.get("is_connected", False),
+            "request_sent": flags.get("request_sent", False),
+            "request_send": flags.get("request_sent", False),
+            "request_received": flags.get("request_received", False),
+            "is_sent": flags.get("request_sent", False),
+            "is_request": flags.get("request_received", False),
+        })
     return {"user": user_data}
 
 async def update_my_profile_service(user: User, payload: UpdateProfileRequest, db: AsyncSession) -> dict:

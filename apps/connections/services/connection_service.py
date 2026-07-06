@@ -251,22 +251,10 @@ async def get_pending_requests(
 
     base_stmt = select(ConnectionRequest, Profile).join(
         Profile,
-        or_(
-            and_(
-                ConnectionRequest.receiver_user_id == user_id,
-                Profile.user_id == ConnectionRequest.sender_user_id,
-            ),
-            and_(
-                ConnectionRequest.sender_user_id == user_id,
-                Profile.user_id == ConnectionRequest.receiver_user_id,
-            ),
-        ),
+        Profile.user_id == ConnectionRequest.sender_user_id,
     ).where(
         ConnectionRequest.status == "pending",
-        or_(
-            ConnectionRequest.receiver_user_id == user_id,
-            ConnectionRequest.sender_user_id == user_id,
-        ),
+        ConnectionRequest.receiver_user_id == user_id,
     )
 
     if search:
