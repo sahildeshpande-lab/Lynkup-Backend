@@ -147,6 +147,14 @@ async def get_current_moderator(
     return user
 
 
+async def get_current_moderator_or_viewer(
+    user: User = Depends(get_current_user),
+) -> User:
+    if user.role not in ("moderator", "superadmin", "viewer"):
+        raise ApiError("Insufficient permissions")
+    return user
+
+
 async def get_current_superadmin(
     user: User = Depends(get_current_admin),
 ) -> User:

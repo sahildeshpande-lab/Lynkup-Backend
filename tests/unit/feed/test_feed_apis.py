@@ -16,7 +16,7 @@ from entrypoints.api import app
 from core.database.session import async_session_factory
 from datetime import datetime, timezone, timedelta
 from core.database.init import init_db
-from core.security.auth import get_current_app_user, get_current_user, get_current_moderator
+from core.security.auth import get_current_app_user, get_current_user, get_current_moderator, get_current_moderator_or_viewer
 from apps.accounts.db_models import TransactionalEmailLog, User
 from apps.feed.db_models import Post, MediaAsset, PostAttachment
 from apps.connections.db_models import Connection
@@ -782,7 +782,7 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
     async def _override_get_current_moderator():
         return moderator
 
-    app.dependency_overrides[get_current_moderator] = _override_get_current_moderator
+    app.dependency_overrides[get_current_moderator_or_viewer] = _override_get_current_moderator
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -804,7 +804,7 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
             assert "Other moderator reviewed" in filtered_captions
             assert "Reviewed via route" not in filtered_captions
     finally:
-        app.dependency_overrides.pop(get_current_moderator, None)
+        app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
 
 
 @pytest.mark.asyncio
@@ -848,7 +848,7 @@ async def test_reviewed_posts_status_filter_without_moderator_id_returns_all(tes
     async def _override_get_current_moderator():
         return SimpleNamespace(id=moderator_a.id, role="moderator")
 
-    app.dependency_overrides[get_current_moderator] = _override_get_current_moderator
+    app.dependency_overrides[get_current_moderator_or_viewer] = _override_get_current_moderator
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -860,7 +860,7 @@ async def test_reviewed_posts_status_filter_without_moderator_id_returns_all(tes
             captions = {item["caption"] for item in body["data"]["items"]}
             assert {"Published by A", "Published by B"}.issubset(captions)
     finally:
-        app.dependency_overrides.pop(get_current_moderator, None)
+        app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
 
 
 @pytest.mark.asyncio
@@ -935,7 +935,7 @@ async def test_processing_posts_route_filters_for_moderator_and_allows_superadmi
         session.add_all([post_for_a, post_for_b])
         await session.commit()
 
-    app.dependency_overrides[get_current_moderator] = (
+    app.dependency_overrides[get_current_moderator_or_viewer] = (
         lambda: SimpleNamespace(id=moderator_a.id, role="moderator")
     )
     try:
@@ -948,9 +948,9 @@ async def test_processing_posts_route_filters_for_moderator_and_allows_superadmi
             assert moderator_body["data"]["items"][0]["caption"] == "Route assigned to A"
             assert moderator_body["data"]["items"][0]["moderator_name"] == moderator_a.email
     finally:
-        app.dependency_overrides.pop(get_current_moderator, None)
+        app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
 
-    app.dependency_overrides[get_current_moderator] = (
+    app.dependency_overrides[get_current_moderator_or_viewer] = (
         lambda: SimpleNamespace(id=superadmin_id, role="superadmin")
     )
     try:
@@ -962,7 +962,7 @@ async def test_processing_posts_route_filters_for_moderator_and_allows_superadmi
             captions = {item["caption"] for item in superadmin_body["data"]["items"]}
             assert {"Route assigned to A", "Route assigned to B"}.issubset(captions)
     finally:
-        app.dependency_overrides.pop(get_current_moderator, None)
+        app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
 
 
 @pytest.mark.asyncio

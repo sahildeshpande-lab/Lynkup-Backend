@@ -21,6 +21,7 @@ from core.security.auth import (
     get_current_superadmin,
     get_current_app_user,
     get_current_moderator,
+    get_current_moderator_or_viewer,
 )
 
 @pytest.mark.asyncio
@@ -180,6 +181,28 @@ async def test_get_current_moderator() -> None:
     user.role = "user"
     with pytest.raises(ApiError):
         await get_current_moderator(user)
+
+
+@pytest.mark.asyncio
+async def test_get_current_moderator_or_viewer() -> None:
+    from common.exceptions import ApiError
+
+    moderator = User()
+    moderator.role = "moderator"
+    assert await get_current_moderator_or_viewer(moderator) == moderator
+
+    superadmin = User()
+    superadmin.role = "superadmin"
+    assert await get_current_moderator_or_viewer(superadmin) == superadmin
+
+    viewer = User()
+    viewer.role = "viewer"
+    assert await get_current_moderator_or_viewer(viewer) == viewer
+
+    user = User()
+    user.role = "user"
+    with pytest.raises(ApiError):
+        await get_current_moderator_or_viewer(user)
 
 
 @pytest.mark.asyncio

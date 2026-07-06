@@ -6,7 +6,7 @@ from apps.accounts.db_models import User
 from apps.administration import routes as admin_routes
 from apps.accounts.schemas import ApiResponse
 from core.database.session import get_session
-from core.security.auth import get_current_admin, get_current_moderator, get_current_superadmin
+from core.security.auth import get_current_admin, get_current_moderator, get_current_superadmin, get_current_moderator_or_viewer
 from entrypoints.api import app
 
 
@@ -54,11 +54,22 @@ async def _override_moderator():
     return u
 
 
+async def _override_viewer():
+    u = User(
+        id="44444444-4444-4444-4444-444444444444",
+        email="viewer@example.com",
+        firebase_uid="viewer-uid",
+    )
+    u.role = "viewer"
+    return u
+
+
 def setup_module() -> None:
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_admin] = _override_admin
     app.dependency_overrides[get_current_moderator] = _override_moderator
     app.dependency_overrides[get_current_superadmin] = _override_admin
+    app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
 
 
 def teardown_module() -> None:
@@ -66,6 +77,7 @@ def teardown_module() -> None:
     app.dependency_overrides.pop(get_current_admin, None)
     app.dependency_overrides.pop(get_current_moderator, None)
     app.dependency_overrides.pop(get_current_superadmin, None)
+    app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
 
 
 async def _list_users(_page: int, _page_size: int, _db, search: str | None = None) -> dict:
@@ -399,7 +411,7 @@ def test_list_processing_posts_route(monkeypatch) -> None:
 
 def test_list_processing_posts_route_superadmin_with_moderator_id(monkeypatch) -> None:
     from uuid import UUID
-    app.dependency_overrides[get_current_moderator] = _override_admin
+    app.dependency_overrides[get_current_moderator_or_viewer] = _override_admin
 
     called_moderator_id = None
 
@@ -429,7 +441,7 @@ def test_list_processing_posts_route_superadmin_with_moderator_id(monkeypatch) -
         assert response.status_code == 200
         assert called_moderator_id is None
     finally:
-        app.dependency_overrides[get_current_moderator] = _override_moderator
+        app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
 
 
 def test_list_processing_posts_route_moderator_ignores_moderator_id(monkeypatch) -> None:
@@ -496,4 +508,61 @@ def test_list_reviewed_posts_route(monkeypatch) -> None:
     assert body["status"] is True
     assert body["message"] == "Posts fetched successfully"
     assert body["data"]["items"][0]["review_status"] == "publish"
+
+
+def test_list_processing_posts_route_viewer(monkeypatch) -> None:
+    app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
+
+    called_moderator_id = None
+
+    async def _mock_list_processing_posts(_db, moderator_id=None, page=None, page_size=None):
+        nonlocal called_moderator_id
+        called_moderator_id = moderator_id
+        return {
+            "items": [],
+            "page": 1,
+            "pageSize": 1,
+            "totalItems": 0,
+            "totalPages": 1,
+        }
+
+    import apps.feed.services as feed_services
+    monkeypatch.setattr(feed_services, "list_processing_posts_service", _mock_list_processing_posts)
+
+    try:
+        response = client.get("/api/v1/posts/processing")
+        assert response.status_code == 200
+        # Viewer is not restricted to their own moderator ID; called_moderator_id should be None
+        assert called_moderator_id is None
+    finally:
+        app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
+
+
+def test_list_reviewed_posts_route_viewer(monkeypatch) -> None:
+    app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
+
+    called_moderator_id = None
+
+    async def _mock_list_reviewed_posts(_db, moderator_id=None, status=None, page=None, page_size=None):
+        nonlocal called_moderator_id
+        called_moderator_id = moderator_id
+        return {
+            "items": [],
+            "page": 1,
+            "pageSize": 1,
+            "totalItems": 0,
+            "totalPages": 1,
+        }
+
+    import apps.feed.services as feed_services
+    monkeypatch.setattr(feed_services, "list_reviewed_posts_service", _mock_list_reviewed_posts)
+
+    try:
+        response = client.get("/api/v1/admin/posts/reviewed")
+        assert response.status_code == 200
+        # Viewer should be able to fetch reviewed posts
+        assert called_moderator_id is None
+    finally:
+        app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
+
 

@@ -123,13 +123,18 @@ class StorageService:
         """
         bucket = config.settings.effective_bucket
         if bucket:
-            config.s3_client.put_object(
+            response= config.s3_client.put_object(
                 Bucket=bucket,
                 Key=key,
                 Body=content,
                 ContentType=content_type,
-                ACL='public-read',
+                ACL="public-read",
             )
+            print("Upload ",response)
+            print("Uploading:", key)
+            print("Content Type:", content_type)
+            print("Content Size:", len(content))
+               
         else:
             config.save_image(file_name=key, content=content, content_type=content_type)
         return key
@@ -144,6 +149,10 @@ class StorageService:
             content_type = getattr(file_input, "content_type", None)
             filename = getattr(file_input, "filename", None)
 
+            print("FILENAME:", getattr(file_input, "filename", None))
+            print("CONTENT_TYPE:", getattr(file_input, "content_type", None))
+            print("SIZE:", len(content))
+            print("FIRST_20_BYTES:", content[:20])
         elif isinstance(file_input, bytes):
             content = file_input
             content_type = None
@@ -235,6 +244,11 @@ class StorageService:
         Uploads post media (image, video, document, gif) under posts/{file_uuid}.{ext}.
         """
         content, extracted_ct, extracted_fn = await cls._extract_content(file)
+
+        print("FILENAME:", extracted_fn)
+        print("CONTENT TYPE:", extracted_ct)
+        print("SIZE:", len(content))
+        print("FIRST 20 BYTES:", content[:20])
         final_ct = content_type or extracted_ct or "application/octet-stream"
         final_fn = filename or extracted_fn
 

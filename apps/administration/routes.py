@@ -6,7 +6,7 @@ from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import EmailStr
 from core.database.session import get_session
-from core.security.auth import get_current_superadmin, get_current_admin, get_current_moderator
+from core.security.auth import get_current_superadmin, get_current_admin, get_current_moderator, get_current_moderator_or_viewer
 from apps.accounts.db_models import User
 
 from . import services
@@ -240,11 +240,11 @@ async def list_processing_posts(
     pageSize: int | None = Query(default=None, ge=1, le=200),
     moderator_id: UUID | None = Query(default=None),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_moderator),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     from apps.feed.services import list_processing_posts_service
     role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
-    target_moderator_id = moderator_id if role == "superadmin" else current_user.id
+    target_moderator_id = moderator_id if role in ("superadmin", "viewer") else current_user.id
     data = await list_processing_posts_service(
         db,
         moderator_id=target_moderator_id,
@@ -267,7 +267,7 @@ async def list_reviewed_posts(
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_moderator),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     from apps.feed.services import list_reviewed_posts_service
     from common.exceptions import ApiError
