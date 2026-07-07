@@ -80,6 +80,10 @@ def _api_error_status_code(message: str) -> int:
             "missing access token",
             "invalid access token",
             "invalid firebase",
+            "account is suspended",
+            "account is banned",
+            "account is blocked",
+            "account is block",
         )
     ):
         return 401
@@ -88,8 +92,6 @@ def _api_error_status_code(message: str) -> int:
         for phrase in (
             "account deleted",
             "account is pending",
-            "account is suspended",
-            "account is banned",
             "account is not active",
             "insufficient permissions",
         )

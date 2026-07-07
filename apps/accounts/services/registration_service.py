@@ -199,7 +199,7 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
         if user.status in (UserStatus.suspended, UserStatus.banned):
             status_str = user.status.value if hasattr(user.status, "value") else str(user.status)
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+                status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"Account is {status_str}"
             )
 

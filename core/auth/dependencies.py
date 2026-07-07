@@ -145,7 +145,7 @@ async def get_current_user(
         if existing_user.status in (UserStatus.suspended, UserStatus.banned):
             status_str = existing_user.status.value if hasattr(existing_user.status, "value") else str(existing_user.status)
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+                status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"Account is {status_str}",
             )
 
