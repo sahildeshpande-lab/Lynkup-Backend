@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from fastapi import HTTPException
+
+from apps.engagement.services import post_reactions_list_service as svc
+from common.enums import ReactionType
+
+
+@pytest.fixture(autouse=True)
+def _default_share_count(monkeypatch):
+    monkeypatch.setattr(svc, "get_post_share_count", AsyncMock(return_value=0))
+
+
+def _profile(**kwargs):
+    defaults = {
+        "id": uuid.uuid4(),
+        "first_name": "John",
+        "last_name": "Doe",
+        "major": "CS",
+        "minor": "",
+        "edu_level": "Bachelors",
+        "profile_photo_url": "photo.jpg",
+    }
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
+
+
+def _university(name: str = "Test University"):
+    return SimpleNamespace(name=name)
+
+
+def _reaction(
+    reaction_type: ReactionType = ReactionType.like,
+    *,
+    created_at: datetime | None = None,
+):
+    return SimpleNamespace(
+        reaction_type=reaction_type,
+        created_at=created_at or datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_post_reactions_post_not_found(mock_db):
+    post_id = uuid.uuid4()
+    db = mock_db()
+
+    with patch.object(svc, "post_exists", AsyncMock(return_value=False)):
+        with pytest.raises(HTTPException) as exc:
+            await svc.get_post_reactions(db, post_id)
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Post not found"
+
+
+@pytest.mark.asyncio
+async def test_get_post_reactions_no_reactions(mock_db):
+    post_id = uuid.uuid4()
+    db = mock_db()
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value={})),
+        patch.object(svc, "get_post_share_count", AsyncMock(return_value=10)),
+        patch.object(svc, "count_post_reactions", AsyncMock(return_value=0)),
+        patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=[])),
+    ):
+        response = await svc.get_post_reactions(db, post_id)
+
+    assert response.status is True
+    assert response.message == "Reactions fetched successfully"
+    assert response.data.reactors == []
+    assert response.data.share_count == 10
+    assert response.data.total == 0
+    assert response.data.page == 1
+    assert response.data.limit == 20
+    assert response.data.pages == 0
+
+    summary = {item.reaction_type: item.count for item in response.data.summary}
+    assert summary["ALL"] == 0
+    for reaction_type in ReactionType:
+        assert summary[reaction_type.value.upper()] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_post_reactions_multiple_types_and_summary(mock_db):
+    post_id = uuid.uuid4()
+    db = mock_db()
+    profile = _profile()
+    university = _university()
+
+    summary_counts = {
+        ReactionType.like: 59,
+        ReactionType.celebrate: 1,
+        ReactionType.curious: 1,
+    }
+    rows = [
+        (_reaction(ReactionType.like, created_at=datetime(2026, 7, 10, 14, 0, 0, tzinfo=timezone.utc)), profile, university),
+        (_reaction(ReactionType.celebrate, created_at=datetime(2026, 7, 10, 13, 0, 0, tzinfo=timezone.utc)), profile, university),
+        (_reaction(ReactionType.curious, created_at=datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)), profile, university),
+    ]
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value=summary_counts)),
+        patch.object(svc, "count_post_reactions", AsyncMock(return_value=61)),
+        patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=rows)),
+        patch.object(svc, "generate_profile_image_url", return_value="https://cdn.example/photo.jpg"),
+    ):
+        response = await svc.get_post_reactions(db, post_id)
+
+    summary = {item.reaction_type: item.count for item in response.data.summary}
+    assert summary["ALL"] == 61
+    assert summary["LIKE"] == 59
+    assert summary["CELEBRATE"] == 1
+    assert summary["CURIOUS"] == 1
+    assert summary["INSIGHTFUL"] == 0
+    assert summary["SUPPORT"] == 0
+    assert len(response.data.reactors) == 3
+    assert response.data.reactors[0].reaction_type == "LIKE"
+    assert response.data.reactors[0].profile_id == profile.id
+    assert response.data.reactors[0].university == "Test University"
+    assert response.data.reactors[0].profilePhoto_url == "https://cdn.example/photo.jpg"
+
+
+@pytest.mark.asyncio
+async def test_get_post_reactions_filter_by_reaction_type(mock_db):
+    post_id = uuid.uuid4()
+    db = mock_db()
+    profile = _profile()
+    like_rows = [(_reaction(ReactionType.like), profile, _university())]
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value={ReactionType.like: 5})),
+        patch.object(svc, "count_post_reactions", AsyncMock(return_value=5)) as count_reactions,
+        patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=like_rows)) as fetch_reactors,
+        patch.object(svc, "generate_profile_image_url", return_value=None),
+    ):
+        response = await svc.get_post_reactions(
+            db,
+            post_id,
+            reaction_type=ReactionType.like,
+            page=1,
+            limit=20,
+        )
+
+    count_reactions.assert_awaited_once_with(db, post_id, ReactionType.like)
+    fetch_reactors.assert_awaited_once_with(
+        db,
+        post_id,
+        reaction_type=ReactionType.like,
+        offset=0,
+        limit=20,
+    )
+    assert response.data.total == 5
+    assert all(r.reaction_type == "LIKE" for r in response.data.reactors)
+    assert response.data.summary[0].reaction_type == "ALL"
+    assert response.data.summary[0].count == 5
+
+
+@pytest.mark.asyncio
+async def test_get_post_reactions_pagination(mock_db):
+    post_id = uuid.uuid4()
+    db = mock_db()
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value={ReactionType.like: 61})),
+        patch.object(svc, "count_post_reactions", AsyncMock(return_value=61)),
+        patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=[])) as fetch_reactors,
+    ):
+        response = await svc.get_post_reactions(db, post_id, page=2, limit=20)
+
+    fetch_reactors.assert_awaited_once_with(
+        db,
+        post_id,
+        reaction_type=None,
+        offset=20,
+        limit=20,
+    )
+    assert response.data.total == 61
+    assert response.data.page == 2
+    assert response.data.limit == 20
+    assert response.data.pages == 4
+
+
+@pytest.mark.asyncio
+async def test_get_post_reactions_ordering_preserved(mock_db):
+    post_id = uuid.uuid4()
+    db = mock_db()
+    profile = _profile()
+    university = _university()
+
+    t1 = datetime(2026, 7, 10, 15, 0, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 7, 10, 14, 0, 0, tzinfo=timezone.utc)
+    t3 = datetime(2026, 7, 10, 13, 0, 0, tzinfo=timezone.utc)
+    rows = [
+        (_reaction(ReactionType.like, created_at=t1), profile, university),
+        (_reaction(ReactionType.celebrate, created_at=t2), profile, university),
+        (_reaction(ReactionType.support, created_at=t3), profile, university),
+    ]
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value={})),
+        patch.object(svc, "count_post_reactions", AsyncMock(return_value=3)),
+        patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=rows)),
+        patch.object(svc, "generate_profile_image_url", return_value=None),
+    ):
+        response = await svc.get_post_reactions(db, post_id)
+
+    reacted_at_values = [r.reacted_at for r in response.data.reactors]
+    assert reacted_at_values == [t1, t2, t3]
+
+
+def test_parse_reaction_type_filter():
+    from apps.engagement.schemas import parse_reaction_type_filter
+
+    assert parse_reaction_type_filter(None) is None
+    assert parse_reaction_type_filter("LIKE") == ReactionType.like
+    assert parse_reaction_type_filter("celebrate") == ReactionType.celebrate
+
+    with pytest.raises(ValueError, match="Invalid reaction_type"):
+        parse_reaction_type_filter("LOVE")

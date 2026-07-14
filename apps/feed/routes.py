@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, UploadFile, File, Query
+from fastapi import APIRouter, Depends, UploadFile, File, Form, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 
 from core.database.session import get_session
 from core.security.auth import get_current_app_user, get_current_user
 from apps.accounts.db_models import User
+from common.enums import MediaType
 from common.responses import success_response
 from apps.feed.schemas import ApiResponse, PostUploadResponse, SavePostRequest, DeletePostRequest, EditPostRequest
 from apps.feed.services import (
@@ -18,7 +19,7 @@ from apps.feed.services import (
     delete_post_service,
     list_draft_posts_service,
     delete_draft_post_service,
-    list_user_posts_service,
+    list_user_posts_items_service,
     get_profile_visibility_block_message,
     get_feed_service,
     format_post_detail,
@@ -33,16 +34,18 @@ async def upload_post_media(
         ...,
         description="Upload one or more media files using repeated form field name 'files'.",
     ),
+    types: list[MediaType] | None = Form(default=None),
     current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     data = await upload_post_media_service(
         user_id=current_user.id,
         files=files,
+        media_types=types,
         db=db,
     )
     return success_response(
-        "Files uploaded successfully",
+        f"{len(data)} media file(s) uploaded",
         data,
         response_cls=ApiResponse,
     )
@@ -131,26 +134,32 @@ async def list_user_posts(
         db=db,
     )
     if block_message:
-        from common.pagination import build_paginated_response
         return success_response(
-            block_message,
-            build_paginated_response([], 1, 1, 0),
+            "Account is private",
+            [],
             response_cls=ApiResponse,
         )
 
-    posts, total_items = await list_user_posts_service(
+    posts, total_items = await list_user_posts_items_service(
         current_user=current_user,
         target_user_id=user_id,
         state=state,
         page=page,
         page_size=pageSize,
-        db=db
+        db=db,
     )
+    formatted_posts = posts
+    if page is None and pageSize is None:
+        return success_response(
+            "User posts retrieved successfully",
+            formatted_posts,
+            response_cls=ApiResponse,
+        )
     from common.pagination import build_paginated_response
     p = page or 1
     ps = pageSize if pageSize is not None else (total_items if total_items > 0 else 1)
     paginated = build_paginated_response(
-        [format_post_detail(post) for post in posts],
+        formatted_posts,
         p,
         ps,
         total_items
@@ -203,13 +212,39 @@ async def get_feed(
         current_user_id=current_user.id,
         page=page,
         page_size=pageSize,
-        db=db
+        db=db,
+        include_total=True,
     )
+    from apps.engagement.repositories import fetch_post_engagement_flags
+    from apps.engagement.services.reaction_service import format_user_reaction
+
+    engagement_flags = await fetch_post_engagement_flags(
+        db,
+        current_user.id,
+        [post.id for post in posts],
+    )
+    formatted_posts = [
+        format_post_detail(
+            post,
+            author_profile=getattr(post, "_author_profile", None),
+            is_liked=engagement_flags.user_reaction_for(post.id) is not None,
+            is_reposted=post.id in engagement_flags.reposted_post_ids,
+            is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
+            user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
+        )
+        for post in posts
+    ]
+    if page is None and pageSize is None:
+        return success_response(
+            "Feed retrieved successfully",
+            formatted_posts,
+            response_cls=ApiResponse,
+        )
     from common.pagination import build_paginated_response
     p = page or 1
     ps = pageSize if pageSize is not None else (total_items if total_items > 0 else 1)
     paginated = build_paginated_response(
-        [format_post_detail(post) for post in posts],
+        formatted_posts,
         p,
         ps,
         total_items

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
@@ -35,9 +36,14 @@ async def get_my_profile(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
+    service = services.get_my_profile_service
+    if "target_user_id" in inspect.signature(service).parameters:
+        data = await service(current_user, db, target_user_id=user_id)
+    else:
+        data = await service(current_user, db)
     return ApiResponse(
         message="Profile retrieved successfully",
-        data=await services.get_my_profile_service(current_user, db, target_user_id=user_id)
+        data=data,
     )
 
 
@@ -116,6 +122,5 @@ async def update_profile_visibility(
 @router.get("/users/{email}", response_model=ApiResponse)
 def get_public_profile(email: str) -> ApiResponse:
     return ApiResponse(message="public profile fetched", data=services.get_public_profile(email))
-
 
 

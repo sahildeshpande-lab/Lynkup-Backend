@@ -79,3 +79,15 @@ async def increment_posts_count_for_user(
     if not profile:
         return
     profile.posts_count = (profile.posts_count or 0) + 1
+
+
+async def decrement_posts_count_for_user(
+    db: AsyncSession,
+    user_id: UUID,
+) -> None:
+    """Decrease the published posts count for a user's profile without going below zero."""
+    profile_result = await db.execute(select(Profile).where(Profile.user_id == user_id))
+    profile = profile_result.scalar_one_or_none()
+    if not profile:
+        return
+    profile.posts_count = max((profile.posts_count or 0) - 1, 0)

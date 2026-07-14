@@ -17,7 +17,11 @@ from apps.connections.services.connection_service import is_blocked
 
 from .media_service import _verify_and_attach_media
 from .revision_service import _build_content_dict, _create_revision, _sync_hashtags
-from apps.moderation.services.moderator_assignment_service import assign_next_moderator_round_robin
+from apps.moderation.services.moderator_assignment_service import (
+    assign_next_moderator_round_robin,
+    _fetch_active_moderator_ids,
+    _fetch_superadmin_user_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,17 +45,39 @@ def _extract_post_media(post: Post) -> list[dict]:
                 })
     return media_data
 
-def format_post_detail(post: Post) -> dict:
+def _resolve_moderator_name(mod_user=None, mod_profile=None) -> str | None:
+    moderator_name = None
+    if mod_profile:
+        parts = [part for part in (mod_profile.first_name, mod_profile.last_name) if part]
+        moderator_name = " ".join(parts).strip() or None
+    if not moderator_name and mod_user:
+        moderator_name = mod_user.email
+    return moderator_name
+
+
+def format_post_detail(
+    post: Post,
+    *,
+    author_profile=None,
+    moderator_user=None,
+    moderator_profile=None,
+    is_liked: bool = False,
+    is_reposted: bool = False,
+    is_bookmarked: bool = False,
+    user_reaction: str | None = None,
+) -> dict:
     """
     Format a Post model and its attachments into a dictionary matching PostDetailData schema.
     """
     media_data = _extract_post_media(post)
 
     content = post.content or {}
+    state_value = post.state.value if hasattr(post.state, "value") else str(post.state)
     data = {
         "id": post.id,
         "author_user_id": post.author_user_id,
-        "state": post.state.value if hasattr(post.state, "value") else str(post.state),
+        "state": state_value,
+        "status": state_value,
         "revision_number": post.revision_number,
         "content": {
             "caption": content.get("caption"),
@@ -60,9 +86,21 @@ def format_post_detail(post: Post) -> dict:
         },
         "created_at": post.created_at,
         "updated_at": post.updated_at,
+        "like_count": post.like_count,
+        "repost_count": post.repost_count,
+        "share_count": getattr(post, "share_count", 0),
+        "comment_count": getattr(post, "comment_count", 0),
+        "is_liked": is_liked,
+        "is_reposted": is_reposted,
+        "is_bookmarked": is_bookmarked,
+        "user_reaction": user_reaction,
+        "is_moderator_reviewed": post.is_moderator_reviewed,
+        "reviewed_at": post.reviewed_at,
+        "moderator_id": post.moderator_id,
+        "moderator_name": _resolve_moderator_name(moderator_user, moderator_profile),
         "media": media_data
     }
-    author_profile = getattr(post, "_author_profile", None)
+    author_profile = author_profile or getattr(post, "_author_profile", None)
     if author_profile is not None:
         data.update({
             "first_name": author_profile.first_name,
@@ -75,17 +113,150 @@ def format_post_detail(post: Post) -> dict:
         })
     return data
 
-async def _assign_moderator_if_processing(
+# Post states that require a moderator to be assigned for review.
+_MODERATION_STATES = (PostState.processing, PostState.published)
+
+
+async def _assign_fallback_moderator(post: Post, db: AsyncSession) -> None:
+    """Assign the first available moderator when round-robin is unavailable."""
+    moderator_ids = await _fetch_active_moderator_ids(db)
+    if not moderator_ids:
+        return
+    post.moderator_id = moderator_ids[0]
+    await db.flush()
+    logger.warning(
+        "Assigned fallback moderator %s to post %s (state=%s)",
+        post.moderator_id,
+        post.id,
+        post.state,
+    )
+
+
+async def _assign_moderator_for_review(
     post: Post,
     db: AsyncSession,
     *,
     previous_state: PostState | None = None,
 ) -> None:
-    if post.state != PostState.processing:
+    """Assign a moderator via round-robin when a post enters a review state.
+
+    A moderator is assigned whenever a post transitions into ``processing`` or
+    ``published`` and does not already have one. Assignment is skipped if a
+    moderator is already set so an existing assignment is never overwritten.
+    """
+    if post.state not in _MODERATION_STATES:
         return
-    if previous_state == PostState.processing and post.moderator_id is not None:
+    if post.moderator_id is not None:
         return
-    post.moderator_id = await assign_next_moderator_round_robin(db)
+    try:
+        post.moderator_id = await assign_next_moderator_round_robin(db)
+        await db.flush()
+    except ApiError as exc:
+        logger.error(
+            "Round-robin unavailable for post %s (state=%s): %s",
+            post.id,
+            post.state,
+            exc,
+        )
+        await _assign_fallback_moderator(post, db)
+    except Exception:
+        logger.exception(
+            "Unexpected error assigning moderator to post %s (state=%s)",
+            post.id,
+            post.state,
+        )
+        await db.rollback()
+        refreshed = (
+            await db.execute(select(Post).where(Post.id == post.id))
+        ).scalar_one_or_none()
+        if refreshed is not None and refreshed.moderator_id is None:
+            await _assign_fallback_moderator(refreshed, db)
+            post.moderator_id = refreshed.moderator_id
+
+
+async def _repair_unassigned_moderators_for_state(
+    db: AsyncSession,
+    *,
+    status: Literal["published", "flagged", "rejected", "reinstate"] | None = None,
+    limit: int = 500,
+) -> None:
+    """Assign moderators to posts in a review state that are still unassigned."""
+    from apps.feed.repositories.post_repository import (
+        _DEFAULT_REVIEWED_STATE,
+        _REVIEWED_STATUS_TO_STATE,
+    )
+
+    target_state = _REVIEWED_STATUS_TO_STATE.get(status, _DEFAULT_REVIEWED_STATE)
+    await _repair_unassigned_moderators(db, target_state=target_state, limit=limit)
+
+
+async def _repair_unassigned_moderators(
+    db: AsyncSession,
+    *,
+    target_state: PostState,
+    limit: int = 500,
+) -> None:
+    """
+    Repair broken moderator assignments for posts awaiting review.
+
+    - ``moderator_id IS NULL`` → round-robin to an active moderator.
+    - ``moderator_id`` points to a deleted/inactive/non-holder user → Super Admin.
+    - Valid active moderator or Super Admin assignments are left unchanged.
+    """
+    from sqlalchemy import and_, exists, or_
+    from apps.accounts.db_models import UserRole, Role
+    from common.enums import UserStatus
+
+    superadmin_ids = await _fetch_superadmin_user_ids(db)
+    fallback_superadmin_id = superadmin_ids[0] if superadmin_ids else None
+
+    valid_holder = exists(
+        select(1)
+        .select_from(User)
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(
+            User.id == Post.moderator_id,
+            User.is_deleted.is_(False),
+            User.status == UserStatus.active,
+            Role.name.in_(["moderator", "superadmin"]),
+        )
+    )
+
+    needs_repair = or_(
+        Post.moderator_id.is_(None),
+        and_(Post.moderator_id.isnot(None), ~valid_holder),
+    )
+
+    result = await db.execute(
+        select(Post)
+        .where(
+            Post.state == target_state,
+            needs_repair,
+        )
+        .order_by(Post.created_at.desc())
+        .limit(limit)
+    )
+    posts = list(result.scalars().all())
+    if not posts:
+        return
+
+    now = utc_now()
+    for post in posts:
+        try:
+            if post.moderator_id is None:
+                await _assign_moderator_for_review(post, db)
+            elif fallback_superadmin_id is not None:
+                # e.g. departing moderator was soft-deleted; keep queue with Super Admin.
+                post.moderator_id = fallback_superadmin_id
+                post.updated_at = now
+                db.add(post)
+            else:
+                await _assign_moderator_for_review(post, db)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("Failed to repair moderator assignment for post %s", post.id)
 
 
 async def _soft_delete_other_drafts(
@@ -137,7 +308,7 @@ async def save_post_service(
         raise ApiError(str(exc))
 
     # Determine state
-    post_state = PostState.draft if payload.is_draft else PostState.processing
+    post_state = PostState.draft if payload.is_draft else PostState.published
 
     # ----- CREATE -----
     if payload.id is None:
@@ -166,7 +337,7 @@ async def save_post_service(
 
             await _sync_hashtags(post.id, content_dict, db)
             await _create_revision(post, user_id, db)
-            await _assign_moderator_if_processing(post, db)
+            await _assign_moderator_for_review(post, db)
 
             await db.commit()
             await db.refresh(post)
@@ -176,6 +347,21 @@ async def save_post_service(
         except Exception as e:
             await db.rollback()
             raise ApiError("Failed to create post")
+
+        # Increment posts_count after a successful commit so a stats failure
+        # never rolls back the post creation itself.
+        if post_state == PostState.published:
+            try:
+                from apps.profiles.services.profile_stats_service import increment_posts_count_for_user
+
+                await increment_posts_count_for_user(db, user_id)
+                await db.commit()
+            except Exception:
+                logger.exception(
+                    "Failed to update posts_count for user %s after creating post %s",
+                    user_id,
+                    post.id,
+                )
 
         return post
 
@@ -213,7 +399,7 @@ async def save_post_service(
 
         await _sync_hashtags(post.id, content_dict, db)
         await _create_revision(post, user_id, db)
-        await _assign_moderator_if_processing(
+        await _assign_moderator_for_review(
             post, db, previous_state=previous_state
         )
 
@@ -225,6 +411,21 @@ async def save_post_service(
     except Exception:
         await db.rollback()
         raise ApiError("Failed to update post")
+
+    # Increment posts_count when a draft/processing post is first published.
+    # Isolated after commit so a stats failure never rolls back the post update.
+    if previous_state != PostState.published and post_state == PostState.published:
+        try:
+            from apps.profiles.services.profile_stats_service import increment_posts_count_for_user
+
+            await increment_posts_count_for_user(db, user_id)
+            await db.commit()
+        except Exception:
+            logger.exception(
+                "Failed to update posts_count for user %s after updating post %s",
+                user_id,
+                post.id,
+            )
 
     return post
 
@@ -347,10 +548,9 @@ async def publish_post_service(
     post.updated_at = utc_now()
 
     try:
-        if previous_state != PostState.published and post.state == PostState.published:
-            from apps.profiles.services.profile_stats_service import increment_posts_count_for_user
-
-            await increment_posts_count_for_user(db, post.author_user_id)
+        # Assign a moderator via round-robin when a post enters a review state
+        # (published/processing) and is not already assigned.
+        await _assign_moderator_for_review(post, db, previous_state=previous_state)
 
         # Create revision audit record
         await _create_revision(post, user_id, db)
@@ -361,17 +561,38 @@ async def publish_post_service(
         await db.rollback()
         raise ApiError("Failed to publish post")
 
+    # Increment posts_count after a successful commit so a stats failure
+    # never rolls back the post state change.
+    if previous_state != PostState.published and post.state == PostState.published:
+        try:
+            from apps.profiles.services.profile_stats_service import increment_posts_count_for_user
+
+            await increment_posts_count_for_user(db, post.author_user_id)
+            await db.commit()
+        except Exception:
+            logger.exception(
+                "Failed to update posts_count for user %s after publishing post %s",
+                post.author_user_id,
+                post.id,
+            )
+
     return post
 
 
 async def admin_publish_post_service(
     post_id: UUID,
-    status: Literal["publish", "flag"],
+    status: Literal["published", "flagged", "rejected", "reinstate"],
     admin_user_id: UUID,
     db: AsyncSession
 ) -> Post:
     """
-    Publish or flag a post by a moderator/admin.
+    Moderate a post by setting its lifecycle state.
+
+    ``status`` maps 1:1 to ``Post.state``:
+    - ``published`` -> published (or hidden when visibility is private/hidden)
+    - ``flagged``   -> flagged
+    - ``rejected``  -> rejected
+    - ``reinstate`` -> reinstate
     """
     from apps.profiles.db_models import Profile
 
@@ -398,15 +619,19 @@ async def admin_publish_post_service(
 
     previous_state = post.state
 
-    if status == "publish":
+    if status in ("published", "reinstate"):
         # Respect visibility stored in content
         visibility = (post.content or {}).get("visibility", "public")
-        if visibility in ("private", "hidden") or post.state == PostState.hidden:
+        if status == "published" and (
+            visibility in ("private", "hidden") or post.state == PostState.hidden
+        ):
             post.state = PostState.hidden
         else:
-            post.state = PostState.published
-    elif status == "flag":
+            post.state = PostState.published if status == "published" else PostState.reinstate
+    elif status == "flagged":
         post.state = PostState.flagged
+    elif status == "rejected":
+        post.state = PostState.rejected
     else:
         raise ApiError(f"Invalid status: {status}")
 
@@ -418,12 +643,17 @@ async def admin_publish_post_service(
     post.revision_number += 1
     post.updated_at = utc_now()
 
+    # States that have already had their posts_count incremented on a prior
+    # published transition. Re-publishing from these states must NOT increment
+    # again (e.g. flagged → published would otherwise double-count).
+    _already_counted_states = (
+        PostState.published,
+        PostState.flagged,
+        PostState.rejected,
+        PostState.reinstate,
+    )
+
     try:
-        if previous_state != PostState.published and post.state == PostState.published:
-            from apps.profiles.services.profile_stats_service import increment_posts_count_for_user
-
-            await increment_posts_count_for_user(db, post.author_user_id)
-
         # Create revision audit record with the admin user as the editor
         await _create_revision(post, admin_user_id, db)
 
@@ -432,6 +662,23 @@ async def admin_publish_post_service(
     except Exception as e:
         await db.rollback()
         raise ApiError("Failed to publish or flag post")
+
+    # Increment the author's published-post counter only on the very first
+    # transition into published state (i.e. the post was never counted before).
+    # Isolate this in its own try/except so a transient stats failure does NOT
+    # roll back the already-committed post state change.
+    if previous_state not in _already_counted_states and post.state == PostState.published:
+        try:
+            from apps.profiles.services.profile_stats_service import increment_posts_count_for_user
+
+            await increment_posts_count_for_user(db, post.author_user_id)
+            await db.commit()
+        except Exception:
+            logger.exception(
+                "Failed to update posts_count for user %s after publishing post %s",
+                post.author_user_id,
+                post.id,
+            )
 
     if author_user and author_user.email:
         try:
@@ -593,7 +840,8 @@ async def get_profile_visibility_block_message(
         else str(profile.profile_visibility)
     )
     if visibility == ProfileVisibility.private.value:
-        return "Profile visibility is private"
+        if not await are_connected(db, current_user.id, target_user_id):
+            return "Profile visibility is private"
     if visibility == ProfileVisibility.connections_only.value:
         if not await are_connected(db, current_user.id, target_user_id):
             return "profile is connection_only"
@@ -607,7 +855,8 @@ async def list_user_posts_service(
     state: str = "published",
     page: int | None = None,
     page_size: int | None = None,
-) -> tuple[list[Post], int]:
+    include_total: bool = False,
+) -> list[Post] | tuple[list[Post], int]:
     """
     List posts by state for the current user or, for superadmins, any/all users.
     """
@@ -626,6 +875,12 @@ async def list_user_posts_service(
 
     role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
     is_superadmin = role == "superadmin"
+    is_viewing_other = target_user_id is not None and target_user_id != current_user.id
+
+    # Regular users viewing another user's posts are restricted to published posts only.
+    # They cannot access drafts, processing, or flagged content of other accounts.
+    if is_viewing_other and not is_superadmin:
+        requested_state = PostState.published
 
     if is_superadmin:
         effective_user_id = target_user_id
@@ -653,7 +908,90 @@ async def list_user_posts_service(
         offset=offset,
         limit=limit,
     )
-    return posts, total_items
+    if include_total:
+        return posts, total_items
+    return posts
+
+
+async def list_user_posts_items_service(
+    current_user: User,
+    db: AsyncSession,
+    target_user_id: UUID | None = None,
+    state: str = "published",
+    page: int | None = None,
+    page_size: int | None = None,
+) -> tuple[list[dict], int]:
+    """List user posts formatted for the API, including moderator assignment fields."""
+    from apps.feed.repositories.post_repository import (
+        count_posts_by_state,
+        fetch_posts_by_state_with_details,
+        user_exists,
+    )
+
+    requested_state = _LIST_POST_STATES.get(state)
+    if requested_state is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid state. Allowed values: published, processing, flagged, draft",
+        )
+
+    role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    is_superadmin = role == "superadmin"
+    is_viewing_other = target_user_id is not None and target_user_id != current_user.id
+
+    if is_viewing_other and not is_superadmin:
+        requested_state = PostState.published
+
+    if is_superadmin:
+        effective_user_id = target_user_id
+    else:
+        effective_user_id = target_user_id or current_user.id
+
+    if effective_user_id is not None and not await user_exists(db, effective_user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    total_items = await count_posts_by_state(db, state=requested_state, user_id=effective_user_id)
+
+    if page is None and page_size is None:
+        offset = 0
+        limit = None
+    else:
+        p = page or 1
+        ps = page_size or 20
+        offset = (p - 1) * ps
+        limit = ps
+
+    rows = await fetch_posts_by_state_with_details(
+        db,
+        state=requested_state,
+        user_id=effective_user_id,
+        offset=offset,
+        limit=limit,
+    )
+    post_ids = [post.id for post, *_ in rows]
+    from apps.engagement.repositories import fetch_post_engagement_flags
+
+    engagement_flags = await fetch_post_engagement_flags(
+        db,
+        current_user.id,
+        post_ids,
+    )
+    from apps.engagement.services.reaction_service import format_user_reaction
+
+    items = [
+        format_post_detail(
+            post,
+            author_profile=author_profile,
+            moderator_user=mod_user,
+            moderator_profile=mod_profile,
+            is_liked=engagement_flags.user_reaction_for(post.id) is not None,
+            is_reposted=post.id in engagement_flags.reposted_post_ids,
+            is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
+            user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
+        )
+        for post, author_profile, mod_user, mod_profile in rows
+    ]
+    return items, total_items
 
 
 def _format_reviewed_post_media(post: Post) -> list[dict]:
@@ -673,36 +1011,20 @@ def _format_reviewed_post_media(post: Post) -> list[dict]:
     return media_data
 
 
-def _review_status_from_post(post: Post) -> str:
-    if post.state == PostState.flagged:
-        return "flag"
-    return "publish"
-
-
 def _format_reviewed_post_item(post: Post, profile, moderator_user=None, moderator_profile=None) -> dict:
     content = post.content or {}
-    
-    moderator_name = None
-    if post.moderator_id is not None:
-        if moderator_profile:
-            from apps.profiles.services.response_service import _compose_full_name
-            moderator_name = _compose_full_name(moderator_profile.first_name, moderator_profile.last_name)
-        if not moderator_name and moderator_user:
-            moderator_name = moderator_user.email
-        if not moderator_name:
-            moderator_name = "Moderator"
 
     return {
         "id": post.id,
         "user_id": post.author_user_id,
         "caption": content.get("caption"),
         "content_html": content.get("content_html") or "",
-        "review_status": _review_status_from_post(post),
+        "status": post.state.value if hasattr(post.state, "value") else str(post.state),
         "is_moderator_reviewed": post.is_moderator_reviewed,
         "reviewed_at": post.reviewed_at,
         "created_at": post.created_at,
         "moderator_id": post.moderator_id,
-        "moderator_name": moderator_name,
+        "moderator_name": _resolve_moderator_name(moderator_user, moderator_profile),
         "profile_photo_url": (
             generate_profile_image_url(profile.profile_photo_url)
             if profile and profile.profile_photo_url
@@ -716,12 +1038,6 @@ def _format_reviewed_post_item(post: Post, profile, moderator_user=None, moderat
 
 def _format_processing_post_item(post: Post, profile, mod_user=None, mod_profile=None) -> dict:
     content = post.content or {}
-    moderator_name = None
-    if mod_profile:
-        parts = [part for part in (mod_profile.first_name, mod_profile.last_name) if part]
-        moderator_name = " ".join(parts).strip() or None
-    if not moderator_name and mod_user:
-        moderator_name = mod_user.email
 
     return {
         "user_id": post.author_user_id,
@@ -738,7 +1054,7 @@ def _format_processing_post_item(post: Post, profile, mod_user=None, mod_profile
         "media": _extract_post_media(post),
         "is_moderator_reviewed": post.is_moderator_reviewed,
         "moderator_id": post.moderator_id,
-        "moderator_name": moderator_name,
+        "moderator_name": _resolve_moderator_name(mod_user, mod_profile),
         "reviewed_at": post.reviewed_at,
     }
 
@@ -755,6 +1071,8 @@ async def list_processing_posts_service(
     from apps.profiles.db_models import Profile
     from apps.accounts.db_models import User
     from common.pagination import build_paginated_response
+
+    await _repair_unassigned_moderators(db, target_state=PostState.processing)
 
     filters = [Post.state == PostState.processing]
     if moderator_id is not None:
@@ -788,18 +1106,27 @@ async def list_processing_posts_service(
     return build_paginated_response(items, p, ps, total_items).model_dump()
 
 
-async def list_reviewed_posts_service(
+async def list_reviewed_posts_by_state_service(
     db: AsyncSession,
     moderator_id: UUID | None,
-    status: Literal["publish", "flag"] | None = None,
+    status: Literal["published", "flagged", "rejected", "reinstate"] | None = None,
     page: int | None = None,
     page_size: int | None = None,
 ) -> dict:
+    """List reviewed posts filtered by ``Post.state``.
+
+    ``Post.state`` is the single source of truth for the moderator dashboard
+    tabs. ``status`` maps 1:1 to a post state (published / flagged / rejected /
+    reinstate); when omitted it defaults to ``published``. An optional
+    ``moderator_id`` additionally scopes results to a single moderator.
+    """
     from common.pagination import build_paginated_response
     from apps.feed.repositories.post_repository import (
         count_reviewed_posts_for_moderator,
         fetch_reviewed_posts_for_moderator,
     )
+
+    await _repair_unassigned_moderators_for_state(db, status=status)
 
     total_items = await count_reviewed_posts_for_moderator(db, moderator_id, status)
 

@@ -13,13 +13,23 @@ from common.schemas import ApiResponse
 
 
 class SocialAuthRequest(BaseModel):
-    provider: SocialProvider
-    idToken: str
+    loginType: SocialProvider
+    firebaseId: str
     email: Optional[EmailStr] = None
     firstName: Optional[str] = None
     lastName: Optional[str] = None
+    user: Role = "user"
+    device_id: str
     fullName: Optional[str] = None
-    profilePhotoUrl: Optional[str] = None
+    # profilePhotoUrl: Optional[str] = None
+
+    @field_validator("device_id")
+    @classmethod
+    def normalize_device_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("device_id cannot be blank")
+        return normalized
 
 
 class EmailSignupRequest(BaseModel):
@@ -206,6 +216,7 @@ class UserBaseResponse(BaseModel):
 class UserAuthSessionResponse(BaseModel):
     user: UserBaseResponse
     emailSent: bool = False
+    needsOtp: bool = False
 
 
 class UserAuthResponse(ApiResponse):
@@ -226,6 +237,7 @@ class AdminAuthResponse(ApiResponse):
 class AuthSessionResponse(BaseModel):
     user: AuthUserResponse
     emailSent: bool = False
+    needsOtp: bool = False
     access_token: str | None = None
     refresh_token: str | None = None
     token_type: str = "bearer"
@@ -243,12 +255,6 @@ class RefreshSessionResponse(BaseModel):
 class PaginationParams(BaseModel):
     page: int = 1
     pageSize: int = 20
-
-
-class ResetPasswordRequest(BaseModel):
-    token: str | None = None
-    firebaseId: str | None = None
-    new_password: str
 
 
 class TokenResponse(BaseModel):

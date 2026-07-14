@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException, Security, status, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from core.database.session import get_session
+from common.exceptions import ApiError
 
 from .config import settings as auth_settings
 from core.auth.services import verify_firebase_token
@@ -131,23 +132,16 @@ async def get_current_user(
     from sqlmodel import select
     from apps.accounts.services import complete_firebase_registration
 
-    from common.enums import UserStatus
+    from common.enums import UserStatus, inactive_account_message
 
     firebase_uid = firebase_user["uid"]
     stmt = select(User).where(User.firebase_uid == firebase_uid)
     existing_user = (await db.execute(stmt)).scalar_one_or_none()
     if existing_user:
-        if existing_user.deleted_at:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Account deleted",
-            )
+        if existing_user.status == UserStatus.deleting or existing_user.deleted_at:
+            raise ApiError(inactive_account_message(UserStatus.deleting))
         if existing_user.status in (UserStatus.suspended, UserStatus.banned):
-            status_str = existing_user.status.value if hasattr(existing_user.status, "value") else str(existing_user.status)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Account is {status_str}",
-            )
+            raise ApiError(inactive_account_message(existing_user.status))
 
     return await complete_firebase_registration(firebase_user, db)
 

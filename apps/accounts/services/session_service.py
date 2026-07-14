@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+from uuid import UUID
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -10,6 +11,7 @@ from core.auth.services import revoke_firebase_tokens
 logger = logging.getLogger(__name__)
 
 from .common_service import _now, _revoke_refresh_token_row
+from .device_otp_service import clear_session_email_verification
 
 async def logout(
     payload: LogoutRequest,
@@ -29,6 +31,17 @@ async def logout(
             select(User).where(User.firebase_uid == firebase_uid)
         )
     ).scalar_one_or_none()
+    if user is None:
+        try:
+            user_id = UUID(str(firebase_uid))
+        except ValueError:
+            user_id = None
+        if user_id is not None:
+            user = (
+                await db.execute(
+                    select(User).where(User.id == user_id)
+                )
+            ).scalar_one_or_none()
 
     if not user:
         raise HTTPException(
@@ -48,7 +61,9 @@ async def logout(
     ).scalar_one_or_none()
 
     if installation:
-        await db.delete(installation)
+        installation.is_active = False
+        installation.last_active_at = _now()
+        db.add(installation)
     else:
         logger.info(
             "Logout requested for user %s with unknown device_id %s",
@@ -69,18 +84,19 @@ async def logout(
     for token_row in token_rows:
         await _revoke_refresh_token_row(db, token_row)
 
+    clear_session_email_verification(user)
+    user.updated_at = _now()
+    db.add(user)
+
     if firebase_uid:
         try:
             revoke_firebase_tokens(firebase_uid)
         except Exception as exc:
-            logger.exception(
+            logger.warning(
                 "Firebase token revocation failed during logout for user %s",
                 user.id,
+                exc_info=True,
             )
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Failed to revoke Firebase session",
-            ) from exc
 
     await db.commit()
 
@@ -95,7 +111,7 @@ async def logout_all(current_user: User, db: AsyncSession) -> dict:
     for installation in installation_rows:
         await db.delete(installation)
 
-    # current_user.status = UserStatus.pending
+    clear_session_email_verification(current_user)
     current_user.updated_at = _now()
     db.add(current_user)
     await db.commit()

@@ -9,13 +9,18 @@ from pwdlib import PasswordHash
 from pwdlib.hashers.bcrypt import BcryptHasher
 from apps.accounts.db_models import User, UserInstallation
 from apps.profiles.db_models import Profile
-from common.enums import UserStatus
+from common.enums import UserStatus, inactive_account_message
 from core.auth.config import settings as auth_settings
 from core.email_service import send_otp_email, send_verification_success_email, build_email_verified_success_html
 from ..schemas import ApiResponse, LoginRequest, ResendOtpRequest, OtpVerifyRequest, UserBaseResponse
 PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 
 from .common_service import _fetch_user_profile, _generate_otp, _now
+from .device_otp_service import (
+    attach_otp_flags,
+    evaluate_device_otp_requirement,
+    send_otp_challenge,
+)
 
 async def _issue_auth_session(user: User, db: AsyncSession) -> dict:
     profile = await _fetch_user_profile(db, user)
@@ -25,6 +30,7 @@ async def _issue_auth_session(user: User, db: AsyncSession) -> dict:
     return {
         "user": user_data,
         "emailSent": False,
+        "needsOtp": user.email_verified_at is None,
     }
 
 async def build_firebase_session_response(user: User, db: AsyncSession) -> dict:
@@ -34,6 +40,7 @@ async def build_firebase_session_response(user: User, db: AsyncSession) -> dict:
     return {
         "user": user_data,
         "emailSent": False,
+        "needsOtp": user.email_verified_at is None,
     }
 
 async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) -> ApiResponse:
@@ -49,84 +56,68 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     if not user.password_hash or not PASSWORD_HASHER.verify(payload.password, user.password_hash):
         return ApiResponse(status=False, message="Password not matched ", data=None)
 
-    if user.deleted_at:
-        return ApiResponse(status=False, message="Account is not active", data=None)
+    if user.status == UserStatus.deleting or user.deleted_at:
+        return ApiResponse(status=False, message=inactive_account_message(UserStatus.deleting), data=None)
 
     if user.status in (UserStatus.suspended, UserStatus.banned):
-        return ApiResponse(status=False, message="Account is either Suspended or banned ", data=None)
+        return ApiResponse(status=False, message=inactive_account_message(user.status), data=None)
 
     device_id = payload.device_id.strip()
     if not device_id:
         return ApiResponse(status=False, message="device_id is required", data=None)
 
-    from apps.accounts.db_models import UserInstallation
-    stmt_install = select(UserInstallation).where(
-        UserInstallation.user_id == user.id,
-        UserInstallation.device_id == device_id
+    installation, is_new_device, needs_otp = await evaluate_device_otp_requirement(
+        db,
+        user,
+        device_id,
     )
-    installation = (await db.execute(stmt_install)).scalar_one_or_none()
-
-    is_new_device = installation is None
-    needs_email_otp = user.email_verified_at is None
-    needs_otp = needs_email_otp or is_new_device
 
     if needs_otp:
-        now = _now()
-        otp = _generate_otp()
-        # Re-read DB state so a concurrent verify_otp commit is not overwritten.
-        await db.refresh(user)
-        user.email_otp = otp
-        user.email_otp_created_at = now
-        if user.email_verified_at is None:
-            user.status = UserStatus.pending
-        user.updated_at = now
-        db.add(user)
+        await send_otp_challenge(
+            db,
+            user,
+            device_id,
+            installation=installation,
+            is_new_device=is_new_device,
+        )
 
-        if is_new_device:
-            new_install = UserInstallation(
-                user_id=user.id,
-                device_id=device_id,
-                platform=None,  # let platform be null rather than unknown for now
-                app_version=None,
-                installed_at=now,
-                last_active_at=now,
-                is_active=True,
-            )
-            db.add(new_install)
-        elif installation:
-            installation.last_active_at = now
-            installation.is_active = True
-            db.add(installation)
-
-        await db.commit()
-        await send_otp_email(user.email, otp, "email_verification")
-
-        # Load roles eagerly to avoid MissingGreenlet when accessing user.role
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()
 
-        data = await _issue_auth_session(user, db)
-        if isinstance(data, dict):
-            data["emailSent"] = True
-        return ApiResponse(status=True, message="Verification email sent. Please verify your OTP.", data=data)
+        data = attach_otp_flags(
+            await _issue_auth_session(user, db),
+            email_sent=True,
+            needs_otp=True,
+        )
+        return ApiResponse(
+            status=True,
+            message="Verification email sent. Please verify your OTP.",
+            data=data,
+        )
 
-    else:
-        user.status = UserStatus.active
-        user.updated_at = _now()
-        db.add(user)
+    user.status = UserStatus.active
+    user.updated_at = _now()
+    db.add(user)
 
-        if installation:
-            installation.last_active_at = _now()
-            installation.is_active = True
-            db.add(installation)
+    if installation:
+        installation.last_active_at = _now()
+        installation.is_active = True
+        db.add(installation)
 
-        await db.commit()
+    await db.commit()
 
-        # Load roles eagerly to avoid MissingGreenlet when accessing user.role
-        stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
-        user = (await db.execute(stmt_user)).scalar_one()
+    stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
+    user = (await db.execute(stmt_user)).scalar_one()
 
-        return ApiResponse(status=True, message="Login successful", data=await _issue_auth_session(user, db))
+    return ApiResponse(
+        status=True,
+        message="Login successful",
+        data=attach_otp_flags(
+            await _issue_auth_session(user, db),
+            email_sent=False,
+            needs_otp=False,
+        ),
+    )
 
 async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSession):
     firebase_uid = firebase_user["uid"]
@@ -156,11 +147,18 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
         profile = (await db.execute(stmt_profile)).scalar_one_or_none()
         full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip() if profile else None
 
-        html_content = build_email_verified_success_html(full_name)
         # Send a verification success email using existing account_created_email template
         from core.email_service import send_verification_success_email
         await send_verification_success_email(user.email, full_name)
-        return ApiResponse(status=True, message="OTP successfully verified", data=None)
+
+        stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
+        user = (await db.execute(stmt_user)).scalar_one()
+        data = attach_otp_flags(
+            await _issue_auth_session(user, db),
+            email_sent=False,
+            needs_otp=False,
+        )
+        return ApiResponse(status=True, message="OTP successfully verified", data=data)
 
     return ApiResponse(status=False, message="Email not verified in Firebase yet", data=None)
 

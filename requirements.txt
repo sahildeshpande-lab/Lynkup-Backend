@@ -26,6 +26,8 @@ sendgrid
 python-dotenv
 firebase-admin
 boto3
+cryptography>=42.0.0
+pyOpenSSL>=24.0.0
 pydantic[email]
 pydantic-settings
 alembic

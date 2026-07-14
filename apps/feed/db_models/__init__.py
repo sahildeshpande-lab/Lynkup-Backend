@@ -7,7 +7,6 @@ from .post_hashtag_db_model import PostHashtag
 from .topic_db_model import Topic
 from .post_topic_db_model import PostTopic
 from .link_preview_db_model import LinkPreview
-from .post_reaction_db_model import PostReaction
 
 __all__ = [
     "Post",
@@ -19,5 +18,4 @@ __all__ = [
     "Topic",
     "PostTopic",
     "LinkPreview",
-    "PostReaction",
 ]

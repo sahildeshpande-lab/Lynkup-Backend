@@ -12,6 +12,16 @@ from common.enums import UserStatus
 from common.responses import error_response, success_response
 from core.images import generate_profile_image_url
 
+
+DEFAULT_RELATIONSHIP_FLAGS: dict[str, bool] = {
+    "is_connected": False,
+    "is_followed": False,
+    "is_blocked": False,
+    "request_sent": False,
+    "request_received": False,
+}
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -162,15 +172,15 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
     except Exception as e:
         logger.exception("Failed to queue Lynkup response email: %s", e)
 
-    is_connected = response == "accepted"
+    is_accepted = response == "accepted"
     return success_response(
-        "You are now connected." if is_connected else "Request declined successfully.",
+        "You are now connected." if is_accepted else "Request declined successfully.",
         {
             "lynkup_id": req.id,
             "sender_user_id": req.sender_user_id,
             "receiver_user_id": req.receiver_user_id,
             "status": req.status,
-            "is_connected": is_connected,
+            "is_connected": False,
             "request_sent": False,
             "request_received": False,
             "is_sent": False,
@@ -458,13 +468,6 @@ async def get_relationship_flags(
     return result
 
 
-DEFAULT_RELATIONSHIP_FLAGS: dict[str, bool] = {
-    "is_connected": False,
-    "is_followed": False,
-    "is_blocked": False,
-    "request_sent": False,
-    "request_received": False,
-}
 
 
 def apply_relationship_flags(

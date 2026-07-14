@@ -112,4 +112,12 @@ class PostDetailData(BaseModel):
     content: PostContentData
     created_at: datetime
     updated_at: datetime
+    like_count: int = 0
+    repost_count: int = 0
+    share_count: int = 0
+    comment_count: int = 0
+    is_liked: bool = False
+    is_reposted: bool = False
+    is_bookmarked: bool = False
+    user_reaction: str | None = None
     media: List[PostMediaData] = Field(default_factory=list)

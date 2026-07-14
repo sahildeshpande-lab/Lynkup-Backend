@@ -14,7 +14,6 @@ from .schemas import (
     # AdminSignupRequest,
     # AdminEducationRequest,
     LogoutRequest, 
-    ResetPasswordRequest,
     ForgotPasswordRequest,
     ApiResponse,
     UserAuthResponse,
@@ -37,7 +36,7 @@ router = APIRouter(prefix="/auth", tags=["1] User Registration, Authentication &
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import JSONResponse
 from apps.accounts.services import AccountExistsException, social_auth as social_auth_service
-from common.responses import error_response, success_response
+from common.responses import error_response, serialize_response, success_response
 
 bearer_scheme = HTTPBearer(
     scheme_name="BearerAuth",
@@ -53,21 +52,28 @@ async def social_auth(
     db: AsyncSession = Depends(get_session),
 ) -> Any:
     try:
-        data, created = await social_auth_service(payload, db)
+        data, created, message = await social_auth_service(payload, db)
 
-        msg = "Signup successful" if created else "Login successful"
+        if created:
+            msg = "Signup successful"
+        elif message == "Verification email sent. Please verify your OTP.":
+            msg = message
+        else:
+            msg = "Login successful"
 
         return JSONResponse(
             status_code=status.HTTP_200_OK,
-            content=success_response(msg, data).model_dump(),
+            content=serialize_response(success_response(msg, data)),
         )
 
     except AccountExistsException:
         return JSONResponse(
             status_code=status.HTTP_200_OK,
-            content=error_response(
-                "Account already exists. Please login using your registered method.",
-            ).model_dump(),
+            content=serialize_response(
+                error_response(
+                    "Account already exists. Please login using your registered method.",
+                )
+            ),
         )
 
 
@@ -155,7 +161,3 @@ async def change_password(
 ) -> ApiResponse:
     return await services.change_password(payload, db)
 
-@router.post("/reset-password", response_model=ApiResponse)
-async def reset_password(
-payload: ResetPasswordRequest,db: AsyncSession = Depends(get_session),) -> ApiResponse:   
-    return await services.reset_password(payload, db)

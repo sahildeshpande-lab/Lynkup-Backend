@@ -5,7 +5,8 @@ from sqlmodel import select
 from sqlalchemy.orm import selectinload
 from apps.accounts.db_models import SecurityEventType, User, UserInstallation
 from apps.profiles.db_models import Profile
-from common.enums import OnboardingStatus, RegistrationType, UserStatus
+from common.enums import OnboardingStatus, RegistrationType, UserStatus, inactive_account_message
+from common.exceptions import ApiError
 from core.auth.config import settings as auth_settings
 from core.email_service import send_otp_email
 from ..schemas import ApiResponse, EmailSignupRequest, SocialAuthRequest
@@ -14,6 +15,11 @@ LOGIN_EVENT_THROTTLE_SECONDS = auth_settings.login_event_throttle_seconds
 
 from .auth_service import _issue_auth_session
 from .common_service import AccountExistsException, _as_aware_utc, _display_name_from_firebase, _fetch_user_profile, _generate_otp, _hash_password, _now, _registration_type_from_firebase, assign_user_role, log_security_event
+from .device_otp_service import (
+    attach_otp_flags,
+    evaluate_device_otp_requirement,
+    send_otp_challenge,
+)
 
 async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) -> User:
     firebase_uid = firebase_user["uid"]
@@ -22,6 +28,11 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
     now = _now()
 
     if user:
+        if user.status == UserStatus.deleting or user.deleted_at:
+            raise ApiError(inactive_account_message(UserStatus.deleting))
+        if user.status in (UserStatus.suspended, UserStatus.banned):
+            raise ApiError(inactive_account_message(user.status))
+
         last_login_at = _as_aware_utc(user.last_login_at) if user.last_login_at else None
         should_record_login = (
             last_login_at is None
@@ -46,7 +57,6 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
     stmt_conflict = select(User).options(selectinload(User.roles)).where(User.email == email)
     existing_user = (await db.execute(stmt_conflict)).scalar_one_or_none()
 
-    email_verified = bool(firebase_user.get("email_verified"))
     registration_type = _registration_type_from_firebase(firebase_user)
 
     if existing_user:
@@ -54,8 +64,6 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
         if (not existing_user.firebase_uid) or (existing_user.firebase_uid != firebase_uid and existing_user.registration_type == registration_type):
             existing_user.firebase_uid = firebase_uid
             existing_user.updated_at = now
-            if email_verified and not existing_user.email_verified_at:
-                existing_user.email_verified_at = now
             db.add(existing_user)
             await db.flush()
             user = existing_user
@@ -71,12 +79,12 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
             firebase_uid=firebase_uid,
             email=email,
             registration_type=registration_type,
-            status=UserStatus.active,
+            status=UserStatus.pending,
             onboarding_status=OnboardingStatus.not_started,
             created_at=now,
             updated_at=now,
             last_login_at=now,
-            email_verified_at=now if email_verified else None,
+            email_verified_at=None,
         )
         db.add(user)
         await db.flush()
@@ -107,7 +115,92 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
         )
     ).scalar_one()
 
-async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dict, bool]:
+async def _upsert_user_installation(
+    db: AsyncSession,
+    user_id,
+    device_id: str,
+    now,
+) -> None:
+    from apps.accounts.db_models import UserInstallation
+
+    stmt = select(UserInstallation).where(
+        UserInstallation.user_id == user_id,
+        UserInstallation.device_id == device_id,
+    )
+    installation = (await db.execute(stmt)).scalar_one_or_none()
+    if installation is None:
+        db.add(
+            UserInstallation(
+                user_id=user_id,
+                device_id=device_id,
+                platform=None,
+                app_version=None,
+                installed_at=now,
+                last_active_at=now,
+                is_active=True,
+            )
+        )
+    else:
+        installation.last_active_at = now
+        installation.is_active = True
+        db.add(installation)
+
+
+async def _build_device_auth_session(
+    db: AsyncSession,
+    user: User,
+    device_id: str,
+) -> tuple[dict, str]:
+    from sqlalchemy.orm import selectinload
+
+    installation, is_new_device, needs_otp = await evaluate_device_otp_requirement(
+        db,
+        user,
+        device_id,
+    )
+
+    if needs_otp:
+        await send_otp_challenge(
+            db,
+            user,
+            device_id,
+            installation=installation,
+            is_new_device=is_new_device,
+        )
+        stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
+        user = (await db.execute(stmt_user)).scalar_one()
+        return (
+            attach_otp_flags(
+                await _issue_auth_session(user, db),
+                email_sent=True,
+                needs_otp=True,
+            ),
+            "Verification email sent. Please verify your OTP.",
+        )
+
+    user.status = UserStatus.active
+    user.updated_at = _now()
+    db.add(user)
+
+    if installation:
+        installation.last_active_at = _now()
+        installation.is_active = True
+        db.add(installation)
+
+    await db.commit()
+    stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
+    user = (await db.execute(stmt_user)).scalar_one()
+    return (
+        attach_otp_flags(
+            await _issue_auth_session(user, db),
+            email_sent=False,
+            needs_otp=False,
+        ),
+        "Login successful",
+    )
+
+
+async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dict, bool, str]:
     from core.images import normalize_image_name
     from core.auth.services import verify_firebase_token
     from sqlmodel import select
@@ -120,7 +213,7 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
 
     # 3. Verify Firebase token properly
     try:
-        firebase_user = verify_firebase_token(payload.idToken)
+        firebase_user = verify_firebase_token(payload.firebaseId)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -148,7 +241,11 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
         .get("sign_in_provider")
     )
 
-    requested_provider = (payload.provider.value if hasattr(payload.provider, 'value') else str(payload.provider)).lower()
+    requested_provider = (
+        payload.loginType.value
+        if hasattr(payload.loginType, "value")
+        else str(payload.loginType)
+    ).lower()
     if requested_provider in ("google", "google.com"):
         expected_token_provider = "google.com"
         provider_name = "google"
@@ -191,28 +288,24 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
                 raise AccountExistsException(registration_type=reg_type_str)
 
     if user:
-        if user.deleted_at:
+        if user.status == UserStatus.deleting or user.deleted_at:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Account deleted"
+                status_code=status.HTTP_200_OK,
+                detail=inactive_account_message(UserStatus.deleting)
             )
         if user.status in (UserStatus.suspended, UserStatus.banned):
-            status_str = user.status.value if hasattr(user.status, "value") else str(user.status)
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Account is {status_str}"
+                status_code=status.HTTP_200_OK,
+                detail=inactive_account_message(user.status)
             )
 
         user.last_login_at = now
         user.updated_at = now
         db.add(user)
 
-        # 7. Review Profile Photo Flow:
-        # Frontend uploads the image separately and sends only an S3 key/URL in payload.profilePhotoUrl.
-        # Persist normalize_image_name(payload.profilePhotoUrl) directly without duplicate uploads to S3.
         stmt_profile = select(Profile).where(Profile.user_id == user.id)
         profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-        if profile and payload.profilePhotoUrl:
+        if profile and getattr(payload, "profilePhotoUrl", None):
             profile.profile_photo_url = normalize_image_name(payload.profilePhotoUrl)
             db.add(profile)
             await db.flush()
@@ -220,30 +313,26 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
             profile.completeness_score = await calculate_completeness_score(user.id, db)
             db.add(profile)
 
-        await db.commit()
-        await db.refresh(user)
-
-        stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
-        user = (await db.execute(stmt_user)).scalar_one()
-
-        session_data = await _issue_auth_session(user, db)
-        return session_data, False
+        await db.flush()
+        session_data, message = await _build_device_auth_session(db, user, payload.device_id)
+        return session_data, False, message
 
     user = User(
         firebase_uid=uid,
         email=email,
         registration_type=RegistrationType(provider_name),
-        status=UserStatus.active,
-        onboarding_status=OnboardingStatus.pending,
+        status=UserStatus.pending,
+        onboarding_status=OnboardingStatus.not_started,
         created_at=now,
         updated_at=now,
         last_login_at=now,
-        email_verified_at=now if firebase_user.get("email_verified") else None,
+        email_verified_at=None,
     )
     db.add(user)
     await db.flush()
 
-    await assign_user_role(db, user, "user")
+    role_str = payload.user.value if hasattr(payload.user, "value") else str(payload.user)
+    await assign_user_role(db, user, role_str)
 
     # 6. Review Name Handling:
     # Persist first and last name independently while still deriving them from the
@@ -268,9 +357,6 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
         completeness_score=0,
         updated_at=now
     )
-    if payload.profilePhotoUrl:
-        profile.profile_photo_url = normalize_image_name(payload.profilePhotoUrl)
-
     db.add(profile)
     await db.flush()
 
@@ -278,14 +364,15 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
     profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
 
+    await _upsert_user_installation(db, user.id, payload.device_id, now)
     await db.commit()
     await db.refresh(user)
 
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
 
-    session_data = await _issue_auth_session(user, db)
-    return session_data, True
+    session_data, message = await _build_device_auth_session(db, user, payload.device_id)
+    return session_data, True, message
 
 async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSession) -> ApiResponse:
     if firebase_user.get("uid") is None or (firebase_user.get("email") or "").lower() != payload.email.lower():
@@ -308,8 +395,6 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
             existing_user_email.password_hash = _hash_password(payload.password)
             existing_user_email.updated_at = now
             existing_user_email.last_login_at = now
-            if bool(firebase_user.get("email_verified")) and not existing_user_email.email_verified_at:
-                existing_user_email.email_verified_at = now
             db.add(existing_user_email)
             await db.flush()
 
@@ -351,15 +436,13 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
 
             await db.commit()
 
-            if not existing_user_email.email_verified_at:
-                otp = existing_user_email.email_otp or _generate_otp()
-                existing_user_email.email_otp = otp
-                existing_user_email.email_otp_created_at = now
-                db.add(existing_user_email)
-                await db.commit()
-                await send_otp_email(email, otp, "email_verification")
-            else:
-                await db.commit()
+            otp = _generate_otp()
+            existing_user_email.email_verified_at = None
+            existing_user_email.email_otp = otp
+            existing_user_email.email_otp_created_at = now
+            db.add(existing_user_email)
+            await db.commit()
+            await send_otp_email(email, otp, "email_verification")
 
             await db.refresh(existing_user_email)
             if profile:
@@ -368,9 +451,11 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
             stmt_user = select(User).options(selectinload(User.roles)).where(User.id == existing_user_email.id)
             user = (await db.execute(stmt_user)).scalar_one()
 
-            data = await _issue_auth_session(user, db)
-            if isinstance(data, dict):
-                data["emailSent"] = not bool(existing_user_email.email_verified_at)
+            data = attach_otp_flags(
+                await _issue_auth_session(user, db),
+                email_sent=True,
+                needs_otp=True,
+            )
             return ApiResponse(status=True, message="Signup successful", data=data)
         else:
             reg_type_str = (
@@ -399,7 +484,7 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
         updated_at=now,
         email_otp=_generate_otp(),
         email_otp_created_at=now,
-        email_verified_at=_now() if firebase_user.get("email_verified") else None,
+        email_verified_at=None,
     )
     db.add(user)
     await db.flush()
@@ -447,7 +532,9 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
 
-    data = await _issue_auth_session(user, db)
-    if isinstance(data, dict):
-        data["emailSent"] = True
+    data = attach_otp_flags(
+        await _issue_auth_session(user, db),
+        email_sent=True,
+        needs_otp=True,
+    )
     return ApiResponse(status=True, message="Signup successful", data=data)

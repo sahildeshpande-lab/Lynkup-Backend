@@ -37,7 +37,7 @@ from . import session_service as _service_module_3
 from .session_service import logout, logout_all
 
 from . import password_service as _service_module_4
-from .password_service import forgot_password, reset_password, change_password
+from .password_service import forgot_password, change_password
 
 from .session_service import revoke_firebase_tokens
 from .auth_service import send_otp_email
@@ -90,7 +90,6 @@ __all__ = [
     "logout",
     "logout_all",
     "forgot_password",
-    "reset_password",
     "change_password",
     "revoke_firebase_tokens",
     "send_otp_email",

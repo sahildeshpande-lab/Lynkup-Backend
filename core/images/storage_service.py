@@ -124,7 +124,7 @@ class StorageService:
         """
         bucket = config.settings.effective_bucket
         if bucket:
-            response= config.s3_client.put_object(
+            config.s3_client.put_object(
                 Bucket=bucket,
                 Key=key,
                 Body=content,

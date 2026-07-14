@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, Column, DateTime, Index, String, Integer, text
+from sqlalchemy import Boolean, Column, DateTime, String, Integer, text
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel, Relationship
 
@@ -68,6 +68,18 @@ class User(SQLModel, table=True):
     roles: List[UserRole] = Relationship(
         sa_relationship=relationship("UserRole", back_populates="user", cascade="all, delete-orphan", lazy="selectin")
     )
+    bookmarks: List["Bookmark"] = Relationship(
+        sa_relationship=relationship("Bookmark", back_populates="user", cascade="all, delete-orphan", lazy="selectin")
+    )
+    share_events: List["ShareEvent"] = Relationship(
+        sa_relationship=relationship("ShareEvent", back_populates="user", cascade="all, delete-orphan", lazy="selectin")
+    )
+    comments: List["Comment"] = Relationship(
+        sa_relationship=relationship("Comment", back_populates="author", cascade="all, delete-orphan", lazy="selectin")
+    )
+    comment_reactions: List["CommentReaction"] = Relationship(
+        sa_relationship=relationship("CommentReaction", back_populates="user", cascade="all, delete-orphan", lazy="selectin")
+    )
 
 
     @property
@@ -85,11 +97,6 @@ class User(SQLModel, table=True):
         if not any(ur.role.name == value for ur in self.roles if ur.role):
             role_obj = Role(name=value, description=f"{value} role")
             self.roles.append(UserRole(role=role_obj))
-
-    __table_args__ = (
-        Index("ix_users_email", "email"),
-    )
-
 
 class Role(SQLModel, table=True):
     __tablename__ = "roles"

@@ -233,28 +233,24 @@ async def get_my_profile_service(
 
     user_data = await build_user_base_response(target_user, profile, db)
 
-    # Inject relationship flags
-    if effective_user_id == user.id:
-        user_data.update({
-            "is_connected": False,
-            "request_sent": False,
-            "request_send": False,
-            "request_received": False,
-            "is_sent": False,
-            "is_request": False,
-        })
-    else:
-        from apps.connections.services import get_relationship_flags
+    # Inject relationship flags when viewing another user's profile
+    if effective_user_id != user.id:
+        from apps.connections.services.connection_service import get_relationship_flags
         flags_map = await get_relationship_flags(db, user.id, [effective_user_id])
         flags = flags_map.get(effective_user_id, {})
-        user_data.update({
-            "is_connected": flags.get("is_connected", False),
-            "request_sent": flags.get("request_sent", False),
-            "request_send": flags.get("request_sent", False),
-            "request_received": flags.get("request_received", False),
-            "is_sent": flags.get("request_sent", False),
-            "is_request": flags.get("request_received", False),
-        })
+        user_data["is_connected"] = flags.get("is_connected", False)
+        user_data["request_sent"] = flags.get("request_sent", False)
+        user_data["request_received"] = flags.get("request_received", False)
+        user_data["is_sent"] = flags.get("request_sent", False)
+        user_data["is_request"] = flags.get("request_received", False)
+    else:
+        # Own profile — these flags are always False / N/A
+        user_data["is_connected"] = False
+        user_data["request_sent"] = False
+        user_data["request_received"] = False
+        user_data["is_sent"] = False
+        user_data["is_request"] = False
+
     return {"user": user_data}
 
 async def update_my_profile_service(user: User, payload: UpdateProfileRequest, db: AsyncSession) -> dict:
@@ -280,6 +276,16 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
         profile.minor = payload.minor
     if payload.bio is not None:
         profile.bio = payload.bio
+
+    if payload.university_id is not None:
+        if payload.university_id:
+            try:
+                from uuid import UUID as _UUID
+                profile.university_id = _UUID(str(payload.university_id))
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid university_id")
+        else:
+            profile.university_id = None
 
     if payload.education_level_id is not None:
         from common.enums import EducationLevel
@@ -307,6 +313,10 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
             profile.banner_photo_url = normalize_image_name(payload.banner_photo_key)
         else:
             profile.banner_photo_url = None
+
+    # Recalculate completeness score before saving so the updated fields
+    # are reflected immediately in the response.
+    profile.completeness_score = await calculate_completeness_score(user.id, db)
 
     db.add(profile)
     await db.commit()
@@ -443,6 +453,10 @@ async def update_user_profile_by_admin_service(
             profile.banner_photo_url = normalize_image_name(payload.banner_photo_key)
         else:
             profile.banner_photo_url = None
+
+    # Recalculate completeness score before saving so the updated fields
+    # are reflected immediately in the response.
+    profile.completeness_score = await calculate_completeness_score(user.id, db)
 
     db.add(profile)
     await db.commit()

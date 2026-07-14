@@ -1,56 +1,57 @@
 from __future__ import annotations
+
 from uuid import UUID
+
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from common.enums import PostState
-from apps.feed.db_models import Post
+
 from apps.connections.services.recommendation_service import get_user_connections
-from apps.profiles.db_models import Profile
+from apps.feed.db_models import Post
+from apps.feed.repositories.feed_repository import (
+    count_feed_posts,
+    fetch_feed_posts,
+    fetch_viewer_profile,
+)
+
 
 async def get_feed_service(
     current_user_id: UUID,
     db: AsyncSession,
     page: int | None = None,
     page_size: int | None = None,
-) -> tuple[list[Post], int]:
+    include_total: bool = False,
+) -> list[Post] | tuple[list[Post], int]:
     """
-    Get public feed posts. Connection posts first (by created_at DESC),
-    then non-connection posts (by created_at DESC).
+    Return feed posts with profile-visibility filters applied in SQL.
+    When the viewer has major/minor/university, matching posts appear first,
+    then all other eligible posts; each group is ordered by created_at DESC.
     """
-    # Fetch user connections
+    viewer_profile = await fetch_viewer_profile(db, current_user_id)
     connection_ids = await get_user_connections(db, current_user_id)
-
-    # Fetch all published posts ordered by created_at DESC
-    stmt = (
-        select(Post, Profile)
-        .outerjoin(Profile, Profile.user_id == Post.author_user_id)
-        .where(
-            Post.state == PostState.published,
-            Post.author_user_id != current_user_id,
-        )
-        .order_by(Post.created_at.desc())
-    )
-    result = await db.execute(stmt)
-    posts = []
-    for post, profile in result.all():
-        post._author_profile = profile
-        posts.append(post)
-
-    # Split posts into connection posts and non-connection posts
-    connection_posts = [p for p in posts if p.author_user_id in connection_ids]
-    non_connection_posts = [p for p in posts if p.author_user_id not in connection_ids]
-
-    # Combine them (both lists are already ordered by created_at DESC)
-    combined = connection_posts + non_connection_posts
-    total_items = len(combined)
+    total_items = await count_feed_posts(db, current_user_id, viewer_profile, connection_ids)
 
     if page is None and page_size is None:
-        sliced_posts = combined
+        offset = 0
+        limit = None
     else:
         p = page or 1
         ps = page_size or 20
-        start = (p - 1) * ps
-        end = start + ps
-        sliced_posts = combined[start:end]
+        offset = (p - 1) * ps
+        limit = ps
 
-    return sliced_posts, total_items
+    rows = await fetch_feed_posts(
+        db,
+        current_user_id,
+        viewer_profile,
+        connection_ids,
+        offset=offset,
+        limit=limit,
+    )
+
+    posts = []
+    for post, profile in rows:
+        post._author_profile = profile
+        posts.append(post)
+
+    if include_total:
+        return posts, total_items
+    return posts

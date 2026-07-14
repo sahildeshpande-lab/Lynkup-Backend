@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import logging
 from html import escape
 from pathlib import Path
@@ -45,8 +46,8 @@ async def _log_transactional_email(
     *,
     content: str | None = None,
     is_send: bool | None = None,
-    sent_at: datetime | None = None,
-    error_message: str | None = None,
+    # sent_at: datetime | None = None,
+    # error_message: str | None = None,
 ) -> None:
     """Create one transactional email log entry.
 
@@ -70,8 +71,8 @@ async def _log_transactional_email(
                 purpose=purpose,
                 subject=subject,
                 is_send=send_status,
-                sent_at=sent_at,
-                error_message=error_message,
+                # sent_at=sent_at,
+                # error_message=error_message,
                 attachment=attachment,
                 updated_at=datetime.now(timezone.utc),
             )
@@ -106,11 +107,6 @@ async def _deliver_email_via_sendgrid(to_email: str, subject: str, html_body: st
         )
         client = SendGridAPIClient(api_key)
         response = client.send(message)
-
-
-        print("STATUS:", response.status_code)
-        print("BODY:", response.body)
-        print("HEADERS:", response.headers)
         success = 200 <= response.status_code < 300
         if not success:
             message = f"SendGrid rejected email with status {getattr(response, 'status_code', None)}"
@@ -118,24 +114,22 @@ async def _deliver_email_via_sendgrid(to_email: str, subject: str, html_body: st
             return False, message
         return True, None
     except Exception as exc:
-            logger.exception("SendGrid exception")
-            return False, str(exc)
-        # message = str(exc)
-        # exc_name = type(exc).__name__
-        # if "UnauthorizedError" in exc_name or "401" in message or "Unauthorized" in message:
-        #     logger.warning(
-        #         "SendGrid API Key is unauthorized or invalid (401). "
-        #         "Simulating email delivery. Email details:\n"
-        #         "To: %s\n"
-        #         "Subject: %s\n"
-        #         "Body:\n%s\n",
-        #         to_email,
-        #         subject,
-        #         html_body,
-        #     )
-        #     return True, None
-        # logger.exception("Email send failed while delivering to %s", to_email)
-        # return False, message
+        message = str(exc)
+        exc_name = type(exc).__name__
+        if "UnauthorizedError" in exc_name or "401" in message or "Unauthorized" in message:
+            logger.warning(
+                "SendGrid API Key is unauthorized or invalid (401). "
+                "Simulating email delivery. Email details:\n"
+                "To: %s\n"
+                "Subject: %s\n"
+                "Body:\n%s\n",
+                to_email,
+                subject,
+                html_body,
+            )
+            return True, None
+        logger.exception("Email send failed while delivering to %s", to_email)
+        return False, message
 
 
 async def _actually_send_email_via_sendgrid(to_email: str, subject: str, html_body: str, from_email: str) -> bool:
@@ -176,8 +170,8 @@ async def _send_and_log_email(
                 db_log = (await session.execute(stmt)).scalars().first()
                 if db_log:
                     db_log.is_send = success
-                    db_log.sent_at = datetime.now(timezone.utc) if success else None
-                    db_log.error_message = error_message
+                    # db_log.sent_at = datetime.now(timezone.utc) if success else None
+                    # db_log.error_message = error_message
                     db_log.updated_at = datetime.now(timezone.utc)
                     session.add(db_log)
                     await session.commit()
@@ -194,8 +188,8 @@ async def _send_and_log_email(
                     purpose=purpose,
                     subject=subject,
                     is_send=success,
-                    sent_at=datetime.now(timezone.utc) if success else None,
-                    error_message=error_message,
+                    # sent_at=datetime.now(timezone.utc) if success else None,
+                    # error_message=error_message,
                     updated_at=datetime.now(timezone.utc),
                 )
                 session.add(log_entry)
@@ -371,12 +365,19 @@ def _render_template(template_name: str, context: dict[str, object], raw_keys: s
 
 
 def _render_email_layout(title: str, body_html: str) -> str:
-    base_url = email_settings.base_url.rstrip("/")
-    logo_path = email_settings.logo_url
-    logo_url = f"{base_url}{logo_path}"
+    logo_url = os.getenv("LOGO_URL", "https://kampulynk-dev-spaces.sfo3.cdn.digitaloceanspaces.com/logo/logo.png",)
+
+    if not logo_url.startswith(("http://", "https://")):
+        # base_url = os.getenv("BASE_URL").rstrip("/")
+        logo_url = f"{logo_url}"
+
     return _render_template(
         "layouts/base_email.html",
-        {"title": title, "body_html": body_html, "logo_url": logo_url},
+        {
+            "title": title,
+            "body_html": body_html,
+            "logo_url": logo_url,
+        },
         raw_keys={"body_html"},
     )
 
@@ -541,12 +542,15 @@ async def send_lynkup_response_email(to_email: str, response_status: str, full_n
     return await _queue_email(to_email, subject, html_content, purpose=purpose)
 
 
+_NEGATIVE_REVIEW_STATUSES = ("flag", "flagged", "reject", "rejected")
+
+
 def build_post_review_email_html(
     full_name: str | None = None,
-    review_status: str = "publish",
+    review_status: str = "published",
 ) -> str:
     greeting = f"Hi {full_name}," if full_name else "Hi,"
-    if review_status == "flag":
+    if review_status in _NEGATIVE_REVIEW_STATUSES:
         title = "Please Review Your Post"
         body = "A moderator has flagged your post. Please review your post and make the necessary updates before submitting it again."
     else:
@@ -567,7 +571,7 @@ async def send_post_review_email(
     full_name: str | None = None,
 ) -> bool:
     """Queue post review result email for cron delivery."""
-    if review_status == "flag":
+    if review_status in _NEGATIVE_REVIEW_STATUSES:
         subject = "KampuLynk Post Flagged"
         purpose = "Post Flagged"
     else:
@@ -649,17 +653,24 @@ async def send_reset_password_email(
     reset_link: str,
     background_tasks: BackgroundTasks | None = None,
 ) -> bool:
-    """Send password reset link in the background. Users are actively waiting for this."""
+    """Send password reset link. Delivers immediately when no BackgroundTasks is provided."""
     subject = "Reset Your Password"
     password_reset_expire_minutes = email_settings.password_reset_token_expire_minutes
     body_html = _render_template(
         "auth/password_reset_email.html",
-        {"reset_link": reset_link, "subject": subject , "password_reset_expire_minutes":password_reset_expire_minutes} ,
+        {"reset_link": reset_link, "subject": subject, "password_reset_expire_minutes": password_reset_expire_minutes},
         raw_keys={"reset_link"},
     )
     html_content = _render_email_layout(subject, body_html)
-    send_email_in_background(background_tasks, to_email, subject, html_content, "forget password")
-    return True
+    purpose = "forget password"
+
+    if background_tasks:
+        send_email_in_background(background_tasks, to_email, subject, html_content, purpose)
+        logger.info("Password reset email queued via BackgroundTasks for %s", to_email)
+        return True
+
+    logger.info("Password reset email sending immediately to %s", to_email)
+    return await _send_and_log_email(to_email, subject, html_content, purpose)
 
 
 def build_profile_updated_email_html(full_name: str | None = None) -> str:

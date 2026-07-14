@@ -274,10 +274,89 @@ async def search_users(
             apply_relationship_flags(user_data, flags_map, user.id)
             items.append(user_data)
 
-        return {
-            "items": items,
-            "page": 1,
-            "pageSize": len(items),
-            "totalItems": len(items),
-            "totalPages": 1
-        }
+    return {
+        "items": items,
+        "page": 1,
+        "pageSize": len(items),
+        "totalItems": len(items),
+        "totalPages": 1
+    }
+
+
+async def search_posts(
+    current_user: User,
+    db: AsyncSession,
+    *,
+    query: str | None = None,
+    hashtag: str | None = None,
+    academic_interest: str | None = None,
+    university_name: str | None = None,
+    major: str | None = None,
+    minor: str | None = None,
+    country: str | None = None,
+    page: int | None = None,
+    page_size: int | None = None,
+) -> dict:
+    from apps.engagement.repositories import fetch_post_engagement_flags
+    from apps.engagement.services.reaction_service import format_user_reaction
+    from apps.feed.services.post_service import format_post_detail
+    from apps.search.repositories import count_search_posts, search_posts_with_details
+    from common.pagination import build_paginated_response
+
+    search_kwargs = {
+        "query": query,
+        "hashtag": hashtag,
+        "academic_interest": academic_interest,
+        "university_name": university_name,
+        "major": major,
+        "minor": minor,
+        "country": country,
+    }
+
+    async def _format_items(rows):
+        post_ids = [post.id for post, *_ in rows]
+        engagement_flags = await fetch_post_engagement_flags(db, current_user.id, post_ids)
+        items = [
+            format_post_detail(
+                post,
+                author_profile=author_profile,
+                moderator_user=mod_user,
+                moderator_profile=mod_profile,
+                is_liked=engagement_flags.user_reaction_for(post.id) is not None,
+                is_reposted=post.id in engagement_flags.reposted_post_ids,
+                is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
+                user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
+            )
+            for post, author_profile, mod_user, mod_profile in rows
+        ]
+        for item in items:
+            item["reaction_count"] = item["like_count"]
+        return items
+
+    if page is not None and page_size is not None:
+        total = await count_search_posts(db, current_user.id, **search_kwargs)
+        rows = await search_posts_with_details(
+            db,
+            current_user.id,
+            **search_kwargs,
+            offset=(page - 1) * page_size,
+            limit=page_size,
+        )
+        items = await _format_items(rows)
+        return build_paginated_response(items, page, page_size, total).model_dump()
+
+    rows = await search_posts_with_details(
+        db,
+        current_user.id,
+        **search_kwargs,
+        offset=0,
+        limit=None,
+    )
+    items = await _format_items(rows)
+    return {
+        "items": items,
+        "page": 1,
+        "pageSize": len(items),
+        "totalItems": len(items),
+        "totalPages": 1 if items else 0,
+    }

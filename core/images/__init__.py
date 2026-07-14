@@ -12,18 +12,30 @@ from .config import (
     upload_image_to_s3,
     save_image,
 )
+from .storage_service import (
+    StorageService,
+    storage_service,
+    get_media_url,
+    delete_file,
+    validate_image,
+)
 
 __all__ = [
     "ImageStorageSettings",
     "build_image_key",
     "normalize_image_name",
     "settings",
-    "generate_upload_url",
-    "generate_download_url",
-    "generate_profile_image_url",
+    # "generate_upload_url",
+    # "generate_download_url",
+    # "generate_profile_image_url",
     "delete_file",
     "file_exists",
     "s3_client",
     "upload_image_to_s3",
     "save_image",
+    "StorageService",
+    "storage_service",
+    "get_media_url",
+    "delete_file",
+    "validate_image",
 ]

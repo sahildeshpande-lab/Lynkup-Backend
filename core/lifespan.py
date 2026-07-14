@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-
+import asyncio
+import logging
 from fastapi import FastAPI
 
 from core.database.config import settings as db_settings
@@ -10,16 +11,18 @@ from core.database.init import init_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import asyncio
-    import logging
+    logger = logging.getLogger(__name__)
 
     if db_settings.auto_init_db:
         await init_db()
+        # from core.database.migrations import run_db_migrations_programmatically
+        # await run_db_migrations_programmatically()
+        logger.info(f"Initialized database at {db_settings.db_host}")
 
     # Load email settings from .env early so SendGrid config is available.
     from core.email.config import settings as email_settings
 
-    logger = logging.getLogger(__name__)
+
     if email_settings.is_sendgrid_configured:
         logger.info("SendGrid email delivery is configured.")
     else:

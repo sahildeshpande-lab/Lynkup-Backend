@@ -14,6 +14,7 @@ from ..schemas import AdminEditProfileRequest, AdminUserStatus
 from apps.accounts.schemas import ApiResponse
 from apps.profiles.services import build_user_base_response
 from apps.profiles.db_models import Profile
+from core.auth.services import create_firebase_user, delete_firebase_user
 from sqlalchemy.orm import selectinload
 import secrets
 import string
@@ -240,7 +241,6 @@ async def export_users(page: int | None, page_size: int | None, db: AsyncSession
 
 async def admin_create_user(payload: AdminUserCreateRequest, db: AsyncSession, background_tasks: BackgroundTasks | None = None) -> ApiResponse:
     from apps.accounts.services import assign_user_role
-    from core.auth.services import create_firebase_user, delete_firebase_user
     from core.email_service import send_temporary_password_email
 
     email = payload.email.lower()
@@ -363,48 +363,130 @@ async def admin_get_user(user_id: str, db: AsyncSession) -> dict:
     profile = (await db.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one_or_none()
     return {"user": await build_user_base_response(user, profile, db)}
 
-async def admin_delete_users(user_ids: list[str], db: AsyncSession) -> dict:
+async def _fetch_superadmin_user(db: AsyncSession) -> User | None:
+    """Return the active Super Admin used as the fallback post moderator."""
+    stmt = (
+        select(User)
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(Role.name == "superadmin", User.is_deleted.is_(False))
+        .options(selectinload(User.roles))
+        .order_by(User.created_at.asc())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def _reassign_moderator_posts_to_superadmin(
+    db: AsyncSession,
+    moderator_id: UUID,
+    superadmin_id: UUID,
+    *,
+    now: datetime,
+) -> None:
+    """
+    Reassign posts currently owned by a departing moderator.
+
+    The ``posts.moderator_id`` column references ``users.id``. Before a
+    moderator is soft-deleted, their assigned review queue is transferred to
+    the Super Admin so no post is left pointing at a deleted user.
+    """
+    from apps.feed.db_models import Post
+    from sqlalchemy import update
+
+    await db.execute(
+        update(Post)
+        .where(Post.moderator_id == moderator_id)
+        .values(moderator_id=superadmin_id, updated_at=now)
+    )
+
+
+def _soft_delete_user_record(
+    user: User,
+    *,
+    now: datetime,
+) -> None:
+    """Apply the standard scheduled-deletion fields shared by all role types."""
+    user.status = UserStatus.deleting
+    user.is_deleted = True
+    user.deleted_at = now
+    user.purge_after = now + timedelta(days=1)
+
+
+async def _build_deleted_user_payload(
+    user: User,
+    db: AsyncSession,
+) -> dict:
     from core.auth.services import revoke_firebase_tokens
+
+    db.add(user)
+
+    if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
+        try:
+            revoke_firebase_tokens(user.firebase_uid)
+        except Exception:
+            pass
+
+    profile = (
+        await db.execute(select(Profile).where(Profile.user_id == user.id))
+    ).scalar_one_or_none()
+    user_data = await build_user_base_response(user, profile, db)
+    return {
+        "deleted": True,
+        "status": user.status.value if hasattr(user.status, "value") else str(user.status),
+        "deleted_at": user.deleted_at,
+        "purge_after": user.purge_after,
+        "user": user_data,
+    }
+
+
+async def admin_delete_users(user_ids: list[str], role: str, db: AsyncSession) -> dict:
     deleted_users = []
     now = datetime.now(timezone.utc)
+
+    superadmin: User | None = None
+    if role == "moderator":
+        superadmin = await _fetch_superadmin_user(db)
+        if superadmin is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Super Admin not found",
+            )
+
     for user_id in user_ids:
         try:
             user_uuid = _coerce_uuid(user_id)
         except Exception:
             continue
-        user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
-        if user is None:
-            continue
-        user.status = UserStatus.deleting
-        user.is_deleted = True
-        user.deleted_at = now
-        user.purge_after = now + timedelta(days=1)
-        db.add(user)
 
-        if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
-            try:
-                revoke_firebase_tokens(user.firebase_uid)
-            except Exception:
-                pass
-        profile = (await db.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one_or_none()
-        user_data = await build_user_base_response(user, profile, db)
-        deleted_users.append({
-            "deleted": True,
-            "status": user.status.value if hasattr(user.status, "value") else str(user.status),
-            "deleted_at": user.deleted_at,
-            "purge_after": user.purge_after,
-            "user": user_data,
-        })
+        user = (
+            await db.execute(
+                select(User)
+                .options(selectinload(User.roles))
+                .where(User.id == user_uuid, User.is_deleted.is_(False))
+            )
+        ).scalar_one_or_none()
+        if user is None or user.role != role:
+            continue
+
+        if role == "moderator":
+            # Transfer this moderator's assigned posts before soft-delete.
+            await _reassign_moderator_posts_to_superadmin(
+                db,
+                user.id,
+                superadmin.id,
+                now=now,
+            )
+
+        _soft_delete_user_record(user, now=now)
+        deleted_users.append(await _build_deleted_user_payload(user, db))
+
     await db.commit()
-    if not deleted_users:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No matching users found to delete",
-        )
     return {"deleted_users": deleted_users}
 
-async def admin_delete_user(user_id: str, db: AsyncSession) -> dict:
-    result = await admin_delete_users([user_id], db)
+
+async def admin_delete_user(user_id: str, role: str, db: AsyncSession) -> dict:
+    result = await admin_delete_users([user_id], role, db)
     deleted_users = result["deleted_users"]
     if not deleted_users:
         raise HTTPException(

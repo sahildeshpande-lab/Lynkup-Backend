@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -10,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from core.lifespan import lifespan
 from core.routes import build_router
 from core.security.auth import bearer_scheme
-from common.responses import error_response
+from common.responses import error_response, serialize_response
 from common.exceptions import ApiError
 from apps.accounts.services import AccountExistsException
 
@@ -69,7 +70,7 @@ logger = logging.getLogger(__name__)
 
 
 def _error_json(message: str) -> dict:
-    return error_response(message).model_dump()
+    return serialize_response(error_response(message))
 
 
 def _api_error_status_code(message: str) -> int:
@@ -80,19 +81,12 @@ def _api_error_status_code(message: str) -> int:
             "missing access token",
             "invalid access token",
             "invalid firebase",
-            "account is suspended",
-            "account is banned",
-            "account is blocked",
-            "account is block",
         )
-    ):
+    ) or _is_account_status_message(message):
         return 401
     if any(
         phrase in lowered
         for phrase in (
-            "account deleted",
-            "account is pending",
-            "account is not active",
             "insufficient permissions",
         )
     ):
@@ -100,10 +94,29 @@ def _api_error_status_code(message: str) -> int:
     return 200
 
 
+def _is_account_status_message(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "your account is",
+            "account deleted",
+            "account is pending",
+            "account is suspended",
+            "account is banned",
+            "account is deleting",
+            "account is not active",
+            "account is blocked",
+        )
+    )
+
+
 @app.exception_handler(HTTPException)
 async def legacy_http_exception_handler(_request, exc: HTTPException):
     detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-    status_code = exc.status_code if exc.status_code in (400, 401, 403, 404) else 200
+    if _is_account_status_message(detail):
+        return JSONResponse(status_code=401, content=_error_json(detail))
+    status_code = exc.status_code if exc.status_code >= 400 else 200
     return JSONResponse(status_code=status_code, content=_error_json(detail))
 
 
@@ -133,7 +146,7 @@ async def account_exists_exception_handler(_request, exc: AccountExistsException
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(_request, exc: Exception):
     logger.exception("Unhandled server error: %s", exc)
-    return JSONResponse(status_code=200, content=_error_json("Internal server error"))
+    return JSONResponse(status_code=500, content=_error_json("Internal server error"))
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -161,7 +174,6 @@ def _patch_multipart_file_schemas(schema: dict) -> None:
                 prop["format"] = "binary"
                 prop.pop("contentMediaType", None)
 
-
 def custom_openapi() -> dict:
     if app.openapi_schema:
         return app.openapi_schema
@@ -181,3 +193,25 @@ def custom_openapi() -> dict:
 
 
 app.openapi = custom_openapi
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def main() -> None:
+    import uvicorn
+
+    uvicorn.run(
+        "entrypoints.api:app",
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "8080")),
+        reload=_env_bool("RELOAD"),
+    )
+
+
+if __name__ == "__main__":
+    main()

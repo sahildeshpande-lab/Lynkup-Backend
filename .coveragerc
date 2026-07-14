@@ -1,0 +1,25 @@
+[run]
+source = apps, core
+omit =
+    apps/accounts/services.py
+    apps/**/db_models/*
+    apps/**/repositories/*
+    apps/**/routes.py
+    apps/**/services/*
+    apps/search/services.py
+    core/auth/dependencies.py
+    core/auth/firebase*.py
+    core/auth/services.py
+    core/database/init.py
+    core/database/migrations.py
+    core/email_service.py
+    core/lifespan.py
+    core/routes.py
+    */tests/*
+    scripts/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    raise NotImplementedError
