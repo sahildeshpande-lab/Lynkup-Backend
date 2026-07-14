@@ -11,6 +11,7 @@ from common.enums import PostState
 from apps.accounts.db_models import User
 from apps.feed.db_models import Post
 from apps.feed.schemas import SavePostRequest, EditPostRequest
+from apps.engagement.schemas import PostReactionsGrouped
 from apps.feed.content_utils import sanitize_html, validate_content, validate_media_count
 from core.images import generate_download_url, generate_profile_image_url
 from apps.connections.services.connection_service import is_blocked
@@ -65,6 +66,7 @@ def format_post_detail(
     is_reposted: bool = False,
     is_bookmarked: bool = False,
     user_reaction: str | None = None,
+    reactions=None,
 ) -> dict:
     """
     Format a Post model and its attachments into a dictionary matching PostDetailData schema.
@@ -94,6 +96,13 @@ def format_post_detail(
         "is_reposted": is_reposted,
         "is_bookmarked": is_bookmarked,
         "user_reaction": user_reaction,
+        "reactions": (
+            reactions.model_dump()
+            if isinstance(reactions, PostReactionsGrouped)
+            else reactions
+            if reactions is not None
+            else PostReactionsGrouped().model_dump()
+        ),
         "is_moderator_reviewed": post.is_moderator_reviewed,
         "reviewed_at": post.reviewed_at,
         "moderator_id": post.moderator_id,

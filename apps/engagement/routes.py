@@ -156,6 +156,12 @@ async def update_post_bookmark(
     "/posts/{post_id}/postreaction",
     response_model=PostReactionsListResponse,
     status_code=status.HTTP_200_OK,
+    summary="List post reactions",
+    description=(
+        "Return reactors grouped by reaction type with summary counts. "
+        "Optionally filter by reaction_type. "
+        "Supports optional page and pageSize pagination; omit both to return all."
+    ),
     include_in_schema=True,
 )
 async def list_post_reactions(
@@ -169,15 +175,15 @@ async def list_post_reactions(
             f"Allowed values: {', '.join(rt.value for rt in ReactionType)}"
         ),
     ),
-    page: int = Query(default=1, ge=1),
-    limit: int = Query(default=20, ge=1, le=200),
+    page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
+    pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
 ) -> PostReactionsListResponse:
     return await get_post_reactions(
         db,
         post_id,
         reaction_type=reaction_type,
         page=page,
-        limit=limit,
+        page_size=pageSize,
     )
 
 
@@ -189,7 +195,8 @@ async def list_post_reactions(
     description=(
         "Create a top-level comment when parent_comment_id is omitted, "
         "or a nested reply when parent_comment_id is provided. "
-        "Reply responses include parent_comment and the new comment in replies. "
+        "Comment depth is derived server-side from the parent (parent level + 1). "
+        "Returns the created comment. "
         "Nesting depth is capped by DEFAULT_COMMENT_MAX_DEPTH."
     ),
 )

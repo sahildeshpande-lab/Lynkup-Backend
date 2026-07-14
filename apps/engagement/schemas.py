@@ -134,20 +134,31 @@ class ReactionSummaryItem(BaseModel):
     count: int
 
 
-class PostReactorItem(BaseModel):
-    author: EngagementAuthor
+class PostReactorProfile(BaseModel):
+    profile_id: UUID | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    profilePhoto_url: str | None = None
+    bio: str | None = None
     reaction_type: str
     reacted_at: datetime
 
 
+class PostReactionsGrouped(BaseModel):
+    LIKE: list[PostReactorProfile] = Field(default_factory=list)
+    CELEBRATE: list[PostReactorProfile] = Field(default_factory=list)
+    INSIGHTFUL: list[PostReactorProfile] = Field(default_factory=list)
+    SUPPORT: list[PostReactorProfile] = Field(default_factory=list)
+    CURIOUS: list[PostReactorProfile] = Field(default_factory=list)
+
+
 class PostReactionsListData(BaseModel):
-    reactors: list[PostReactorItem]
+    reactions: dict[str, list[PostReactorProfile]]
     summary: list[ReactionSummaryItem]
-    share_count: int = 0
-    total: int
     page: int
-    limit: int
-    pages: int
+    pageSize: int
+    totalItems: int
+    totalPages: int
 
 
 class PostReactionsListResponse(ApiResponse):
@@ -183,11 +194,6 @@ def _parse_reaction_type(value: str | None) -> ReactionType | None:
 class CreateCommentRequest(BaseModel):
     post_id: UUID
     comment_text: str = Field(min_length=1, max_length=5000)
-    level: int = Field(
-        ge=1,
-        le=3,
-        description="Comment depth: 1 for top-level, 2 for reply, 3 for nested reply.",
-    )
     parent_comment_id: UUID | None = Field(
         default=None,
         description="Parent comment ID for replies. Omit for top-level comments.",
@@ -215,13 +221,8 @@ class CommentData(BaseModel):
     replies: list["CommentData"] = Field(default_factory=list)
 
 
-class CommentReplyCreateData(BaseModel):
-    parent_comment: CommentData
-    replies: list[CommentData]
-
-
 class CommentResponse(ApiResponse):
-    data: CommentData | CommentReplyCreateData | None = None
+    data: CommentData | None = None
 
 
 class CommentListData(BaseModel):

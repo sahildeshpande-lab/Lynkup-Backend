@@ -12,11 +12,6 @@ from apps.engagement.services import post_reactions_list_service as svc
 from common.enums import ReactionType
 
 
-@pytest.fixture(autouse=True)
-def _default_share_count(monkeypatch):
-    monkeypatch.setattr(svc, "get_post_share_count", AsyncMock(return_value=0))
-
-
 def _profile(**kwargs):
     defaults = {
         "id": uuid.uuid4(),
@@ -68,23 +63,20 @@ async def test_get_post_reactions_no_reactions(mock_db):
     with (
         patch.object(svc, "post_exists", AsyncMock(return_value=True)),
         patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value={})),
-        patch.object(svc, "get_post_share_count", AsyncMock(return_value=10)),
-        patch.object(svc, "count_post_reactions", AsyncMock(return_value=0)),
         patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=[])),
     ):
         response = await svc.get_post_reactions(db, post_id)
 
     assert response.status is True
     assert response.message == "Reactions fetched successfully"
-    assert response.data.reactors == []
-    assert response.data.share_count == 10
-    assert response.data.total == 0
+    assert response.data.reactions["LIKE"] == []
+    assert response.data.reactions["CELEBRATE"] == []
+    assert response.data.totalItems == 0
     assert response.data.page == 1
-    assert response.data.limit == 20
-    assert response.data.pages == 0
+    assert response.data.pageSize == 0
+    assert response.data.totalPages == 0
 
     summary = {item.reaction_type: item.count for item in response.data.summary}
-    assert summary["ALL"] == 0
     for reaction_type in ReactionType:
         assert summary[reaction_type.value.upper()] == 0
 
@@ -110,25 +102,25 @@ async def test_get_post_reactions_multiple_types_and_summary(mock_db):
     with (
         patch.object(svc, "post_exists", AsyncMock(return_value=True)),
         patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value=summary_counts)),
-        patch.object(svc, "count_post_reactions", AsyncMock(return_value=61)),
         patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=rows)),
         patch("apps.engagement.services.author_service.generate_profile_image_url", return_value="https://cdn.example/photo.jpg"),
     ):
         response = await svc.get_post_reactions(db, post_id)
 
     summary = {item.reaction_type: item.count for item in response.data.summary}
-    assert summary["ALL"] == 61
     assert summary["LIKE"] == 59
     assert summary["CELEBRATE"] == 1
     assert summary["CURIOUS"] == 1
     assert summary["INSIGHTFUL"] == 0
     assert summary["SUPPORT"] == 0
-    assert len(response.data.reactors) == 3
-    assert response.data.reactors[0].reaction_type == "LIKE"
-    assert response.data.reactors[0].author.profile_id == profile.id
-    assert response.data.reactors[0].author.university == "Test University"
-    assert response.data.reactors[0].author.profilePhoto_url == "https://cdn.example/photo.jpg"
-    assert response.data.reactors[0].author.bio == "Student developer"
+    assert len(response.data.reactions["LIKE"]) == 1
+    assert len(response.data.reactions["CELEBRATE"]) == 1
+    assert len(response.data.reactions["CURIOUS"]) == 1
+    assert response.data.reactions["LIKE"][0].reaction_type == "LIKE"
+    assert response.data.reactions["LIKE"][0].profile_id == profile.id
+    assert response.data.reactions["LIKE"][0].profilePhoto_url == "https://cdn.example/photo.jpg"
+    assert response.data.reactions["LIKE"][0].bio == "Student developer"
+    assert response.data.totalItems == 3
 
 
 @pytest.mark.asyncio
@@ -140,7 +132,10 @@ async def test_get_post_reactions_filter_by_reaction_type(mock_db):
 
     with (
         patch.object(svc, "post_exists", AsyncMock(return_value=True)),
-        patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value={ReactionType.like: 5})),
+        patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value={
+            ReactionType.like: 5,
+            ReactionType.celebrate: 2,
+        })),
         patch.object(svc, "count_post_reactions", AsyncMock(return_value=5)) as count_reactions,
         patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=like_rows)) as fetch_reactors,
         patch("apps.engagement.services.author_service.generate_profile_image_url", return_value=None),
@@ -150,7 +145,7 @@ async def test_get_post_reactions_filter_by_reaction_type(mock_db):
             post_id,
             reaction_type=ReactionType.like,
             page=1,
-            limit=20,
+            page_size=20,
         )
 
     count_reactions.assert_awaited_once_with(db, post_id, ReactionType.like)
@@ -161,10 +156,14 @@ async def test_get_post_reactions_filter_by_reaction_type(mock_db):
         offset=0,
         limit=20,
     )
-    assert response.data.total == 5
-    assert all(r.reaction_type == "LIKE" for r in response.data.reactors)
-    assert response.data.summary[0].reaction_type == "ALL"
-    assert response.data.summary[0].count == 5
+    assert response.data.totalItems == 5
+    assert set(response.data.reactions.keys()) == {"LIKE"}
+    assert len(response.data.reactions["LIKE"]) == 1
+    summary = {item.reaction_type: item.count for item in response.data.summary}
+    assert len(summary) == len(ReactionType)
+    assert summary["LIKE"] == 5
+    assert summary["CELEBRATE"] == 2
+    assert summary["INSIGHTFUL"] == 0
 
 
 @pytest.mark.asyncio
@@ -178,7 +177,7 @@ async def test_get_post_reactions_pagination(mock_db):
         patch.object(svc, "count_post_reactions", AsyncMock(return_value=61)),
         patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=[])) as fetch_reactors,
     ):
-        response = await svc.get_post_reactions(db, post_id, page=2, limit=20)
+        response = await svc.get_post_reactions(db, post_id, page=2, page_size=20)
 
     fetch_reactors.assert_awaited_once_with(
         db,
@@ -187,10 +186,34 @@ async def test_get_post_reactions_pagination(mock_db):
         offset=20,
         limit=20,
     )
-    assert response.data.total == 61
+    assert response.data.totalItems == 61
     assert response.data.page == 2
-    assert response.data.limit == 20
-    assert response.data.pages == 4
+    assert response.data.pageSize == 20
+    assert response.data.totalPages == 4
+
+
+@pytest.mark.asyncio
+async def test_get_post_reactions_without_pagination_returns_all(mock_db):
+    post_id = uuid.uuid4()
+    db = mock_db()
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value={})),
+        patch.object(svc, "count_post_reactions", AsyncMock(return_value=0)) as count_reactions,
+        patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=[])) as fetch_reactors,
+    ):
+        response = await svc.get_post_reactions(db, post_id)
+
+    count_reactions.assert_not_called()
+    fetch_reactors.assert_awaited_once_with(
+        db,
+        post_id,
+        reaction_type=None,
+        offset=0,
+        limit=None,
+    )
+    assert response.data.pageSize == 0
 
 
 @pytest.mark.asyncio
@@ -212,14 +235,14 @@ async def test_get_post_reactions_ordering_preserved(mock_db):
     with (
         patch.object(svc, "post_exists", AsyncMock(return_value=True)),
         patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value={})),
-        patch.object(svc, "count_post_reactions", AsyncMock(return_value=3)),
         patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=rows)),
         patch("apps.engagement.services.author_service.generate_profile_image_url", return_value=None),
     ):
         response = await svc.get_post_reactions(db, post_id)
 
-    reacted_at_values = [r.reacted_at for r in response.data.reactors]
-    assert reacted_at_values == [t1, t2, t3]
+    assert response.data.reactions["LIKE"][0].reacted_at == t1
+    assert response.data.reactions["CELEBRATE"][0].reacted_at == t2
+    assert response.data.reactions["SUPPORT"][0].reacted_at == t3
 
 
 def test_parse_reaction_type_filter():

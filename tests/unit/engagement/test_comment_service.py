@@ -59,7 +59,7 @@ async def test_create_top_level_comment(mock_db):
     post_id = uuid.uuid4()
     user_id = uuid.uuid4()
     db = mock_db()
-    payload = CreateCommentRequest(post_id=post_id, comment_text="Great post!", level=1)
+    payload = CreateCommentRequest(post_id=post_id, comment_text="Great post!")
 
     created = _comment(level=1, post_id=post_id, user_id=user_id, comment_text="Great post!")
 
@@ -87,7 +87,7 @@ async def test_create_top_level_comment(mock_db):
 
 
 @pytest.mark.asyncio
-async def test_create_reply_returns_parent_comment_and_replies(mock_db):
+async def test_create_reply_returns_created_comment(mock_db):
     post_id = uuid.uuid4()
     user_id = uuid.uuid4()
     parent = _comment(level=1, post_id=post_id)
@@ -97,7 +97,6 @@ async def test_create_reply_returns_parent_comment_and_replies(mock_db):
         post_id=post_id,
         comment_text="Nice reply",
         parent_comment_id=parent.id,
-        level=2,
     )
     created = _comment(
         level=2,
@@ -110,18 +109,20 @@ async def test_create_reply_returns_parent_comment_and_replies(mock_db):
     with (
         patch.object(svc, "post_exists", AsyncMock(return_value=True)),
         patch.object(svc, "get_comment_by_id", AsyncMock(return_value=parent)),
-        patch.object(svc, "create_comment", AsyncMock(return_value=created)),
+        patch.object(svc, "create_comment", AsyncMock(return_value=created)) as create_fn,
         patch.object(svc, "increment_reply_count", AsyncMock()),
         patch.object(svc, "fetch_profiles_by_user_ids", AsyncMock(return_value={})),
         patch.object(svc, "fetch_user_comment_reactions", AsyncMock(return_value={})),
     ):
         response = await svc.create_post_comment(db, user_id, payload)
 
+    assert create_fn.await_args.kwargs["level"] == 2
     assert response.status is True
-    assert response.data.parent_comment.id == parent.id
-    assert len(response.data.replies) == 1
-    assert response.data.replies[0].comment_text == "Nice reply"
-    assert response.data.replies[0].level == 2
+    assert response.data.id == created.id
+    assert response.data.parent_comment_id == parent.id
+    assert response.data.comment_text == "Nice reply"
+    assert response.data.level == 2
+    assert response.data.replies == []
 
 
 @pytest.mark.asyncio
@@ -134,7 +135,6 @@ async def test_create_reply_increments_parent_reply_count(mock_db):
         post_id=post_id,
         comment_text="Nice reply",
         parent_comment_id=parent.id,
-        level=2,
     )
     created = _comment(
         level=2,
@@ -155,7 +155,8 @@ async def test_create_reply_increments_parent_reply_count(mock_db):
         response = await svc.create_post_comment(db, user_id, payload)
 
     increment_reply.assert_awaited_once_with(db, parent.id)
-    assert response.data.replies[0].level == 2
+    assert response.data.level == 2
+    assert response.data.replies == []
 
 
 @pytest.mark.asyncio
@@ -168,7 +169,6 @@ async def test_create_reply_rejected_when_parent_level_is_max(mock_db):
         post_id=post_id,
         comment_text="Too deep",
         parent_comment_id=parent.id,
-        level=3,
     )
 
     with (
@@ -183,30 +183,6 @@ async def test_create_reply_rejected_when_parent_level_is_max(mock_db):
 
 
 @pytest.mark.asyncio
-async def test_create_comment_rejects_invalid_level(mock_db):
-    post_id = uuid.uuid4()
-    user_id = uuid.uuid4()
-    parent = _comment(level=1, post_id=post_id)
-    db = mock_db()
-    payload = CreateCommentRequest(
-        post_id=post_id,
-        comment_text="Wrong level",
-        parent_comment_id=parent.id,
-        level=3,
-    )
-
-    with (
-        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
-        patch.object(svc, "get_comment_by_id", AsyncMock(return_value=parent)),
-    ):
-        response = await svc.create_post_comment(db, user_id, payload)
-
-    assert response.status is False
-    assert response.message == "Invalid level. Expected 2 for this parent comment."
-    assert response.data is None
-
-
-@pytest.mark.asyncio
 async def test_create_comment_post_not_found(mock_db):
     db = mock_db()
     with patch.object(svc, "post_exists", AsyncMock(return_value=False)):
@@ -214,7 +190,7 @@ async def test_create_comment_post_not_found(mock_db):
             await svc.create_post_comment(
                 db,
                 uuid.uuid4(),
-                CreateCommentRequest(post_id=uuid.uuid4(), comment_text="Hi", level=1),
+                CreateCommentRequest(post_id=uuid.uuid4(), comment_text="Hi"),
             )
     assert exc.value.status_code == 404
 

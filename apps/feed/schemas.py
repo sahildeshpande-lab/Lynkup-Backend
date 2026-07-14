@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from common.enums import MediaType
+from apps.engagement.schemas import PostReactionsGrouped
 
 
 from common.schemas import ApiResponse
@@ -120,4 +121,5 @@ class PostDetailData(BaseModel):
     is_reposted: bool = False
     is_bookmarked: bool = False
     user_reaction: str | None = None
+    reactions: PostReactionsGrouped = Field(default_factory=PostReactionsGrouped)
     media: List[PostMediaData] = Field(default_factory=list)

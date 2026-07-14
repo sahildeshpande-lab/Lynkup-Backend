@@ -30,7 +30,6 @@ from apps.engagement.schemas import (
     CommentData,
     CommentListData,
     CommentListResponse,
-    CommentReplyCreateData,
     CommentResponse,
     CreateCommentRequest,
     DeleteCommentRequest,
@@ -137,11 +136,6 @@ async def create_post_comment(
     parent: Comment | None = None
 
     if payload.parent_comment_id is None:
-        if payload.level != 1:
-            return error_response(
-                "Top-level comments must have level 1",
-                response_cls=CommentResponse,
-            )
         level = 1
     else:
         parent = await get_comment_by_id(db, payload.parent_comment_id)
@@ -157,13 +151,7 @@ async def create_post_comment(
                 f"Maximum nesting depth of {settings.comment_max_depth} exceeded",
                 response_cls=CommentResponse,
             )
-        expected_level = parent.level + 1
-        if payload.level != expected_level:
-            return error_response(
-                f"Invalid level. Expected {expected_level} for this parent comment.",
-                response_cls=CommentResponse,
-            )
-        level = payload.level
+        level = parent.level + 1
 
     try:
         comment = await create_comment(
@@ -194,25 +182,6 @@ async def create_post_comment(
         author=_format_author(profile, university),
         user_reaction=None,
     )
-
-    if parent is not None:
-        await db.refresh(parent)
-        parent_profiles = await fetch_profiles_by_user_ids(db, [parent.user_id])
-        parent_profile, parent_university = parent_profiles.get(parent.user_id, (None, None))
-        parent_reactions = await fetch_user_comment_reactions(db, user_id, [parent.id])
-        parent_comment = _format_comment(
-            parent,
-            author=_format_author(parent_profile, parent_university),
-            user_reaction=format_user_reaction(parent_reactions.get(parent.id)),
-        )
-        return success_response(
-            "Comment created successfully",
-            CommentReplyCreateData(
-                parent_comment=parent_comment,
-                replies=[new_comment],
-            ),
-            response_cls=CommentResponse,
-        )
 
     return success_response(
         "Comment created successfully",
