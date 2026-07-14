@@ -22,6 +22,7 @@ def build_router() -> APIRouter:
     router.include_router(search_router)
     router.include_router(uploads_router)
     router.include_router(connections_router)
-    router.include_router(feed_router)
     router.include_router(engagement_router)
+    router.include_router(feed_router)
+    
     return router
