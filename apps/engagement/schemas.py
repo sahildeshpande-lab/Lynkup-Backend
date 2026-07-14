@@ -101,12 +101,7 @@ class BookmarkListResponse(ApiResponse):
     data: BookmarkListData | None = None
 
 
-class ReactionSummaryItem(BaseModel):
-    reaction_type: str
-    count: int
-
-
-class PostReactorItem(BaseModel):
+class CommentAuthor(BaseModel):
     profile_id: UUID | None = None
     first_name: str | None = None
     last_name: str | None = None
@@ -115,6 +110,20 @@ class PostReactorItem(BaseModel):
     major: str | None = None
     minor: str | None = None
     edu_level: str | None = None
+    bio: str | None = None
+
+
+class EngagementAuthor(CommentAuthor):
+    """Shared author profile shape for comments and post reactions."""
+
+
+class ReactionSummaryItem(BaseModel):
+    reaction_type: str
+    count: int
+
+
+class PostReactorItem(BaseModel):
+    author: EngagementAuthor
     reaction_type: str
     reacted_at: datetime
 
@@ -176,17 +185,6 @@ class CreateCommentRequest(BaseModel):
 class DeleteCommentRequest(BaseModel):
     post_id: UUID
     comment_id: UUID
-
-
-class CommentAuthor(BaseModel):
-    profile_id: UUID | None = None
-    first_name: str | None = None
-    last_name: str | None = None
-    university: str | None = None
-    profilePhoto_url: str | None = None
-    major: str | None = None
-    minor: str | None = None
-    edu_level: str | None = None
 
 
 class CommentData(BaseModel):

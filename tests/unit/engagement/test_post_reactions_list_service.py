@@ -26,6 +26,7 @@ def _profile(**kwargs):
         "minor": "",
         "edu_level": "Bachelors",
         "profile_photo_url": "photo.jpg",
+        "bio": "Student developer",
     }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -111,7 +112,7 @@ async def test_get_post_reactions_multiple_types_and_summary(mock_db):
         patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value=summary_counts)),
         patch.object(svc, "count_post_reactions", AsyncMock(return_value=61)),
         patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=rows)),
-        patch.object(svc, "generate_profile_image_url", return_value="https://cdn.example/photo.jpg"),
+        patch("apps.engagement.services.author_service.generate_profile_image_url", return_value="https://cdn.example/photo.jpg"),
     ):
         response = await svc.get_post_reactions(db, post_id)
 
@@ -124,9 +125,10 @@ async def test_get_post_reactions_multiple_types_and_summary(mock_db):
     assert summary["SUPPORT"] == 0
     assert len(response.data.reactors) == 3
     assert response.data.reactors[0].reaction_type == "LIKE"
-    assert response.data.reactors[0].profile_id == profile.id
-    assert response.data.reactors[0].university == "Test University"
-    assert response.data.reactors[0].profilePhoto_url == "https://cdn.example/photo.jpg"
+    assert response.data.reactors[0].author.profile_id == profile.id
+    assert response.data.reactors[0].author.university == "Test University"
+    assert response.data.reactors[0].author.profilePhoto_url == "https://cdn.example/photo.jpg"
+    assert response.data.reactors[0].author.bio == "Student developer"
 
 
 @pytest.mark.asyncio
@@ -141,7 +143,7 @@ async def test_get_post_reactions_filter_by_reaction_type(mock_db):
         patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value={ReactionType.like: 5})),
         patch.object(svc, "count_post_reactions", AsyncMock(return_value=5)) as count_reactions,
         patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=like_rows)) as fetch_reactors,
-        patch.object(svc, "generate_profile_image_url", return_value=None),
+        patch("apps.engagement.services.author_service.generate_profile_image_url", return_value=None),
     ):
         response = await svc.get_post_reactions(
             db,
@@ -212,7 +214,7 @@ async def test_get_post_reactions_ordering_preserved(mock_db):
         patch.object(svc, "fetch_reaction_summary_counts", AsyncMock(return_value={})),
         patch.object(svc, "count_post_reactions", AsyncMock(return_value=3)),
         patch.object(svc, "fetch_post_reactors", AsyncMock(return_value=rows)),
-        patch.object(svc, "generate_profile_image_url", return_value=None),
+        patch("apps.engagement.services.author_service.generate_profile_image_url", return_value=None),
     ):
         response = await svc.get_post_reactions(db, post_id)
 

@@ -50,6 +50,7 @@ def _profile():
         minor="",
         edu_level="Bachelors",
         profile_photo_url=None,
+        bio="Campus ambassador",
     )
 
 
@@ -236,7 +237,6 @@ async def test_get_post_comments_nested_structure(mock_db):
         patch.object(svc, "fetch_comments_by_parent_ids", AsyncMock(return_value=[reply])),
         patch.object(svc, "fetch_profiles_by_user_ids", AsyncMock(return_value={top.user_id: (profile, None), reply.user_id: (profile, None)})),
         patch.object(svc, "fetch_user_comment_reactions", AsyncMock(return_value={})),
-        patch.object(svc, "generate_profile_image_url", return_value=None),
     ):
         response = await svc.get_post_comments(db, user_id, post_id)
 
@@ -245,6 +245,7 @@ async def test_get_post_comments_nested_structure(mock_db):
     assert response.data.comments[0].level == 1
     assert response.data.comments[0].replies[0].comment_text == "Reply"
     assert response.data.comments[0].replies[0].level == 2
+    assert response.data.comments[0].author.bio == "Campus ambassador"
 
 
 @pytest.mark.asyncio

@@ -19,13 +19,11 @@ from apps.engagement.schemas import (
     PostReactorItem,
     ReactionSummaryItem,
 )
+from apps.engagement.services.author_service import format_engagement_author
 from apps.engagement.services.reaction_service import format_user_reaction
-from apps.profiles.db_models import Profile
-from apps.profiles.db_models.university_db_model import University
 from apps.engagement.db_models import PostReaction
 from common.enums import ReactionType
 from common.responses import success_response
-from core.images import generate_profile_image_url
 
 
 def _build_summary(counts: dict[ReactionType, int]) -> list[ReactionSummaryItem]:
@@ -43,22 +41,11 @@ def _build_summary(counts: dict[ReactionType, int]) -> list[ReactionSummaryItem]
 
 def _format_reactor(
     reaction: PostReaction,
-    profile: Profile | None,
-    university: University | None,
+    profile,
+    university,
 ) -> PostReactorItem:
     return PostReactorItem(
-        profile_id=profile.id if profile else None,
-        first_name=profile.first_name if profile else None,
-        last_name=profile.last_name if profile else None,
-        university=university.name if university else None,
-        profilePhoto_url=(
-            generate_profile_image_url(profile.profile_photo_url)
-            if profile and profile.profile_photo_url
-            else None
-        ),
-        major=profile.major if profile else None,
-        minor=profile.minor if profile else None,
-        edu_level=profile.edu_level if profile else None,
+        author=format_engagement_author(profile, university),
         reaction_type=format_user_reaction(reaction.reaction_type),
         reacted_at=reaction.created_at,
     )

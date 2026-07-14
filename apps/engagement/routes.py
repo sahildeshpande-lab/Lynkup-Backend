@@ -125,15 +125,12 @@ async def update_post_bookmark(
     return await update_bookmark(db, current_user.id, payload)
 
 
+
 @router.get(
-    "/posts/{post_id}/reactions",
+    "/posts/{post_id}/postreaction",
     response_model=PostReactionsListResponse,
     status_code=status.HTTP_200_OK,
-    summary="List post reactions",
-    description=(
-        "Return reaction summary counts by type and a paginated list of users who reacted. "
-        "Use reaction_type to filter reactors while summary still includes all tab counts."
-    ),
+    include_in_schema=True,
 )
 async def list_post_reactions(
     post_id: UUID,
