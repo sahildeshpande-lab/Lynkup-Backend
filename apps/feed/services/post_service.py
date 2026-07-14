@@ -1032,6 +1032,10 @@ def _format_reviewed_post_item(post: Post, profile, moderator_user=None, moderat
         "is_moderator_reviewed": post.is_moderator_reviewed,
         "reviewed_at": post.reviewed_at,
         "created_at": post.created_at,
+        "like_count": getattr(post, "like_count", 0) or 0,
+        "repost_count": getattr(post, "repost_count", 0) or 0,
+        "share_count": getattr(post, "share_count", 0) or 0,
+        "comment_count": getattr(post, "comment_count", 0) or 0,
         "moderator_id": post.moderator_id,
         "moderator_name": _resolve_moderator_name(moderator_user, moderator_profile),
         "profile_photo_url": (

@@ -42,7 +42,7 @@ from apps.engagement.services import (
 )
 from common.enums import ReactionType
 from core.database.session import get_session
-from core.security.auth import get_current_app_user
+from core.security.auth import get_current_app_user, get_current_user
 
 router = APIRouter(tags=["7] Post Engagement"])
 
@@ -159,6 +159,7 @@ async def update_post_bookmark(
     summary="List post reactions",
     description=(
         "Return reactors grouped by reaction type with summary counts. "
+        "Accessible to app users, moderators, viewers, and superadmins. "
         "Optionally filter by reaction_type. "
         "Supports optional page and pageSize pagination; omit both to return all."
     ),
@@ -166,7 +167,7 @@ async def update_post_bookmark(
 )
 async def list_post_reactions(
     post_id: UUID,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
     reaction_type: ReactionType | None = Query(
         default=None,
@@ -178,6 +179,7 @@ async def list_post_reactions(
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
 ) -> PostReactionsListResponse:
+    _ = current_user
     return await get_post_reactions(
         db,
         post_id,
@@ -213,11 +215,14 @@ async def create_comment_route(
     response_model=CommentListResponse,
     status_code=status.HTTP_200_OK,
     summary="List post comments",
-    description="Return paginated top-level comments with nested replies up to the configured max depth.",
+    description=(
+        "Return paginated top-level comments with nested replies up to the configured max depth. "
+        "Accessible to app users, moderators, viewers, and superadmins."
+    ),
 )
 async def list_post_comments(
     post_id: UUID,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=200),
