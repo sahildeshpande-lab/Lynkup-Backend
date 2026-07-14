@@ -16,6 +16,7 @@ from apps.engagement.schemas import (
     CommentReactionResponse,
     CreateCommentRequest,
     DeleteCommentRequest,
+    LikedPostsListResponse,
     PostReactionResponse,
     PostReactionsListResponse,
     REACTION_TYPE_DESCRIPTION,
@@ -32,6 +33,7 @@ from apps.engagement.services import (
     get_post_comments,
     get_post_reactions,
     list_bookmarked_posts,
+    list_liked_posts,
     repost_post,
     share_post,
     update_bookmark,
@@ -89,6 +91,30 @@ async def share_post_route(
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> ShareResponse:
     return await share_post(db, current_user.id, payload.post_id)
+
+
+@router.get(
+    "/posts/liked",
+    response_model=LikedPostsListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List liked posts",
+    description=(
+        "Return posts the authenticated user has reacted to. "
+        "Supports optional page and pageSize pagination; omit both to return all."
+    ),
+)
+async def list_liked_posts_route(
+    current_user: Annotated[User, Depends(get_current_app_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
+    pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
+) -> LikedPostsListResponse:
+    return await list_liked_posts(
+        db,
+        current_user.id,
+        page=page,
+        page_size=pageSize,
+    )
 
 
 @router.get(

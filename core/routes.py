@@ -22,7 +22,8 @@ def build_router() -> APIRouter:
     router.include_router(search_router)
     router.include_router(uploads_router)
     router.include_router(connections_router)
+    # Engagement must be registered before feed so static paths like /posts/bookmark
+    # are not captured by feed's /posts/{id} route.
     router.include_router(engagement_router)
     router.include_router(feed_router)
-    
     return router

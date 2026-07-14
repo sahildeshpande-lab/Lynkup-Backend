@@ -101,6 +101,18 @@ class BookmarkListResponse(ApiResponse):
     data: BookmarkListData | None = None
 
 
+class LikedPostsListData(BaseModel):
+    items: list[dict]
+    page: int
+    pageSize: int
+    totalItems: int
+    totalPages: int
+
+
+class LikedPostsListResponse(ApiResponse):
+    data: LikedPostsListData | None = None
+
+
 class CommentAuthor(BaseModel):
     profile_id: UUID | None = None
     first_name: str | None = None
