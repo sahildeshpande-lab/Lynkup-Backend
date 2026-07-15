@@ -30,6 +30,7 @@ async def test_list_liked_posts_with_pagination(mock_db):
         patch.object(svc, "count_user_liked_posts", AsyncMock(return_value=3)),
         patch.object(svc, "fetch_user_liked_posts", AsyncMock(return_value=rows)) as fetch_rows,
         patch.object(svc, "fetch_post_engagement_flags", AsyncMock()) as fetch_flags,
+        patch.object(svc, "load_latest_post_reactions", AsyncMock(return_value={})),
         patch.object(svc, "format_post_detail", return_value={"id": rows[0][0].id, "is_liked": True}) as format_post,
         patch.object(svc, "format_user_reaction", return_value="LIKE"),
     ):
@@ -57,6 +58,7 @@ async def test_list_liked_posts_without_pagination_returns_all(mock_db):
         patch.object(svc, "count_user_liked_posts", AsyncMock(return_value=3)) as count_liked,
         patch.object(svc, "fetch_user_liked_posts", AsyncMock(return_value=[])) as fetch_rows,
         patch.object(svc, "fetch_post_engagement_flags", AsyncMock()),
+        patch.object(svc, "load_latest_post_reactions", AsyncMock(return_value={})),
     ):
         response = await svc.list_liked_posts(db, user_id)
 

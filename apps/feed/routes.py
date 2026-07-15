@@ -216,8 +216,7 @@ async def get_feed(
         include_total=True,
     )
     from apps.engagement.repositories import fetch_post_engagement_flags
-    from apps.engagement.repositories.post_reaction_list_repository import fetch_latest_reactors_for_posts
-    from apps.engagement.services.post_reaction_formatters import build_post_reactions_from_rows
+    from apps.engagement.services.post_reaction_formatters import load_latest_post_reactions
     from apps.engagement.services.reaction_service import format_user_reaction
 
     post_ids = [post.id for post in posts]
@@ -226,11 +225,7 @@ async def get_feed(
         current_user.id,
         post_ids,
     )
-    latest_reactions_by_post = await fetch_latest_reactors_for_posts(
-        db,
-        post_ids,
-        per_type_limit=3,
-    )
+    latest_reactions = await load_latest_post_reactions(db, post_ids, per_type_limit=3)
     formatted_posts = [
         format_post_detail(
             post,
@@ -239,9 +234,7 @@ async def get_feed(
             is_reposted=post.id in engagement_flags.reposted_post_ids,
             is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
             user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
-            reactions=build_post_reactions_from_rows(
-                latest_reactions_by_post.get(post.id, []),
-            ),
+            reactions=latest_reactions.get(post.id),
         )
         for post in posts
     ]

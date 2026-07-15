@@ -94,10 +94,17 @@ async def count_posts_by_state(
     user_id: UUID | None = None,
 ) -> int:
     """Count posts filtered by state and optional author."""
-    filters = [Post.state == state]
+    from common.user_visibility import visible_user_filters
+
+    filters = [Post.state == state, *visible_user_filters(User)]
     if user_id is not None:
         filters.append(Post.author_user_id == user_id)
-    stmt = select(func.count(Post.id)).where(*filters)
+    stmt = (
+        select(func.count(Post.id))
+        .select_from(Post)
+        .join(User, User.id == Post.author_user_id)
+        .where(*filters)
+    )
     return int((await db.execute(stmt)).scalar_one())
 
 
@@ -110,12 +117,15 @@ async def fetch_posts_by_state(
     limit: int | None = None,
 ) -> list[Post]:
     """Fetch posts filtered by state and optional author, newest first."""
-    filters = [Post.state == state]
+    from common.user_visibility import visible_user_filters
+
+    filters = [Post.state == state, *visible_user_filters(User)]
     if user_id is not None:
         filters.append(Post.author_user_id == user_id)
 
     stmt = (
         select(Post)
+        .join(User, User.id == Post.author_user_id)
         .where(*filters)
         .order_by(Post.created_at.desc())
         .offset(offset)
@@ -140,17 +150,20 @@ async def fetch_posts_by_state_with_details(
 
     from apps.feed.db_models import PostAttachment
     from apps.profiles.db_models import Profile
+    from common.user_visibility import visible_user_filters
 
     AuthorProfile = aliased(Profile, name="author_profile")
+    AuthorUser = aliased(User, name="author_user")
     ModeratorUser = aliased(User, name="moderator_user")
     ModeratorProfile = aliased(Profile, name="moderator_profile")
 
-    filters = [Post.state == state]
+    filters = [Post.state == state, *visible_user_filters(AuthorUser)]
     if user_id is not None:
         filters.append(Post.author_user_id == user_id)
 
     stmt = (
         select(Post, AuthorProfile, ModeratorUser, ModeratorProfile)
+        .join(AuthorUser, AuthorUser.id == Post.author_user_id)
         .outerjoin(AuthorProfile, AuthorProfile.user_id == Post.author_user_id)
         .outerjoin(ModeratorUser, ModeratorUser.id == Post.moderator_id)
         .outerjoin(ModeratorProfile, ModeratorProfile.user_id == Post.moderator_id)

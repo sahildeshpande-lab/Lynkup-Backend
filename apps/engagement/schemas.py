@@ -216,6 +216,7 @@ class CommentData(BaseModel):
     comment_text: str
     author: CommentAuthor
     user_reaction: str | None = None
+    can_delete_comment: bool = False
     created_at: datetime
     updated_at: datetime
     replies: list["CommentData"] = Field(default_factory=list)
@@ -227,10 +228,10 @@ class CommentResponse(ApiResponse):
 
 class CommentListData(BaseModel):
     comments: list[CommentData]
-    total: int
     page: int
-    limit: int
-    pages: int
+    pageSize: int
+    totalItems: int
+    totalPages: int
 
 
 class CommentListResponse(ApiResponse):

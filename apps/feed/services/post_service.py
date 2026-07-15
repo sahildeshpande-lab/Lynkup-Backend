@@ -708,10 +708,24 @@ async def get_post_service(
     Retrieve details of a specific post.
     Validates visibility access permissions.
     """
-    result = await db.execute(select(Post).where(Post.id == post_id))
-    post = result.scalar_one_or_none()
+    from common.user_visibility import is_hidden_account_status
 
-    if not post:
+    result = await db.execute(
+        select(Post, User)
+        .join(User, User.id == Post.author_user_id)
+        .where(Post.id == post_id)
+    )
+    row = result.one_or_none()
+    if not row:
+        raise ApiError("Post not found")
+    post, author = row
+
+    # Hide posts from suspended/banned/deleting authors for other viewers.
+    if post.author_user_id != user_id and is_hidden_account_status(author.status):
+        raise ApiError("Post not found")
+    if post.author_user_id != user_id and (
+        author.is_deleted or author.deleted_at is not None
+    ):
         raise ApiError("Post not found")
 
     if post.state == PostState.deleted:
@@ -979,13 +993,15 @@ async def list_user_posts_items_service(
     )
     post_ids = [post.id for post, *_ in rows]
     from apps.engagement.repositories import fetch_post_engagement_flags
+    from apps.engagement.services.post_reaction_formatters import load_latest_post_reactions
+    from apps.engagement.services.reaction_service import format_user_reaction
 
     engagement_flags = await fetch_post_engagement_flags(
         db,
         current_user.id,
         post_ids,
     )
-    from apps.engagement.services.reaction_service import format_user_reaction
+    latest_reactions = await load_latest_post_reactions(db, post_ids, per_type_limit=3)
 
     items = [
         format_post_detail(
@@ -997,6 +1013,7 @@ async def list_user_posts_items_service(
             is_reposted=post.id in engagement_flags.reposted_post_ids,
             is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
             user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
+            reactions=latest_reactions.get(post.id),
         )
         for post, author_profile, mod_user, mod_profile in rows
     ]
@@ -1020,7 +1037,14 @@ def _format_reviewed_post_media(post: Post) -> list[dict]:
     return media_data
 
 
-def _format_reviewed_post_item(post: Post, profile, moderator_user=None, moderator_profile=None) -> dict:
+def _format_reviewed_post_item(
+    post: Post,
+    profile,
+    moderator_user=None,
+    moderator_profile=None,
+    *,
+    reactions=None,
+) -> dict:
     content = post.content or {}
 
     return {
@@ -1046,6 +1070,13 @@ def _format_reviewed_post_item(post: Post, profile, moderator_user=None, moderat
         "first_name": profile.first_name if profile else None,
         "last_name": profile.last_name if profile else None,
         "media": _format_reviewed_post_media(post),
+        "reactions": (
+            reactions.model_dump()
+            if isinstance(reactions, PostReactionsGrouped)
+            else reactions
+            if reactions is not None
+            else PostReactionsGrouped().model_dump()
+        ),
     }
 
 
@@ -1160,8 +1191,18 @@ async def list_reviewed_posts_by_state_service(
         offset=offset,
         limit=limit,
     )
+    from apps.engagement.services.post_reaction_formatters import load_latest_post_reactions
+
+    post_ids = [post.id for post, *_ in posts]
+    latest_reactions = await load_latest_post_reactions(db, post_ids, per_type_limit=3)
     formatted = [
-        _format_reviewed_post_item(post, profile, mod_user, mod_profile)
+        _format_reviewed_post_item(
+            post,
+            profile,
+            mod_user,
+            mod_profile,
+            reactions=latest_reactions.get(post.id),
+        )
         for post, profile, mod_user, mod_profile in posts
     ]
     return build_paginated_response(formatted, p, ps, total_items).model_dump()

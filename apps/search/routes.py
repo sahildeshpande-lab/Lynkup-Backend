@@ -41,14 +41,15 @@ async def universities(
 @router.get("/academicsinfo", response_model=ApiResponse)
 async def list_academics_info(
     query: Optional[str] = Query(None, description="Search academic interests by name"),
-    pagination: PaginationParams = Depends(),
+    page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
+    pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
     db: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user_or_superadmin),
 ) -> ApiResponse:
     data = await services.get_academics_info(
         query=query,
-        page=pagination.page,
-        page_size=pagination.pageSize,
+        page=page,
+        page_size=pageSize,
         db=db,
     )
     return ApiResponse(message="Academics info fetched successfully", data=data)
@@ -73,19 +74,33 @@ async def searchuser(
 
 
 @router.get("/search/posts", response_model=PostSearchResponse)
+@router.get("/search/post", response_model=PostSearchResponse, include_in_schema=False)
 async def search_posts(
     db: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user_or_superadmin),
     query: str | None = Query(default=None, description="Search post caption and content"),
-    hashtag: str | None = Query(default=None, description="Filter by hashtag"),
+    hashtag: str | None = Query(
+        default=None,
+        description="Filter by hashtag tag or hashtag id from /academicsinfo",
+    ),
     academic_interest: str | None = Query(
         default=None,
-        description="Filter by author academic interest name (partial match)",
+        description="Filter by author academic interest name or id from /academicsinfo",
     ),
-    university_name: str | None = Query(default=None, description="Filter by author university name"),
+    university_name: str | None = Query(
+        default=None,
+        description="Filter by author university name or university id",
+    ),
     major: str | None = Query(default=None, description="Filter by author major"),
     minor: str | None = Query(default=None, description="Filter by author minor"),
-    country: str | None = Query(default=None, description="Filter by author country name"),
+    country: str | None = Query(
+        default=None,
+        description="Filter by author country name, iso_code, or country id from /academicsinfo",
+    ),
+    edu_level: str | None = Query(
+        default=None,
+        description="Filter by author education level name or id from /academicsinfo",
+    ),
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
 ) -> PostSearchResponse:
@@ -99,6 +114,7 @@ async def search_posts(
         major=major,
         minor=minor,
         country=country,
+        edu_level=edu_level,
         page=page,
         page_size=pageSize,
     )

@@ -73,10 +73,22 @@ async def test_search_universities_and_academic_interests(mock_db, scalar_result
     interests = await get_academic_interests("a", 1, 10, db)
     assert interests["items"] == [{"id": "1", "name": "AI"}]
 
-    db = mock_db(scalar_result(0), scalar_result(values=[]))
+    # interests + countries + hashtags each need count + rows
+    db = mock_db(
+        scalar_result(0),
+        scalar_result(values=[]),
+        scalar_result(0),
+        scalar_result(values=[]),
+        scalar_result(0),
+        scalar_result(values=[]),
+    )
     info = await get_academics_info(None, 1, 10, db)
     assert info["educationLevels"][0] == {"id": "1", "name": "Bachelors"}
     assert info["interests"]["items"] == []
+    assert info["countries"]["items"] == []
+    assert info["countries"]["totalItems"] == 0
+    assert info["hashtags"]["items"] == []
+    assert info["hashtags"]["totalItems"] == 0
 
 
 @pytest.mark.asyncio

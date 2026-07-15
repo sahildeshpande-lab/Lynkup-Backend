@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from apps.engagement.db_models import PostReaction
 from apps.engagement.schemas import PostReactionsGrouped, PostReactorProfile
 from apps.engagement.services.author_service import format_engagement_author
@@ -45,6 +49,28 @@ def build_post_reactions_from_rows(
         for reaction, profile, university in rows
     ]
     return group_post_reactor_profiles(reactors)
+
+
+async def load_latest_post_reactions(
+    db: AsyncSession,
+    post_ids: list[UUID],
+    *,
+    per_type_limit: int = 3,
+) -> dict[UUID, PostReactionsGrouped]:
+    """Batch-load the latest N reactors per reaction type for each post."""
+    from apps.engagement.repositories.post_reaction_list_repository import (
+        fetch_latest_reactors_for_posts,
+    )
+
+    rows_by_post = await fetch_latest_reactors_for_posts(
+        db,
+        post_ids,
+        per_type_limit=per_type_limit,
+    )
+    return {
+        post_id: build_post_reactions_from_rows(rows_by_post.get(post_id, []))
+        for post_id in post_ids
+    }
 
 
 def build_post_reactions_response(

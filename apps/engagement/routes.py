@@ -216,7 +216,8 @@ async def create_comment_route(
     status_code=status.HTTP_200_OK,
     summary="List post comments",
     description=(
-        "Return paginated top-level comments with nested replies up to the configured max depth. "
+        "Return top-level comments with nested replies up to the configured max depth. "
+        "Supports optional page and pageSize pagination; omit both to return all. "
         "Accessible to app users, moderators, viewers, and superadmins."
     ),
 )
@@ -224,10 +225,16 @@ async def list_post_comments(
     post_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
-    page: int = Query(default=1, ge=1),
-    limit: int = Query(default=20, ge=1, le=200),
+    page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
+    pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
 ) -> CommentListResponse:
-    return await get_post_comments(db, current_user.id, post_id, page=page, limit=limit)
+    return await get_post_comments(
+        db,
+        current_user.id,
+        post_id,
+        page=page,
+        page_size=pageSize,
+    )
 
 
 @router.delete(
@@ -235,7 +242,10 @@ async def list_post_comments(
     response_model=CommentResponse,
     status_code=status.HTTP_200_OK,
     summary="Soft delete a comment",
-    description="Marks the comment as deleted while preserving its original text. Replies remain attached.",
+    description=(
+        "Marks the comment as deleted while preserving its original text. "
+        "Only the comment author can delete. Replies remain attached."
+    ),
 )
 async def delete_comment_route(
     payload: DeleteCommentRequest,

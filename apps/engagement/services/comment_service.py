@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from math import ceil
 from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from common.pagination import build_paginated_response
 
 from apps.engagement.config import settings
 from apps.engagement.db_models import Comment
@@ -53,6 +54,7 @@ def _format_comment(
     *,
     author: CommentAuthor,
     user_reaction: str | None,
+    current_user_id: UUID,
     replies: list[CommentData] | None = None,
 ) -> CommentData:
     return CommentData(
@@ -66,6 +68,7 @@ def _format_comment(
         comment_text=comment.comment_text,
         author=author,
         user_reaction=user_reaction,
+        can_delete_comment=comment.user_id == current_user_id,
         created_at=comment.created_at,
         updated_at=comment.updated_at,
         replies=replies or [],
@@ -96,6 +99,7 @@ def _build_reply_tree(
     descendants: list[Comment],
     profiles_by_user: dict[UUID, tuple[Profile | None, University | None]],
     reactions_by_comment: dict[UUID, str | None],
+    current_user_id: UUID,
 ) -> list[CommentData]:
     by_parent: dict[UUID, list[Comment]] = defaultdict(list)
     for comment in descendants:
@@ -108,6 +112,7 @@ def _build_reply_tree(
             comment,
             author=_format_author(profile, university),
             user_reaction=reactions_by_comment.get(comment.id),
+            current_user_id=current_user_id,
             replies=[
                 build_level(child)
                 for child in sorted(by_parent.get(comment.id, []), key=lambda item: item.created_at)
@@ -181,6 +186,7 @@ async def create_post_comment(
         comment,
         author=_format_author(profile, university),
         user_reaction=None,
+        current_user_id=user_id,
     )
 
     return success_response(
@@ -195,15 +201,27 @@ async def get_post_comments(
     user_id: UUID,
     post_id: UUID,
     *,
-    page: int = 1,
-    limit: int = 20,
+    page: int | None = None,
+    page_size: int | None = None,
 ) -> CommentListResponse:
     if not await post_exists(db, post_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
 
     total = await count_top_level_comments(db, post_id)
-    offset = (page - 1) * limit
-    top_level_rows = await fetch_top_level_comments(db, post_id, offset=offset, limit=limit)
+    if page is not None and page_size is not None:
+        offset = (page - 1) * page_size
+        limit = page_size
+        resolved_page = page
+        resolved_page_size = page_size
+    else:
+        offset = 0
+        limit = None
+        resolved_page = 1
+        resolved_page_size = total if total > 0 else 1
+
+    top_level_rows = await fetch_top_level_comments(
+        db, post_id, offset=offset, limit=limit
+    )
     root_ids = [comment.id for comment, _, _ in top_level_rows]
 
     descendants = await _fetch_all_descendants(db, root_ids)
@@ -225,24 +243,31 @@ async def get_post_comments(
                 comment,
                 author=_format_author(profile, university),
                 user_reaction=reactions_by_comment.get(comment.id),
+                current_user_id=user_id,
                 replies=_build_reply_tree(
                     comment.id,
                     descendants,
                     profiles_by_user,
                     reactions_by_comment,
+                    user_id,
                 ),
             )
         )
 
-    pages = ceil(total / limit) if total else 0
+    paginated = build_paginated_response(
+        comments,
+        resolved_page,
+        resolved_page_size,
+        total,
+    )
     return success_response(
         "Comments fetched successfully",
         CommentListData(
-            comments=comments,
-            total=total,
-            page=page,
-            limit=limit,
-            pages=pages,
+            comments=list(paginated.items),
+            page=paginated.page,
+            pageSize=paginated.pageSize,
+            totalItems=paginated.totalItems,
+            totalPages=paginated.totalPages,
         ),
         response_cls=CommentListResponse,
     )
@@ -262,7 +287,10 @@ async def delete_comment(
             detail="Comment does not belong to this post",
         )
     if comment.user_id != user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to delete this comment")
+        return error_response(
+            "Not the authenticated user",
+            response_cls=CommentResponse,
+        )
     if comment.is_deleted:
         profiles = await fetch_profiles_by_user_ids(db, [comment.user_id])
         profile, university = profiles.get(comment.user_id, (None, None))
@@ -272,6 +300,7 @@ async def delete_comment(
                 comment,
                 author=_format_author(profile, university),
                 user_reaction=None,
+                current_user_id=user_id,
             ),
             response_cls=CommentResponse,
         )
@@ -298,6 +327,7 @@ async def delete_comment(
             comment,
             author=_format_author(profile, university),
             user_reaction=None,
+            current_user_id=user_id,
         ),
         response_cls=CommentResponse,
     )

@@ -8,8 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.engagement.db_models import Comment
 from apps.feed.db_models import Post
+from apps.accounts.db_models import User
 from apps.profiles.db_models import Profile
 from apps.profiles.db_models.university_db_model import University
+from common.user_visibility import visible_user_filters
 
 
 def utc_now() -> datetime:
@@ -17,7 +19,11 @@ def utc_now() -> datetime:
 
 
 async def post_exists(db: AsyncSession, post_id: UUID) -> bool:
-    stmt = select(Post.id).where(Post.id == post_id)
+    stmt = (
+        select(Post.id)
+        .join(User, User.id == Post.author_user_id)
+        .where(Post.id == post_id, *visible_user_filters(User))
+    )
     return (await db.execute(stmt)).scalar_one_or_none() is not None
 
 
@@ -59,7 +65,12 @@ async def count_top_level_comments(db: AsyncSession, post_id: UUID) -> int:
     stmt = (
         select(func.count())
         .select_from(Comment)
-        .where(Comment.post_id == post_id, Comment.parent_comment_id.is_(None))
+        .join(User, User.id == Comment.user_id)
+        .where(
+            Comment.post_id == post_id,
+            Comment.parent_comment_id.is_(None),
+            *visible_user_filters(User),
+        )
     )
     return int((await db.execute(stmt)).scalar_one())
 
@@ -87,17 +98,23 @@ async def fetch_top_level_comments(
     post_id: UUID,
     *,
     offset: int = 0,
-    limit: int = 20,
+    limit: int | None = 20,
 ) -> list[tuple[Comment, Profile | None, University | None]]:
     stmt = (
         select(Comment, Profile, University)
+        .join(User, User.id == Comment.user_id)
         .outerjoin(Profile, Profile.user_id == Comment.user_id)
         .outerjoin(University, University.id == Profile.university_id)
-        .where(Comment.post_id == post_id, Comment.parent_comment_id.is_(None))
+        .where(
+            Comment.post_id == post_id,
+            Comment.parent_comment_id.is_(None),
+            *visible_user_filters(User),
+        )
         .order_by(Comment.created_at.desc())
         .offset(offset)
-        .limit(limit)
     )
+    if limit is not None:
+        stmt = stmt.limit(limit)
     return list((await db.execute(stmt)).all())
 
 
@@ -109,7 +126,11 @@ async def fetch_comments_by_parent_ids(
         return []
     stmt = (
         select(Comment)
-        .where(Comment.parent_comment_id.in_(parent_ids))
+        .join(User, User.id == Comment.user_id)
+        .where(
+            Comment.parent_comment_id.in_(parent_ids),
+            *visible_user_filters(User),
+        )
         .order_by(Comment.created_at.asc())
     )
     return list((await db.execute(stmt)).scalars().all())

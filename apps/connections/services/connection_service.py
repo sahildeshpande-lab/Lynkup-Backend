@@ -10,6 +10,7 @@ from apps.profiles.db_models import Profile
 from ..schemas import ApiResponse
 from common.enums import UserStatus
 from common.responses import error_response, success_response
+from common.user_visibility import visible_user_filters
 from core.images import generate_profile_image_url
 
 
@@ -69,12 +70,14 @@ async def send_connection_request(db: AsyncSession, sender_id: UUID, receiver_id
     receiver = (await db.execute(select(User).where(User.id == receiver_id))).scalar_one_or_none()
     if receiver is None:
         return error_response("User not found.", response_cls=ApiResponse)
-    if receiver.deleted_at:
+    if receiver.deleted_at or receiver.is_deleted:
         return error_response("Cannot send request. User account is deleted.", response_cls=ApiResponse)
     if receiver.status == UserStatus.suspended:
         return error_response("Cannot send request. User account is suspended.", response_cls=ApiResponse)
     if receiver.status == UserStatus.banned:
         return error_response("Cannot send request. User account is banned.", response_cls=ApiResponse)
+    if receiver.status == UserStatus.deleting:
+        return error_response("Cannot send request. User account is deleting.", response_cls=ApiResponse)
     if receiver.status != UserStatus.active:
         return error_response("Cannot send request. User account is not active.", response_cls=ApiResponse)
 
@@ -262,9 +265,13 @@ async def get_pending_requests(
     base_stmt = select(ConnectionRequest, Profile).join(
         Profile,
         Profile.user_id == ConnectionRequest.sender_user_id,
+    ).join(
+        User,
+        User.id == ConnectionRequest.sender_user_id,
     ).where(
         ConnectionRequest.status == "pending",
         ConnectionRequest.receiver_user_id == user_id,
+        *visible_user_filters(User),
     )
 
     if search:
@@ -333,9 +340,14 @@ async def get_connections_service(
                 and_(Connection.user_high_id == user_id, Profile.user_id == Connection.user_low_id),
             ),
         )
+        .join(
+            User,
+            User.id == Profile.user_id,
+        )
         .where(
             or_(Connection.user_low_id == user_id, Connection.user_high_id == user_id),
             Connection.is_active == True,
+            *visible_user_filters(User),
         )
     )
 

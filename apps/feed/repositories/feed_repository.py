@@ -9,7 +9,9 @@ from sqlalchemy.orm import aliased, selectinload
 from apps.feed.db_models import Post, PostAttachment
 from apps.feed.services.feed_scoring import viewer_has_relevance_criteria as _viewer_has_relevance_criteria
 from apps.profiles.db_models import Profile
+from apps.accounts.db_models import User
 from common.enums import PostState, ProfileVisibility
+from common.user_visibility import visible_user_filters
 
 
 def _normalized_string_match(column, value: str | None):
@@ -46,6 +48,7 @@ def _build_feed_filters(
     *,
     current_user_id: UUID,
     author_profile,
+    author_user,
     connected_author_ids: set[UUID],
 ):
     if connected_author_ids:
@@ -67,6 +70,7 @@ def _build_feed_filters(
         Post.state == PostState.published,
         Post.author_user_id != current_user_id,
         visibility_filter,
+        *visible_user_filters(author_user),
     ]
 
 
@@ -88,15 +92,18 @@ async def count_feed_posts(
     connected_author_ids: set[UUID],
 ) -> int:
     author_profile = aliased(Profile, name="author_profile")
+    author_user = aliased(User, name="author_user")
     filters = _build_feed_filters(
         current_user_id=current_user_id,
         author_profile=author_profile,
+        author_user=author_user,
         connected_author_ids=connected_author_ids,
     )
     stmt = (
         select(func.count(Post.id))
         .select_from(Post)
         .join(author_profile, author_profile.user_id == Post.author_user_id)
+        .join(author_user, author_user.id == Post.author_user_id)
         .where(*filters)
     )
     return int((await db.execute(stmt)).scalar_one())
@@ -112,16 +119,19 @@ async def fetch_feed_posts(
     limit: int | None = None,
 ) -> list[tuple[Post, Profile]]:
     author_profile = aliased(Profile, name="author_profile")
+    author_user = aliased(User, name="author_user")
     viewer_major, viewer_minor, viewer_university_id = _viewer_profile_fields(viewer_profile)
     filters = _build_feed_filters(
         current_user_id=current_user_id,
         author_profile=author_profile,
+        author_user=author_user,
         connected_author_ids=connected_author_ids,
     )
 
     post_ids_stmt = (
         select(Post.id)
         .join(author_profile, author_profile.user_id == Post.author_user_id)
+        .join(author_user, author_user.id == Post.author_user_id)
         .where(*filters)
     )
 
@@ -153,7 +163,8 @@ async def fetch_feed_posts(
     stmt = (
         select(Post, author_profile)
         .join(author_profile, author_profile.user_id == Post.author_user_id)
-        .where(Post.id.in_(post_ids))
+        .join(author_user, author_user.id == Post.author_user_id)
+        .where(Post.id.in_(post_ids), *visible_user_filters(author_user))
         .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
     )
     rows = list((await db.execute(stmt)).all())

@@ -151,6 +151,7 @@ async def test_search_posts_combined_filters(mock_db):
             major="CS",
             minor="Math",
             country="Canada",
+            edu_level="1",
             page=3,
             page_size=5,
         )
@@ -163,6 +164,7 @@ async def test_search_posts_combined_filters(mock_db):
     assert kwargs["major"] == "CS"
     assert kwargs["minor"] == "Math"
     assert kwargs["country"] == "Canada"
+    assert kwargs["edu_level"] == "1"
     assert search_posts_repo.await_args.kwargs["offset"] == 10
     assert search_posts_repo.await_args.kwargs["limit"] == 5
 
@@ -189,6 +191,7 @@ async def test_search_posts_private_visibility_uses_repository(mock_db):
         major=None,
         minor=None,
         country=None,
+        edu_level=None,
         offset=0,
         limit=None,
     )

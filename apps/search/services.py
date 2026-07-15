@@ -68,11 +68,10 @@ async def search_universities(params: UniversitySearchParams, db: AsyncSession) 
 
 async def get_academic_interests(
     query: Optional[str],
-    page: int,
-    page_size: int,
+    page: int | None,
+    page_size: int | None,
     db: AsyncSession,
 ) -> dict:
-    # Build count and select queries
     count_stmt = select(func.count()).select_from(AcademicInterest).where(AcademicInterest.is_active == True)
     stmt = select(AcademicInterest).where(AcademicInterest.is_active == True).order_by(AcademicInterest.name.asc())
 
@@ -86,16 +85,16 @@ async def get_academic_interests(
                 AcademicInterest.name.ilike(f"%{clean_query}%")
             ).order_by(similarity_score.desc(), AcademicInterest.name.asc())
 
-    # Execute count query
     total_items = int((await db.execute(count_stmt)).scalar_one())
+    if page is not None and page_size is not None:
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+        resolved_page = page
+        resolved_page_size = page_size
+    else:
+        resolved_page = 1
+        resolved_page_size = total_items if total_items > 0 else 1
 
-    # Execute select query with offset and limit
-    offset = (page - 1) * page_size
-    stmt = stmt.offset(offset).limit(page_size)
-    result = await db.execute(stmt)
-    orm_items = result.scalars().all()
-
-    # Format items into serializable list of dicts matching response schema
+    orm_items = list((await db.execute(stmt)).scalars().all())
     items = [
         {
             "id": str(item.id),
@@ -103,19 +102,81 @@ async def get_academic_interests(
         }
         for item in orm_items
     ]
-
-    # Build paginated response using common/pagination helper
-    paginated = build_paginated_response(items, page, page_size, total_items)
+    paginated = build_paginated_response(items, resolved_page, resolved_page_size, total_items)
     return paginated.model_dump()
+
+
+async def _get_allowed_countries(
+    db: AsyncSession,
+    *,
+    page: int | None,
+    page_size: int | None,
+) -> dict:
+    """Return all countries from the countries table."""
+    count_stmt = select(func.count()).select_from(Country)
+    stmt = select(Country).order_by(Country.name.asc())
+    total_items = int((await db.execute(count_stmt)).scalar_one())
+
+    if page is not None and page_size is not None:
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+        resolved_page = page
+        resolved_page_size = page_size
+    else:
+        resolved_page = 1
+        resolved_page_size = total_items if total_items > 0 else 1
+
+    rows = list((await db.execute(stmt)).scalars().all())
+    items = [
+        {
+            "id": str(country.id),
+            "name": country.name,
+            "iso_code": country.iso_code,
+        }
+        for country in rows
+    ]
+    return build_paginated_response(items, resolved_page, resolved_page_size, total_items).model_dump()
+
+
+async def _get_post_hashtags(
+    db: AsyncSession,
+    *,
+    page: int | None,
+    page_size: int | None,
+) -> dict:
+    """All hashtags from the hashtags table, ordered alphabetically."""
+    from apps.feed.db_models import Hashtag
+
+    count_stmt = select(func.count()).select_from(Hashtag)
+    total_items = int((await db.execute(count_stmt)).scalar_one())
+
+    stmt = select(Hashtag.id, Hashtag.tag).order_by(Hashtag.tag.asc())
+    if page is not None and page_size is not None:
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+        resolved_page = page
+        resolved_page_size = page_size
+    else:
+        resolved_page = 1
+        resolved_page_size = total_items if total_items > 0 else 1
+
+    rows = list((await db.execute(stmt)).all())
+    items = [
+        {
+            "id": str(row.id),
+            "tag": row.tag,
+        }
+        for row in rows
+    ]
+    return build_paginated_response(items, resolved_page, resolved_page_size, total_items).model_dump()
 
 
 async def get_academics_info(
     query: Optional[str],
-    page: int,
-    page_size: int,
+    page: int | None,
+    page_size: int | None,
     db: AsyncSession,
 ) -> dict:
     from common.enums import EducationLevel
+
     edu_levels = [{"id": str(level.id), "name": level.value} for level in EducationLevel]
     interests_data = await get_academic_interests(
         query=query,
@@ -123,9 +184,13 @@ async def get_academics_info(
         page_size=page_size,
         db=db,
     )
+    countries_data = await _get_allowed_countries(db, page=page, page_size=page_size)
+    hashtags_data = await _get_post_hashtags(db, page=page, page_size=page_size)
     return {
         "educationLevels": edu_levels,
         "interests": interests_data,
+        "countries": countries_data,
+        "hashtags": hashtags_data,
     }
 
 
@@ -294,6 +359,7 @@ async def search_posts(
     major: str | None = None,
     minor: str | None = None,
     country: str | None = None,
+    edu_level: str | None = None,
     page: int | None = None,
     page_size: int | None = None,
 ) -> dict:
@@ -311,11 +377,15 @@ async def search_posts(
         "major": major,
         "minor": minor,
         "country": country,
+        "edu_level": edu_level,
     }
 
     async def _format_items(rows):
+        from apps.engagement.services.post_reaction_formatters import load_latest_post_reactions
+
         post_ids = [post.id for post, *_ in rows]
         engagement_flags = await fetch_post_engagement_flags(db, current_user.id, post_ids)
+        latest_reactions = await load_latest_post_reactions(db, post_ids, per_type_limit=3)
         items = [
             format_post_detail(
                 post,
@@ -326,6 +396,7 @@ async def search_posts(
                 is_reposted=post.id in engagement_flags.reposted_post_ids,
                 is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
                 user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
+                reactions=latest_reactions.get(post.id),
             )
             for post, author_profile, mod_user, mod_profile in rows
         ]

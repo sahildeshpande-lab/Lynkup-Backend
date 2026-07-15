@@ -84,6 +84,7 @@ async def test_create_top_level_comment(mock_db):
     assert response.status is True
     assert response.data.level == 1
     assert response.data.comment_text == "Great post!"
+    assert response.data.can_delete_comment is True
 
 
 @pytest.mark.asyncio
@@ -219,8 +220,10 @@ async def test_get_post_comments_nested_structure(mock_db):
     assert response.status is True
     assert len(response.data.comments) == 1
     assert response.data.comments[0].level == 1
+    assert response.data.comments[0].can_delete_comment is False
     assert response.data.comments[0].replies[0].comment_text == "Reply"
     assert response.data.comments[0].replies[0].level == 2
+    assert response.data.comments[0].replies[0].can_delete_comment is False
     assert response.data.comments[0].author.bio == "Campus ambassador"
 
 
@@ -249,8 +252,65 @@ async def test_soft_delete_comment(mock_db):
     assert response.status is True
     assert response.data.is_deleted is True
     assert response.data.comment_text == "Hello"
+    assert response.data.can_delete_comment is True
     update_comment_count.assert_awaited_once_with(db, comment.post_id, -1)
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_delete_comment_forbidden_for_non_author(mock_db):
+    author_id = uuid.uuid4()
+    other_user_id = uuid.uuid4()
+    comment = _comment(user_id=author_id)
+    db = mock_db()
+
+    with patch.object(svc, "get_comment_for_update", AsyncMock(return_value=comment)):
+        response = await svc.delete_comment(
+            db,
+            other_user_id,
+            DeleteCommentRequest(post_id=comment.post_id, comment_id=comment.id),
+        )
+
+    assert response.status is False
+    assert response.message == "Not the authenticated user"
+    assert response.data is None
+    db.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_post_comments_can_delete_only_for_author(mock_db):
+    post_id = uuid.uuid4()
+    viewer_id = uuid.uuid4()
+    db = mock_db()
+
+    own_comment = _comment(level=1, post_id=post_id, user_id=viewer_id)
+    other_comment = _comment(level=1, post_id=post_id)
+    own_reply = _comment(
+        level=2,
+        post_id=post_id,
+        parent_comment_id=other_comment.id,
+        user_id=viewer_id,
+        comment_text="My reply",
+    )
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "count_top_level_comments", AsyncMock(return_value=2)),
+        patch.object(
+            svc,
+            "fetch_top_level_comments",
+            AsyncMock(return_value=[(own_comment, None, None), (other_comment, None, None)]),
+        ),
+        patch.object(svc, "fetch_comments_by_parent_ids", AsyncMock(return_value=[own_reply])),
+        patch.object(svc, "fetch_profiles_by_user_ids", AsyncMock(return_value={})),
+        patch.object(svc, "fetch_user_comment_reactions", AsyncMock(return_value={})),
+    ):
+        response = await svc.get_post_comments(db, viewer_id, post_id)
+
+    assert response.data.comments[0].can_delete_comment is True
+    assert response.data.comments[1].can_delete_comment is False
+    assert response.data.comments[1].replies[0].can_delete_comment is True
+    assert response.data.comments[1].replies[0].comment_text == "My reply"
 
 
 @pytest.mark.asyncio
@@ -315,12 +375,34 @@ async def test_get_post_comments_pagination(mock_db):
         patch.object(svc, "fetch_top_level_comments", AsyncMock(return_value=[])) as fetch_top,
         patch.object(svc, "fetch_user_comment_reactions", AsyncMock(return_value={})),
     ):
-        response = await svc.get_post_comments(db, user_id, post_id, page=2, limit=20)
+        response = await svc.get_post_comments(db, user_id, post_id, page=2, page_size=20)
 
     fetch_top.assert_awaited_once_with(db, post_id, offset=20, limit=20)
-    assert response.data.total == 45
+    assert response.data.totalItems == 45
     assert response.data.page == 2
-    assert response.data.pages == 3
+    assert response.data.pageSize == 20
+    assert response.data.totalPages == 3
+
+
+@pytest.mark.asyncio
+async def test_get_post_comments_without_pagination_returns_all(mock_db):
+    post_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    db = mock_db()
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "count_top_level_comments", AsyncMock(return_value=2)),
+        patch.object(svc, "fetch_top_level_comments", AsyncMock(return_value=[])) as fetch_top,
+        patch.object(svc, "fetch_user_comment_reactions", AsyncMock(return_value={})),
+    ):
+        response = await svc.get_post_comments(db, user_id, post_id)
+
+    fetch_top.assert_awaited_once_with(db, post_id, offset=0, limit=None)
+    assert response.data.page == 1
+    assert response.data.pageSize == 2
+    assert response.data.totalItems == 2
+    assert response.data.totalPages == 1
 
 
 def test_comment_model_indexes_constraints_and_relationships():

@@ -10,6 +10,7 @@ from apps.engagement.repositories.liked_posts_repository import (
     fetch_user_liked_posts,
 )
 from apps.engagement.schemas import LikedPostsListData, LikedPostsListResponse
+from apps.engagement.services.post_reaction_formatters import load_latest_post_reactions
 from apps.engagement.services.reaction_service import format_user_reaction
 from apps.feed.services.post_service import format_post_detail
 from common.pagination import build_paginated_response
@@ -26,6 +27,7 @@ async def list_liked_posts(
     async def _format_rows(rows):
         post_ids = [post.id for post, *_ in rows]
         engagement_flags = await fetch_post_engagement_flags(db, user_id, post_ids)
+        latest_reactions = await load_latest_post_reactions(db, post_ids, per_type_limit=3)
         return [
             format_post_detail(
                 post,
@@ -36,6 +38,7 @@ async def list_liked_posts(
                 is_reposted=post.id in engagement_flags.reposted_post_ids,
                 is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
                 user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
+                reactions=latest_reactions.get(post.id),
             )
             for post, author_profile, mod_user, mod_profile in rows
         ]
