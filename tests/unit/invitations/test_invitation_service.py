@@ -191,6 +191,11 @@ async def test_redeem_invitation_success(mock_db):
     assert result.status == InvitationStatus.expired
     db.commit.assert_not_called()
 
+    # Verify auto-connection additions
+    added_objects = [call[0][0] for call in db.add.call_args_list]
+    assert any(obj.__class__.__name__ == "ConnectionRequest" for obj in added_objects)
+    assert any(obj.__class__.__name__ == "Connection" for obj in added_objects)
+
 
 @pytest.mark.asyncio
 async def test_redeem_invitation_rejects_self_redeem(mock_db):

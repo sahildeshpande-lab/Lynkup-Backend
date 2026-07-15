@@ -280,6 +280,46 @@ async def redeem_invitation(
     db.add(invitation)
     await db.flush()
 
+    # Automatically connect both users (lynkup)
+    from apps.connections.db_models import Connection, ConnectionRequest
+    from apps.connections.services.connection_service import build_connection_pair
+    from apps.profiles.services.profile_stats_service import increment_connection_counts_for_users
+    from sqlmodel import select
+
+    # Create accepted ConnectionRequest
+    conn_req = ConnectionRequest(
+        sender_user_id=invitation.inviter_user_id,
+        receiver_user_id=redeemed_by_user_id,
+        status="accepted",
+    )
+    db.add(conn_req)
+
+    # Establish Connection
+    low_id, high_id = build_connection_pair(invitation.inviter_user_id, redeemed_by_user_id)
+    conn_check = select(Connection).where(
+        Connection.user_low_id == low_id,
+        Connection.user_high_id == high_id
+    )
+    conn_res = await db.execute(conn_check)
+    existing_conn = conn_res.scalars().first()
+
+    should_increment = False
+    if existing_conn:
+        if not existing_conn.is_active:
+            existing_conn.is_active = True
+            should_increment = True
+            db.add(existing_conn)
+    else:
+        new_conn = Connection(user_low_id=low_id, user_high_id=high_id, is_active=True)
+        db.add(new_conn)
+        should_increment = True
+
+    if should_increment:
+        await increment_connection_counts_for_users(
+            db, invitation.inviter_user_id, redeemed_by_user_id
+        )
+    await db.flush()
+
     if commit:
         await db.commit()
         await db.refresh(invitation)
