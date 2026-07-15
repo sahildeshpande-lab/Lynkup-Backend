@@ -59,12 +59,12 @@ async def test_update_comment_reaction(mock_db):
         patch.object(svc, "get_comment_by_id", AsyncMock(return_value=comment)),
         patch.object(svc, "get_user_comment_reaction", AsyncMock(return_value=_reaction(ReactionType.like))),
         patch.object(svc, "upsert_user_comment_reaction", AsyncMock()) as upsert,
-        patch.object(svc, "update_comment_like_count", AsyncMock(return_value=0)) as update_count,
+        patch.object(svc, "update_comment_like_count", AsyncMock(return_value=1)) as update_count,
     ):
         response = await svc.upsert_comment_reaction(db, user_id, payload)
 
     upsert.assert_awaited_once()
-    update_count.assert_awaited_once_with(db, comment.id, -1)
+    update_count.assert_awaited_once_with(db, comment.id, 0)
     assert response.data.user_reaction == "CELEBRATE"
 
 

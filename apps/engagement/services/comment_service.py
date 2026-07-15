@@ -134,6 +134,14 @@ async def create_post_comment(
     if not await post_exists(db, post_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
 
+    from apps.feed.db_models import Post
+    from sqlmodel import select
+    post_author_res = (await db.execute(select(Post.author_user_id).where(Post.id == post_id))).first()
+    author_id = post_author_res[0] if post_author_res else None
+    if author_id is not None:
+        from common.user_visibility import check_post_engagement_allowed
+        await check_post_engagement_allowed(db, user_id, author_id)
+
     text = payload.comment_text.strip()
     if not text:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Comment text is required")
@@ -189,8 +197,9 @@ async def create_post_comment(
         current_user_id=user_id,
     )
 
+    message = "Reply created successfully" if payload.parent_comment_id is not None else "Comment created successfully"
     return success_response(
-        "Comment created successfully",
+        message,
         new_comment,
         response_cls=CommentResponse,
     )

@@ -1168,11 +1168,13 @@ async def list_reviewed_posts_by_state_service(
     from apps.feed.repositories.post_repository import (
         count_reviewed_posts_for_moderator,
         fetch_reviewed_posts_for_moderator,
+        count_reviewed_posts_summary_by_state,
     )
 
     await _repair_unassigned_moderators_for_state(db, status=status)
 
     total_items = await count_reviewed_posts_for_moderator(db, moderator_id, status)
+    summary = await count_reviewed_posts_summary_by_state(db, moderator_id)
 
     p = page or 1
     if page is None and page_size is None:
@@ -1205,4 +1207,6 @@ async def list_reviewed_posts_by_state_service(
         )
         for post, profile, mod_user, mod_profile in posts
     ]
-    return build_paginated_response(formatted, p, ps, total_items).model_dump()
+    res = build_paginated_response(formatted, p, ps, total_items).model_dump()
+    res["summary"] = summary
+    return res

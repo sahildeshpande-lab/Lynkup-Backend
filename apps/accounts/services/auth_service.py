@@ -54,7 +54,7 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
         return ApiResponse(status=False, message=" Please complete signup", data=None)
 
     if not user.password_hash or not PASSWORD_HASHER.verify(payload.password, user.password_hash):
-        return ApiResponse(status=False, message="Password not matched ", data=None)
+        return ApiResponse(status=False, message="Invalid credentials", data=None)
 
     if user.status == UserStatus.deleting or user.deleted_at:
         return ApiResponse(status=False, message=inactive_account_message(UserStatus.deleting), data=None)
@@ -138,8 +138,8 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
     if user.email_otp == payload.otp:
         user.email_verified_at = _now()
         user.status = UserStatus.active
-        user.email_otp = _generate_otp()
-        user.email_otp_created_at = _now()
+        user.email_otp = None
+        user.email_otp_created_at = None
         db.add(user)
         await db.commit()
 
@@ -173,8 +173,8 @@ async def verify_email(token: str, db: AsyncSession) -> HTMLResponse | ApiRespon
 
     user.email_verified_at = _now()
     user.status = UserStatus.active
-    user.email_otp = "true"  # Set users.email_otp = "true" as requested
-    user.email_otp_created_at = _now()
+    user.email_otp = None
+    user.email_otp_created_at = None
     db.add(user)
     await db.commit()
 

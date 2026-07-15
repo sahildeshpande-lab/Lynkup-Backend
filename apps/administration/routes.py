@@ -26,6 +26,7 @@ from .schemas import (
 )
 from apps.accounts.schemas import EmailSignupRequest, RefreshTokenRequest, AdminAuthResponse
 from apps.profiles.schemas import CompletenessWeightsUpdateRequest, UpdateProfileRequest
+from apps.invitations.schemas import SoftDeleteInvitationRequest
 
 
 router = APIRouter(tags=["4] Admin Management"])
@@ -44,6 +45,7 @@ async def admin_signin(
 async def admin_signup(
     payload: AdminSignupRequest,
     db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
 ) -> ApiResponse:
     return await services.admin_signup(payload, db)
 
@@ -323,6 +325,35 @@ async def list_reviewed_posts(
     )
     return ApiResponse(message="Posts fetched successfully", data=data)
 
+
+
+@router.get("/admin/invitations", response_model=ApiResponse)
+async def admin_list_invitations(
+    page: int | None = Query(default=None, ge=1),
+    pageSize: int | None = Query(default=None, ge=1, le=200),
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_admin),
+) -> ApiResponse:
+    """List all invitation codes (including expired, deactivated, converted, soft-deleted)."""
+    from apps.invitations.services import get_all_invitations
+
+    return await get_all_invitations(db, page=page, page_size=pageSize)
+
+
+@router.delete("/admin/invitations", response_model=ApiResponse)
+async def admin_soft_delete_invitation(
+    payload: SoftDeleteInvitationRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
+) -> ApiResponse:
+    """Soft-delete an invitation code. Preserves the row for audit history."""
+    from apps.invitations.services import soft_delete_invitation
+
+    return await soft_delete_invitation(
+        db,
+        code=payload.code,
+        admin_user_id=current_user.id,
+    )
 
 
 @router.patch("/admin/posts/reviewed", response_model=ApiResponse)

@@ -30,6 +30,11 @@ async def update_bookmark(
     if post is None:
         return error_response("Post does not exist", response_cls=BookmarkResponse)
 
+    author_id = getattr(post, "author_user_id", None)
+    if author_id is not None:
+        from common.user_visibility import check_post_engagement_allowed
+        await check_post_engagement_allowed(db, user_id, author_id)
+
     existing = await get_user_bookmark(db, user_id, payload.post_id)
 
     if payload.is_bookmarked:

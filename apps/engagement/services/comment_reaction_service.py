@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 def _counts_toward_like_count(reaction_type: ReactionType) -> bool:
-    return reaction_type == ReactionType.like
+    return True
 
 
 def _like_count_delta(

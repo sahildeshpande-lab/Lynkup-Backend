@@ -14,7 +14,7 @@ async def get_or_create_profile_stats(
     profile_id: UUID,
 ) -> ProfileStats:
     result = await db.execute(
-        select(ProfileStats).where(ProfileStats.profile_id == profile_id)
+        select(ProfileStats).where(ProfileStats.profile_id == profile_id).with_for_update()
     )
     stats = result.scalar_one_or_none()
     if stats:

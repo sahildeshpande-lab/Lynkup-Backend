@@ -116,10 +116,8 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
 
     stmt = select(ConnectionRequest).where(
         ConnectionRequest.status == "pending",
-        or_(
-            and_(ConnectionRequest.sender_user_id == other_user_id, ConnectionRequest.receiver_user_id == user_id),
-            and_(ConnectionRequest.sender_user_id == user_id, ConnectionRequest.receiver_user_id == other_user_id)
-        )
+        ConnectionRequest.sender_user_id == other_user_id,
+        ConnectionRequest.receiver_user_id == user_id,
     )
     result = await db.execute(stmt)
     req = result.scalars().first()

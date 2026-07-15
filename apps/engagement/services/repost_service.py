@@ -29,6 +29,11 @@ async def repost_post(
     if post is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
 
+    author_id = getattr(post, "author_user_id", None)
+    if author_id is not None:
+        from common.user_visibility import check_post_engagement_allowed
+        await check_post_engagement_allowed(db, user_id, author_id)
+
     profile_id = await get_profile_id_for_user(db, user_id)
     if profile_id is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")

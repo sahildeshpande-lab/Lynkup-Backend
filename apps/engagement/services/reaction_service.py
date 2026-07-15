@@ -32,7 +32,7 @@ def format_user_reaction(reaction_type: ReactionType | None) -> str | None:
 
 
 def _counts_toward_like_count(reaction_type: ReactionType) -> bool:
-    return reaction_type == ReactionType.like
+    return True
 
 
 def _like_count_delta(
@@ -76,6 +76,11 @@ async def upsert_post_reaction(
     post = await get_post_for_update(db, payload.post_id)
     if post is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
+
+    author_id = getattr(post, "author_user_id", None)
+    if author_id is not None:
+        from common.user_visibility import check_post_engagement_allowed
+        await check_post_engagement_allowed(db, user_id, author_id)
 
     existing = await get_user_reaction(db, payload.post_id, user_id)
     previous_type = existing.reaction_type if existing else None

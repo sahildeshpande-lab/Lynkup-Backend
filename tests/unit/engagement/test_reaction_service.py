@@ -27,9 +27,9 @@ def _reaction(reaction_type: ReactionType = ReactionType.like):
         (ReactionType.like, ReactionType.like, 0),
         (ReactionType.like, None, -1),
         (None, None, 0),
-        (None, ReactionType.celebrate, 0),
-        (ReactionType.like, ReactionType.celebrate, -1),
-        (ReactionType.celebrate, ReactionType.like, 1),
+        (None, ReactionType.celebrate, 1),
+        (ReactionType.like, ReactionType.celebrate, 0),
+        (ReactionType.celebrate, ReactionType.like, 0),
         (ReactionType.insightful, ReactionType.support, 0),
     ],
 )
@@ -148,7 +148,7 @@ def test_upsert_post_reaction_request_accepts_all_reaction_types(reaction_type):
 
 
 @pytest.mark.asyncio
-async def test_upsert_post_reaction_creates_celebrate_without_changing_like_count(mock_db):
+async def test_upsert_post_reaction_creates_celebrate_increments_like_count(mock_db):
     post = _post(like_count=4)
     user_id = uuid.uuid4()
     payload = UpsertPostReactionRequest(post_id=post.id, reaction_type="celebrate")
@@ -158,18 +158,18 @@ async def test_upsert_post_reaction_creates_celebrate_without_changing_like_coun
         patch.object(svc, "get_post_for_update", AsyncMock(return_value=post)),
         patch.object(svc, "get_user_reaction", AsyncMock(return_value=None)),
         patch.object(svc, "upsert_user_reaction", AsyncMock()) as upsert,
-        patch.object(svc, "update_post_like_count", AsyncMock(return_value=4)) as update_count,
+        patch.object(svc, "update_post_like_count", AsyncMock(return_value=5)) as update_count,
     ):
         response = await svc.upsert_post_reaction(db, user_id, payload)
 
-    assert response.data.like_count == 4
+    assert response.data.like_count == 5
     assert response.data.user_reaction == "CELEBRATE"
     upsert.assert_awaited_once()
-    update_count.assert_awaited_once_with(db, post.id, 0)
+    update_count.assert_awaited_once_with(db, post.id, 1)
 
 
 @pytest.mark.asyncio
-async def test_upsert_post_reaction_switch_like_to_celebrate_decrements_like_count(mock_db):
+async def test_upsert_post_reaction_switch_like_to_celebrate_does_not_change_like_count(mock_db):
     post = _post(like_count=5)
     user_id = uuid.uuid4()
     payload = UpsertPostReactionRequest(post_id=post.id, reaction_type="celebrate")
@@ -179,14 +179,14 @@ async def test_upsert_post_reaction_switch_like_to_celebrate_decrements_like_cou
         patch.object(svc, "get_post_for_update", AsyncMock(return_value=post)),
         patch.object(svc, "get_user_reaction", AsyncMock(return_value=_reaction(ReactionType.like))),
         patch.object(svc, "upsert_user_reaction", AsyncMock()) as upsert,
-        patch.object(svc, "update_post_like_count", AsyncMock(return_value=4)) as update_count,
+        patch.object(svc, "update_post_like_count", AsyncMock(return_value=5)) as update_count,
     ):
         response = await svc.upsert_post_reaction(db, user_id, payload)
 
-    assert response.data.like_count == 4
+    assert response.data.like_count == 5
     assert response.data.user_reaction == "CELEBRATE"
     upsert.assert_awaited_once()
-    update_count.assert_awaited_once_with(db, post.id, -1)
+    update_count.assert_awaited_once_with(db, post.id, 0)
 
 
 @pytest.mark.asyncio

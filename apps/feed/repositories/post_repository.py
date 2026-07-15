@@ -50,6 +50,32 @@ async def count_reviewed_posts_for_moderator(
     return int((await db.execute(stmt)).scalar_one())
 
 
+async def count_reviewed_posts_summary_by_state(
+    db: AsyncSession,
+    moderator_id: UUID | None,
+) -> dict[str, int]:
+    state_to_status = {
+        PostState.published: "published",
+        PostState.flagged: "flagged",
+        PostState.rejected: "rejected",
+        PostState.reinstate: "reinstate",
+    }
+    stmt = (
+        select(Post.state, func.count(Post.id))
+        .where(Post.state.in_(list(state_to_status.keys())))
+    )
+    if moderator_id is not None:
+        stmt = stmt.where(Post.moderator_id == moderator_id)
+    stmt = stmt.group_by(Post.state)
+
+    result = await db.execute(stmt)
+    counts = {status: 0 for status in state_to_status.values()}
+    for state, count in result.all():
+        if state in state_to_status:
+            counts[state_to_status[state]] = count
+    return counts
+
+
 async def fetch_reviewed_posts_for_moderator(
     db: AsyncSession,
     moderator_id: UUID | None,
