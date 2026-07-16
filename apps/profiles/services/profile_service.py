@@ -139,10 +139,28 @@ async def update_profile_me(
     }
 
 async def delete_user_me(user: User, db: AsyncSession) -> dict:
+    import logging
     from datetime import timedelta
-    from core.auth.services import revoke_firebase_tokens
+    from core.auth.services import disable_firebase_user, revoke_firebase_tokens
     from apps.profiles.db_models.profile_db_model import Profile
     from sqlmodel import select
+
+    logger = logging.getLogger(__name__)
+
+    # Idempotent: already scheduled for deletion
+    if user.is_deleted or user.status == UserStatus.deleting or user.deleted_at is not None:
+        profile = (
+            await db.execute(select(Profile).where(Profile.user_id == user.id))
+        ).scalar_one_or_none()
+        user_data = await build_user_base_response(user, profile, db)
+        return {
+            "deleted": True,
+            "status": user.status.value if hasattr(user.status, "value") else str(user.status),
+            "deleted_at": user.deleted_at,
+            "purge_after": user.purge_after,
+            "user": user_data,
+        }
+
     user.status = UserStatus.deleting
     user.is_deleted = True
     now = _now()
@@ -151,18 +169,33 @@ async def delete_user_me(user: User, db: AsyncSession) -> dict:
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    try:
-        revoke_firebase_tokens(user.firebase_uid)
-    except Exception:
-        pass
-    profile = (await db.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one_or_none()
+
+    if user.firebase_uid and not str(user.firebase_uid).startswith("admin-"):
+        try:
+            disable_firebase_user(user.firebase_uid)
+        except Exception:
+            logger.exception(
+                "Failed to disable Firebase user during self-deletion uid=%s",
+                user.firebase_uid,
+            )
+            try:
+                revoke_firebase_tokens(user.firebase_uid)
+            except Exception:
+                logger.exception(
+                    "Failed to revoke Firebase tokens during self-deletion uid=%s",
+                    user.firebase_uid,
+                )
+
+    profile = (
+        await db.execute(select(Profile).where(Profile.user_id == user.id))
+    ).scalar_one_or_none()
     user_data = await build_user_base_response(user, profile, db)
     return {
         "deleted": True,
         "status": user.status.value if hasattr(user.status, "value") else str(user.status),
         "deleted_at": user.deleted_at,
         "purge_after": user.purge_after,
-        "user": user_data
+        "user": user_data,
     }
 
 def update_profile(payload: ProfileUpdateRequest) -> dict:

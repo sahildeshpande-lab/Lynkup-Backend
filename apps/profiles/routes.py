@@ -7,8 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File,
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database.session import get_session
-from core.security.auth import get_bearer_token, get_current_user
-from core.auth.dependencies import require_recent_auth
+from core.security.auth import get_bearer_token, get_current_user, get_current_app_user
 from apps.accounts.db_models import User
 from .schemas import (
     ApiResponse,
@@ -74,9 +73,9 @@ async def update_profile(
     )
 
 
-@router.delete("/users/me/deletion", response_model=ApiResponse, dependencies=[Depends(require_recent_auth)])
+@router.delete("/users/me/deletion", response_model=ApiResponse)
 async def delete_me(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     data = await services.delete_user_me(current_user, db)

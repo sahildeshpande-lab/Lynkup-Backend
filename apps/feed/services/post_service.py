@@ -733,15 +733,11 @@ async def admin_publish_post_service(
     post.revision_number += 1
     post.updated_at = utc_now()
 
-    # States that have already had their posts_count incremented on a prior
-    # published transition. Re-publishing from these states must NOT increment
-    # again (e.g. flagged → published would otherwise double-count).
-    _already_counted_states = (
-        PostState.published,
-        PostState.flagged,
-        PostState.rejected,
-        PostState.reinstate,
-    )
+    # Profile posts_count tracks posts that are publicly countable for the author.
+    # Flagged/rejected leave that set; publishing/reinstating re-enters it.
+    _counted_states = (PostState.published, PostState.reinstate)
+    was_counted = previous_state in _counted_states
+    now_counted = post.state in _counted_states
 
     try:
         # Create revision audit record with the admin user as the editor
@@ -753,22 +749,29 @@ async def admin_publish_post_service(
         await db.rollback()
         raise ApiError("Failed to publish or flag post")
 
-    # Increment the author's published-post counter only on the very first
-    # transition into published state (i.e. the post was never counted before).
-    # Isolate this in its own try/except so a transient stats failure does NOT
-    # roll back the already-committed post state change.
-    if previous_state not in _already_counted_states and post.state == PostState.published:
-        try:
-            from apps.profiles.services.profile_stats_service import increment_posts_count_for_user
+    # Adjust the author's posts_count after a successful state change.
+    # Isolated so a stats failure does not roll back the moderation decision.
+    try:
+        from apps.profiles.services.profile_stats_service import (
+            decrement_posts_count_for_user,
+            increment_posts_count_for_user,
+        )
 
+        if was_counted and not now_counted:
+            await decrement_posts_count_for_user(db, post.author_user_id)
+            await db.commit()
+        elif not was_counted and now_counted:
             await increment_posts_count_for_user(db, post.author_user_id)
             await db.commit()
-        except Exception:
-            logger.exception(
-                "Failed to update posts_count for user %s after publishing post %s",
-                post.author_user_id,
-                post.id,
-            )
+    except Exception:
+        logger.exception(
+            "Failed to update posts_count for user %s after moderating post %s "
+            "(previous_state=%s new_state=%s)",
+            post.author_user_id,
+            post.id,
+            previous_state,
+            post.state,
+        )
 
     if author_user and author_user.email:
         try:

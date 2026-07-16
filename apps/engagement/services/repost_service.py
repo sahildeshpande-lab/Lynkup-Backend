@@ -17,6 +17,10 @@ from apps.engagement.repositories.repost_repository import (
 )
 from apps.feed.db_models import Post
 from apps.engagement.schemas import RepostData, RepostResponse
+from apps.profiles.services.profile_stats_service import (
+    decrement_posts_count_for_user,
+    increment_posts_count_for_user,
+)
 from common.responses import success_response
 from common.enums import PostState
 
@@ -65,10 +69,11 @@ async def toggle_repost(
                 response_cls=RepostResponse,
             )
 
-        # Create repost record
+        # Create repost record (counts as a fresh post for the reposter)
         try:
             await create_repost(db, profile_id, user_id, post_id)
             repost_count = await update_post_repost_count(db, post_id, 1)
+            await increment_posts_count_for_user(db, user_id)
             await db.commit()
         except IntegrityError:
             await db.rollback()
@@ -126,6 +131,7 @@ async def toggle_repost(
         try:
             await delete_repost(db, existing)
             repost_count = await update_post_repost_count(db, post_id, -1)
+            await decrement_posts_count_for_user(db, user_id)
             await db.commit()
         except Exception:
             await db.rollback()
