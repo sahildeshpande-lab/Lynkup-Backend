@@ -76,7 +76,7 @@ def test_enums_and_bearer_token_helpers():
 
     active_user = SimpleNamespace(status=UserStatus.active, deleted_at=None)
     security_auth._ensure_active_user(active_user)
-    with pytest.raises(ApiError, match="Your account is deleting"):
+    with pytest.raises(ApiError, match="Account doesn't exist"):
         security_auth._ensure_active_user(SimpleNamespace(status=UserStatus.active, deleted_at=datetime.now()))
     with pytest.raises(ApiError, match="Your account is banned"):
         security_auth._ensure_active_user(SimpleNamespace(status=UserStatus.banned, deleted_at=None))
@@ -192,7 +192,7 @@ async def test_security_auth_admin_rejects_bad_jwt_and_inactive_users(monkeypatc
         await security_auth.get_current_admin(credentials("missing"), mock_db(scalar_result(None)))
 
     deleted = SimpleNamespace(status=UserStatus.active, deleted_at=datetime.now(timezone.utc), role="superadmin")
-    with pytest.raises(ApiError, match="Your account is deleting"):
+    with pytest.raises(ApiError, match="Account doesn't exist"):
         await security_auth.get_current_admin(credentials("deleted"), mock_db(scalar_result(deleted)))
 
     suspended = SimpleNamespace(status=UserStatus.suspended, deleted_at=None, role="superadmin")

@@ -7,6 +7,7 @@ from .reaction_repository import (
 )
 from .repost_repository import (
     create_repost,
+    delete_repost,
     get_profile_id_for_user,
     get_user_repost,
     update_post_repost_count,
@@ -51,15 +52,6 @@ from .comment_reaction_repository import (
     update_comment_like_count,
     upsert_user_comment_reaction,
 )
-from .report_repository import (
-    count_reports,
-    count_reports_for_entity,
-    create_report,
-    get_duplicate_report,
-    get_report_by_id,
-    get_reports,
-    update_report,
-)
 
 __all__ = [
     "delete_user_reaction",
@@ -68,6 +60,7 @@ __all__ = [
     "update_post_like_count",
     "upsert_user_reaction",
     "create_repost",
+    "delete_repost",
     "get_profile_id_for_user",
     "get_user_repost",
     "update_post_repost_count",
@@ -103,11 +96,4 @@ __all__ = [
     "get_post_share_count",
     "get_user_share_event",
     "update_post_share_count",
-    "count_reports",
-    "count_reports_for_entity",
-    "create_report",
-    "get_duplicate_report",
-    "get_report_by_id",
-    "get_reports",
-    "update_report",
 ]
