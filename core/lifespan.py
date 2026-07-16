@@ -17,11 +17,11 @@ async def lifespan(app: FastAPI):
         await init_db()
         try:
             # from core.database.migrations import run_db_migrations_programmatically
+            # logger.info("Start DB Migrations")
             # await run_db_migrations_programmatically()
             logger.info("Migrations completed successfully")
-        except Exception:
-            logger.exception("Migration startup failed")
-            logger.info(f"Initialized database at {db_settings.db_host}")
+        except Exception as e:
+            logger.exception(f"Migration startup failed: {e}")
             raise
         # from core.database.migrations import run_db_migrations_programmatically
         # await run_db_migrations_programmatically()
@@ -41,7 +41,8 @@ async def lifespan(app: FastAPI):
     # Start the email sender background cron task
     from core.email_service import cron_send_emails
     email_cron_task = asyncio.create_task(cron_send_emails())
-    
+
+    logger.info("Application Started Successfully")
     yield
     
     # Cancel the task on shutdown
@@ -50,3 +51,5 @@ async def lifespan(app: FastAPI):
         await email_cron_task
     except asyncio.CancelledError:
         pass
+
+    logger.info("Application Shutdown Completed")

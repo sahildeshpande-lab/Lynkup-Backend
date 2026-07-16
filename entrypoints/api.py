@@ -4,17 +4,18 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from core.lifespan import lifespan
-from core.routes import build_router
-from core.security.auth import bearer_scheme
-from common.responses import error_response, serialize_response
-from common.exceptions import ApiError
-from apps.accounts.services import AccountExistsException
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
+from apps.accounts.services import AccountExistsException
+from common.exceptions import ApiError
+from common.responses import error_response, serialize_response
+from core.lifespan import lifespan
+from core.logging_config import configure_logging
+from core.routes import build_router
+
+configure_logging()
 
 AUTH_TAG = "1] User Registration, Authentication & Onboarding"
 USER_TAG = "2] User Management"

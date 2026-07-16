@@ -5,7 +5,6 @@ from uuid import UUID
 from sqlalchemy import and_, case, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
-import sqlalchemy as sa
 
 from apps.feed.db_models import Post, PostAttachment
 from apps.feed.services.feed_scoring import viewer_has_relevance_criteria as _viewer_has_relevance_criteria
@@ -92,113 +91,22 @@ async def count_feed_posts(
     viewer_profile: Profile | None,
     connected_author_ids: set[UUID],
 ) -> int:
-    from apps.engagement.db_models import Repost
-    from apps.connections.db_models import Block
-    from sqlalchemy import literal, union_all, select, func, or_, and_
-
-    # Get blocked user IDs (either direction)
-    block_stmt = select(Block).where(
-        Block.is_active == True,
-        or_(
-            Block.blocker_user_id == current_user_id,
-            Block.blocked_user_id == current_user_id,
-        ),
-    )
-    block_results = (await db.execute(block_stmt)).scalars().all()
-    blocked_user_ids = {blk.blocker_user_id for blk in block_results} | {blk.blocked_user_id for blk in block_results}
-    blocked_user_ids.discard(current_user_id)
-
-    # Post query visibility filters
     author_profile = aliased(Profile, name="author_profile")
     author_user = aliased(User, name="author_user")
-
-    if connected_author_ids:
-        connected_clause = Post.author_user_id.in_(connected_author_ids)
-    else:
-        connected_clause = false()
-
-    private_profile = author_profile.profile_visibility.in_(
-        [ProfileVisibility.private, ProfileVisibility.connections_only]
+    filters = _build_feed_filters(
+        current_user_id=current_user_id,
+        author_profile=author_profile,
+        author_user=author_user,
+        connected_author_ids=connected_author_ids,
     )
-    public_profile = author_profile.profile_visibility == ProfileVisibility.public
-
-    post_visibility_filter = or_(
-        and_(private_profile, connected_clause),
-        public_profile,
-        Post.author_user_id == current_user_id,
+    stmt = (
+        select(func.count(Post.id))
+        .select_from(Post)
+        .join(author_profile, author_profile.user_id == Post.author_user_id)
+        .join(author_user, author_user.id == Post.author_user_id)
+        .where(*filters)
     )
-
-    post_filters = [
-        Post.state == PostState.published,
-        post_visibility_filter,
-        *visible_user_filters(author_user),
-    ]
-    if blocked_user_ids:
-        post_filters.append(Post.author_user_id.notin_(list(blocked_user_ids)))
-
-    posts_query = select(
-        literal("post").label("feed_type"),
-        Post.id.label("activity_id"),
-        Post.id.label("post_id"),
-        literal(None, type_=sa.Uuid).label("reposter_profile_id"),
-        Post.created_at.label("activity_created_at")
-    ).join(
-        author_profile, author_profile.user_id == Post.author_user_id
-    ).join(
-        author_user, author_user.id == Post.author_user_id
-    ).where(*post_filters)
-
-    # Repost query visibility filters
-    reposter_profile = aliased(Profile, name="reposter_profile")
-    reposter_user = aliased(User, name="reposter_user")
-    orig_author_profile = aliased(Profile, name="orig_author_profile")
-    orig_author_user = aliased(User, name="orig_author_user")
-
-    reposter_private = reposter_profile.profile_visibility.in_(
-        [ProfileVisibility.private, ProfileVisibility.connections_only]
-    )
-    reposter_public = reposter_profile.profile_visibility == ProfileVisibility.public
-
-    if connected_author_ids:
-        reposter_connected_clause = reposter_profile.user_id.in_(connected_author_ids)
-    else:
-        reposter_connected_clause = false()
-
-    reposter_visibility_filter = or_(
-        and_(reposter_private, reposter_connected_clause),
-        reposter_public,
-        reposter_profile.user_id == current_user_id,
-    )
-
-    repost_filters = [
-        Post.state == PostState.published,
-        reposter_visibility_filter,
-        *visible_user_filters(reposter_user),
-        *visible_user_filters(orig_author_user),
-    ]
-    if blocked_user_ids:
-        repost_filters.append(reposter_profile.user_id.notin_(list(blocked_user_ids)))
-        repost_filters.append(Post.author_user_id.notin_(list(blocked_user_ids)))
-
-    reposts_query = select(
-        literal("repost").label("feed_type"),
-        Repost.id.label("activity_id"),
-        Post.id.label("post_id"),
-        reposter_profile.id.label("reposter_profile_id"),
-        Repost.created_at.label("activity_created_at")
-    ).join(
-        Repost, Repost.post_id == Post.id
-    ).join(
-        reposter_profile, reposter_profile.id == Repost.profile_id
-    ).join(
-        reposter_user, reposter_user.id == reposter_profile.user_id
-    ).join(
-        orig_author_user, orig_author_user.id == Post.author_user_id
-    ).where(*repost_filters)
-
-    union_query = union_all(posts_query, reposts_query).subquery()
-    count_stmt = select(func.count()).select_from(union_query)
-    return int((await db.execute(count_stmt)).scalar_one())
+    return int((await db.execute(stmt)).scalar_one())
 
 
 async def fetch_feed_posts(
@@ -209,159 +117,57 @@ async def fetch_feed_posts(
     *,
     offset: int = 0,
     limit: int | None = None,
-) -> list[tuple[str, UUID, Post, Profile | None, datetime]]:
-    from apps.engagement.db_models import Repost
-    from apps.connections.db_models import Block
-    from sqlalchemy import literal, union_all, select, func, or_, and_
-
-    # Get blocked user IDs (either direction)
-    block_stmt = select(Block).where(
-        Block.is_active == True,
-        or_(
-            Block.blocker_user_id == current_user_id,
-            Block.blocked_user_id == current_user_id,
-        ),
-    )
-    block_results = (await db.execute(block_stmt)).scalars().all()
-    blocked_user_ids = {blk.blocker_user_id for blk in block_results} | {blk.blocked_user_id for blk in block_results}
-    blocked_user_ids.discard(current_user_id)
-
-    # Post query visibility filters
+) -> list[tuple[Post, Profile]]:
     author_profile = aliased(Profile, name="author_profile")
     author_user = aliased(User, name="author_user")
+    viewer_major, viewer_minor, viewer_university_id = _viewer_profile_fields(viewer_profile)
+    filters = _build_feed_filters(
+        current_user_id=current_user_id,
+        author_profile=author_profile,
+        author_user=author_user,
+        connected_author_ids=connected_author_ids,
+    )
 
-    if connected_author_ids:
-        connected_clause = Post.author_user_id.in_(connected_author_ids)
+    post_ids_stmt = (
+        select(Post.id)
+        .join(author_profile, author_profile.user_id == Post.author_user_id)
+        .join(author_user, author_user.id == Post.author_user_id)
+        .where(*filters)
+    )
+
+    has_relevance_criteria = _viewer_has_relevance_criteria(
+        viewer_major=viewer_major,
+        viewer_minor=viewer_minor,
+        viewer_university_id=viewer_university_id,
+    )
+    if has_relevance_criteria:
+        relevance_match = _build_feed_match_expressions(
+            author_profile,
+            viewer_major=viewer_major,
+            viewer_minor=viewer_minor,
+            viewer_university_id=viewer_university_id,
+        )
+        relevance_rank = case((relevance_match, 1), else_=0)
+        post_ids_stmt = post_ids_stmt.order_by(relevance_rank.desc(), Post.created_at.desc())
     else:
-        connected_clause = false()
+        post_ids_stmt = post_ids_stmt.order_by(Post.created_at.desc())
 
-    private_profile = author_profile.profile_visibility.in_(
-        [ProfileVisibility.private, ProfileVisibility.connections_only]
-    )
-    public_profile = author_profile.profile_visibility == ProfileVisibility.public
-
-    post_visibility_filter = or_(
-        and_(private_profile, connected_clause),
-        public_profile,
-        Post.author_user_id == current_user_id,
-    )
-
-    post_filters = [
-        Post.state == PostState.published,
-        post_visibility_filter,
-        *visible_user_filters(author_user),
-    ]
-    if blocked_user_ids:
-        post_filters.append(Post.author_user_id.notin_(list(blocked_user_ids)))
-
-    posts_query = select(
-        literal("post").label("feed_type"),
-        Post.id.label("activity_id"),
-        Post.id.label("post_id"),
-        literal(None, type_=sa.Uuid).label("reposter_profile_id"),
-        Post.created_at.label("activity_created_at")
-    ).join(
-        author_profile, author_profile.user_id == Post.author_user_id
-    ).join(
-        author_user, author_user.id == Post.author_user_id
-    ).where(*post_filters)
-
-    # Repost query visibility filters
-    reposter_profile = aliased(Profile, name="reposter_profile")
-    reposter_user = aliased(User, name="reposter_user")
-    orig_author_profile = aliased(Profile, name="orig_author_profile")
-    orig_author_user = aliased(User, name="orig_author_user")
-
-    reposter_private = reposter_profile.profile_visibility.in_(
-        [ProfileVisibility.private, ProfileVisibility.connections_only]
-    )
-    reposter_public = reposter_profile.profile_visibility == ProfileVisibility.public
-
-    if connected_author_ids:
-        reposter_connected_clause = reposter_profile.user_id.in_(connected_author_ids)
-    else:
-        reposter_connected_clause = false()
-
-    reposter_visibility_filter = or_(
-        and_(reposter_private, reposter_connected_clause),
-        reposter_public,
-        reposter_profile.user_id == current_user_id,
-    )
-
-    repost_filters = [
-        Post.state == PostState.published,
-        reposter_visibility_filter,
-        *visible_user_filters(reposter_user),
-        *visible_user_filters(orig_author_user),
-    ]
-    if blocked_user_ids:
-        repost_filters.append(reposter_profile.user_id.notin_(list(blocked_user_ids)))
-        repost_filters.append(Post.author_user_id.notin_(list(blocked_user_ids)))
-
-    reposts_query = select(
-        literal("repost").label("feed_type"),
-        Repost.id.label("activity_id"),
-        Post.id.label("post_id"),
-        reposter_profile.id.label("reposter_profile_id"),
-        Repost.created_at.label("activity_created_at")
-    ).join(
-        Repost, Repost.post_id == Post.id
-    ).join(
-        reposter_profile, reposter_profile.id == Repost.profile_id
-    ).join(
-        reposter_user, reposter_user.id == reposter_profile.user_id
-    ).join(
-        orig_author_user, orig_author_user.id == Post.author_user_id
-    ).where(*repost_filters)
-
-    union_query = union_all(posts_query, reposts_query).subquery()
-    stmt = select(
-        union_query.c.feed_type,
-        union_query.c.activity_id,
-        union_query.c.post_id,
-        union_query.c.reposter_profile_id,
-        union_query.c.activity_created_at,
-    ).order_by(union_query.c.activity_created_at.desc())
-
-    if offset:
-        stmt = stmt.offset(offset)
+    post_ids_stmt = post_ids_stmt.offset(offset)
     if limit is not None:
-        stmt = stmt.limit(limit)
+        post_ids_stmt = post_ids_stmt.limit(limit)
 
-    rows = (await db.execute(stmt)).all()
-    if not rows:
+    post_ids = list((await db.execute(post_ids_stmt)).scalars().all())
+    if not post_ids:
         return []
 
-    # Batch load Posts and Profiles to prevent N+1 queries
-    post_ids = [r.post_id for r in rows]
-    reposter_profile_ids = [r.reposter_profile_id for r in rows if r.reposter_profile_id is not None]
-
-    posts_dict = {}
-    if post_ids:
-        post_author_profile = aliased(Profile, name="post_author_profile")
-        posts_stmt = (
-            select(Post, post_author_profile)
-            .join(post_author_profile, post_author_profile.user_id == Post.author_user_id)
-            .where(Post.id.in_(post_ids))
-            .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
-        )
-        posts_results = (await db.execute(posts_stmt)).all()
-        for post, author_profile in posts_results:
-            post._author_profile = author_profile
-            posts_dict[post.id] = post
-
-    reposter_profiles_dict = {}
-    if reposter_profile_ids:
-        profiles_stmt = select(Profile).where(Profile.id.in_(reposter_profile_ids))
-        profiles_results = (await db.execute(profiles_stmt)).scalars().all()
-        for profile in profiles_results:
-            reposter_profiles_dict[profile.id] = profile
-
-    results = []
-    for r in rows:
-        post = posts_dict.get(r.post_id)
-        if post:
-            reposter_profile = reposter_profiles_dict.get(r.reposter_profile_id)
-            results.append((r.feed_type, r.activity_id, post, reposter_profile, r.activity_created_at))
-
-    return results
+    stmt = (
+        select(Post, author_profile)
+        .join(author_profile, author_profile.user_id == Post.author_user_id)
+        .join(author_user, author_user.id == Post.author_user_id)
+        .where(Post.id.in_(post_ids), *visible_user_filters(author_user))
+        .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
+    )
+    rows = list((await db.execute(stmt)).all())
+    order = {post_id: index for index, post_id in enumerate(post_ids)}
+    rows.sort(key=lambda row: order.get(row[0].id, 0))
+    return rows

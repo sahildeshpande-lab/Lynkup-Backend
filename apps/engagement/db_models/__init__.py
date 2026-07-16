@@ -4,6 +4,7 @@ from .bookmark_db_model import Bookmark
 from .share_event_db_model import ShareEvent
 from .comment_db_model import Comment
 from .comment_reaction_db_model import CommentReaction
+from .report_db_model import Report
 
 __all__ = [
     "PostReaction",
@@ -12,4 +13,5 @@ __all__ = [
     "ShareEvent",
     "Comment",
     "CommentReaction",
+    "Report",
 ]

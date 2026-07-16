@@ -1,17 +1,9 @@
 from __future__ import annotations
 
 import os
-
-# Import all db models to populate SQLModel registry and avoid mapping errors in unit tests
-from apps.accounts.db_models import *
-from apps.profiles.db_models import *
-from apps.feed.db_models import *
-from apps.invitations.db_models import *
-from apps.engagement.db_models import *
-from apps.connections.db_models import *
+from unittest.mock import AsyncMock, Mock
 
 import pytest
-from unittest.mock import AsyncMock, Mock
 
 os.environ.setdefault("DISABLE_DB_POOL", "true")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
