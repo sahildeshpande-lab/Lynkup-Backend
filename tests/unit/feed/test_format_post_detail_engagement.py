@@ -44,6 +44,7 @@ def test_format_post_detail_includes_engagement_fields():
     assert data["is_reposted"] is False
     assert data["is_bookmarked"] is True
     assert data["user_reaction"] == "LIKE"
+    assert data["reposted_data"] is None
 
 
 def test_format_reviewed_post_item_includes_engagement_counts():

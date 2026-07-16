@@ -67,6 +67,7 @@ def format_post_detail(
     is_bookmarked: bool = False,
     user_reaction: str | None = None,
     reactions=None,
+    reposted_data: dict | None = None,
 ) -> dict:
     """
     Format a Post model and its attachments into a dictionary matching PostDetailData schema.
@@ -107,7 +108,8 @@ def format_post_detail(
         "reviewed_at": post.reviewed_at,
         "moderator_id": post.moderator_id,
         "moderator_name": _resolve_moderator_name(moderator_user, moderator_profile),
-        "media": media_data
+        "media": media_data,
+        "reposted_data": reposted_data,
     }
     author_profile = author_profile or getattr(post, "_author_profile", None)
     if author_profile is not None:
@@ -122,6 +124,84 @@ def format_post_detail(
             "profilePhoto_url": photo_url,
         })
     return data
+
+
+def format_repost_item(
+    original_post: Post,
+    *,
+    original_author_profile,
+    reposter_profile,
+    repost_id: UUID,
+    reposted_at: datetime,
+    is_liked: bool = False,
+    viewer_has_reposted: bool = False,
+    is_bookmarked: bool = False,
+    user_reaction: str | None = None,
+    reactions=None,
+    moderator_user=None,
+    moderator_profile=None,
+) -> dict:
+    """
+    Format a repost as a common post object for the reposter, with the original
+    post nested under ``reposted_data`` only (not mixed into the outer object).
+    """
+    nested = format_post_detail(
+        original_post,
+        author_profile=original_author_profile,
+        moderator_user=moderator_user,
+        moderator_profile=moderator_profile,
+        is_liked=is_liked,
+        is_reposted=viewer_has_reposted,
+        is_bookmarked=is_bookmarked,
+        user_reaction=user_reaction,
+        reactions=reactions,
+        reposted_data=None,
+    )
+
+    rp_photo = None
+    if reposter_profile is not None and reposter_profile.profile_photo_url:
+        rp_photo = generate_profile_image_url(reposter_profile.profile_photo_url)
+
+    reactions_payload = (
+        reactions.model_dump()
+        if isinstance(reactions, PostReactionsGrouped)
+        else reactions
+        if reactions is not None
+        else PostReactionsGrouped().model_dump()
+    )
+
+    return {
+        "id": repost_id,
+        "author_user_id": getattr(reposter_profile, "user_id", None),
+        "first_name": getattr(reposter_profile, "first_name", None) if reposter_profile else None,
+        "last_name": getattr(reposter_profile, "last_name", None) if reposter_profile else None,
+        "profilePhoto_url": rp_photo,
+        "state": "published",
+        "status": "published",
+        "revision_number": 0,
+        "content": {
+            "caption": None,
+            "content_html": None,
+            "visibility": "public",
+        },
+        "created_at": reposted_at,
+        "updated_at": reposted_at,
+        "like_count": original_post.like_count,
+        "repost_count": original_post.repost_count,
+        "share_count": getattr(original_post, "share_count", 0),
+        "comment_count": getattr(original_post, "comment_count", 0),
+        "is_liked": is_liked,
+        "is_reposted": True,
+        "is_bookmarked": is_bookmarked,
+        "user_reaction": user_reaction,
+        "reactions": reactions_payload,
+        "is_moderator_reviewed": original_post.is_moderator_reviewed,
+        "reviewed_at": original_post.reviewed_at,
+        "moderator_id": original_post.moderator_id,
+        "moderator_name": _resolve_moderator_name(moderator_user, moderator_profile),
+        "media": [],
+        "reposted_data": nested,
+    }
 
 # Post states that require a moderator to be assigned for review.
 _MODERATION_STATES = (PostState.processing, PostState.published)
@@ -999,7 +1079,6 @@ async def list_user_posts_items_service(
     from sqlalchemy import select as sa_select
     from sqlalchemy.orm import selectinload
     from apps.feed.db_models import PostAttachment
-    from core.images import generate_profile_image_url
 
     repost_items = []
     if requested_state == PostState.published and effective_user_id is not None:
@@ -1017,7 +1096,7 @@ async def list_user_posts_items_service(
         )
         repost_results = (await db.execute(repost_stmt)).all()
 
-        # Get the reposter's own profile for the reposted_by metadata
+        # Get the reposter's own profile for the outer repost item
         reposter_profile_stmt = sa_select(Profile).where(Profile.user_id == effective_user_id)
         reposter_profile = (await db.execute(reposter_profile_stmt)).scalar_one_or_none()
 
@@ -1039,52 +1118,43 @@ async def list_user_posts_items_service(
     )
     latest_reactions = await load_latest_post_reactions(db, all_post_ids, per_type_limit=3)
 
-    # Format authored posts (no reposted_by)
+    # Format authored posts (reposted_data is null)
     items = []
     for post, author_profile, mod_user, mod_profile in rows:
-        post_data = format_post_detail(
-            post,
-            author_profile=author_profile,
-            moderator_user=mod_user,
-            moderator_profile=mod_profile,
-            is_liked=engagement_flags.user_reaction_for(post.id) is not None,
-            is_reposted=post.id in engagement_flags.reposted_post_ids,
-            is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
-            user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
-            reactions=latest_reactions.get(post.id),
+        items.append(
+            format_post_detail(
+                post,
+                author_profile=author_profile,
+                moderator_user=mod_user,
+                moderator_profile=mod_profile,
+                is_liked=engagement_flags.user_reaction_for(post.id) is not None,
+                is_reposted=post.id in engagement_flags.reposted_post_ids,
+                is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
+                user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
+                reactions=latest_reactions.get(post.id),
+                reposted_data=None,
+            )
         )
-        post_data["reposted_by"] = None
-        items.append(post_data)
 
-    # Format reposted posts (with reposted_by)
+    # Format reposts: outer = reposter common post; original only in reposted_data
     for repost, post, author_profile, reposter_profile in repost_items:
         # Skip if this post is already in the authored list
         if post.id in post_ids:
             continue
-        post_data = format_post_detail(
-            post,
-            author_profile=author_profile,
-            is_liked=engagement_flags.user_reaction_for(post.id) is not None,
-            is_reposted=True,
-            is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
-            user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
-            reactions=latest_reactions.get(post.id),
-        )
-        if reposter_profile is not None:
-            photo_url = (
-                generate_profile_image_url(reposter_profile.profile_photo_url)
-                if reposter_profile.profile_photo_url
-                else None
+        items.append(
+            format_repost_item(
+                post,
+                original_author_profile=author_profile,
+                reposter_profile=reposter_profile,
+                repost_id=repost.id,
+                reposted_at=repost.created_at,
+                is_liked=engagement_flags.user_reaction_for(post.id) is not None,
+                viewer_has_reposted=post.id in engagement_flags.reposted_post_ids,
+                is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
+                user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
+                reactions=latest_reactions.get(post.id),
             )
-            post_data["reposted_by"] = {
-                "id": reposter_profile.user_id,
-                "first_name": reposter_profile.first_name,
-                "last_name": reposter_profile.last_name,
-                "profilePhoto_url": photo_url,
-            }
-        else:
-            post_data["reposted_by"] = None
-        items.append(post_data)
+        )
 
     total_items = total_items + len([ri for ri in repost_items if ri[1].id not in post_ids])
     return items, total_items

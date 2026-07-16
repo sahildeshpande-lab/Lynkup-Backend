@@ -74,7 +74,7 @@ async def test_get_feed_service_normal_post():
         assert formatted["last_name"] == "Smith"
         assert "alice_photo.png" in formatted["profilePhoto_url"]
         assert formatted["is_reposted"] is False
-        assert formatted["reposted_by"] is None
+        assert formatted["reposted_data"] is None
 
 
 @pytest.mark.asyncio
@@ -83,6 +83,8 @@ async def test_get_feed_service_repost_item():
     post_id = uuid.uuid4()
     author_id = uuid.uuid4()
     reposter_user_id = uuid.uuid4()
+    repost_id = uuid.uuid4()
+    reposted_at = datetime(2026, 7, 15, 11, 0, 0, tzinfo=timezone.utc)
 
     post = SimpleNamespace(
         id=post_id,
@@ -119,9 +121,9 @@ async def test_get_feed_service_repost_item():
         "post": post,
         "author_profile": author_profile,
         "is_reposted": True,
-        "repost_id": uuid.uuid4(),
+        "repost_id": repost_id,
         "reposted_by_profile": reposter_profile,
-        "reposted_at": datetime(2026, 7, 15, 11, 0, 0, tzinfo=timezone.utc),
+        "reposted_at": reposted_at,
     }
 
     db = AsyncMock()
@@ -144,21 +146,32 @@ async def test_get_feed_service_repost_item():
 
         assert len(results) == 1
         formatted = results[0]
-        # Original author details remain Alice
-        assert formatted["id"] == feed_item["repost_id"]
-        assert formatted["author_user_id"] == author_id
-        assert formatted["first_name"] == "Alice"
-        assert formatted["last_name"] == "Smith"
-        assert "alice_photo.png" in formatted["profilePhoto_url"]
-        
-        # Repost metadata is set
+
+        # Outer object is the reposter common post
+        assert formatted["id"] == repost_id
+        assert formatted["author_user_id"] == reposter_user_id
+        assert formatted["first_name"] == "Bob"
+        assert formatted["last_name"] == "Jones"
+        assert "bob_photo.png" in formatted["profilePhoto_url"]
+        assert formatted["created_at"] == reposted_at
         assert formatted["is_reposted"] is True
-        assert formatted["reposted_by"] is not None
-        assert formatted["reposted_by"]["user_id"] == reposter_user_id
-        assert formatted["reposted_by"]["first_name"] == "Bob"
-        assert formatted["reposted_by"]["last_name"] == "Jones"
-        assert "bob_photo.png" in formatted["reposted_by"]["profilePhoto_url"]
-        assert formatted["reposted_by"]["reposted_at"] == datetime(2026, 7, 15, 11, 0, 0, tzinfo=timezone.utc)
+        assert formatted["like_count"] == 10
+        assert formatted["repost_count"] == 2
+        assert formatted["content"]["caption"] is None
+        assert formatted["media"] == []
+
+        # Original post lives only inside reposted_data
+        nested = formatted["reposted_data"]
+        assert nested is not None
+        assert nested["id"] == post_id
+        assert nested["author_user_id"] == author_id
+        assert nested["first_name"] == "Alice"
+        assert nested["last_name"] == "Smith"
+        assert "alice_photo.png" in nested["profilePhoto_url"]
+        assert nested["content"]["caption"] == "Original Caption"
+        assert nested["like_count"] == 10
+        assert nested["reposted_data"] is None
+        assert "reposted_by" not in formatted
 
 
 @pytest.mark.asyncio
@@ -215,4 +228,5 @@ async def test_get_feed_service_tuples_normalization():
         assert formatted["id"] == post_id
         assert formatted["first_name"] == "Alice"
         assert formatted["is_reposted"] is False
-        assert formatted["reposted_by"] is None
+        assert formatted["reposted_data"] is None
+
