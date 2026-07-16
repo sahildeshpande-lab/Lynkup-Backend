@@ -10,6 +10,18 @@ from core.security.auth import get_current_superadmin, get_current_admin, get_cu
 from apps.accounts.db_models import User
 
 from . import services
+from apps.engagement.schemas import (
+    ReportReviewRequest,
+    ReportResponse,
+    ReportListResponse,
+)
+from apps.engagement.services import (
+    list_reports_admin_service,
+    get_report_details_admin_service,
+    review_report_admin_service,
+)
+from common.enums import ReportEntityType, ReportStatus
+from common.pagination import PaginationParams
 from .schemas import (
     AdminUserActionRequest,
     AdminUserCreateRequest,
@@ -26,7 +38,6 @@ from .schemas import (
 )
 from apps.accounts.schemas import EmailSignupRequest, RefreshTokenRequest, AdminAuthResponse
 from apps.profiles.schemas import CompletenessWeightsUpdateRequest, UpdateProfileRequest
-from apps.invitations.schemas import SoftDeleteInvitationRequest
 
 
 router = APIRouter(tags=["4] Admin Management"])
@@ -327,35 +338,6 @@ async def list_reviewed_posts(
 
 
 
-@router.get("/admin/invitations", response_model=ApiResponse)
-async def admin_list_invitations(
-    page: int | None = Query(default=None, ge=1),
-    pageSize: int | None = Query(default=None, ge=1, le=200),
-    db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_admin),
-) -> ApiResponse:
-    """List all invitation codes (including expired, deactivated, converted, soft-deleted)."""
-    from apps.invitations.services import get_all_invitations
-
-    return await get_all_invitations(db, page=page, page_size=pageSize)
-
-
-@router.delete("/admin/invitations", response_model=ApiResponse)
-async def admin_soft_delete_invitation(
-    payload: SoftDeleteInvitationRequest,
-    db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_admin),
-) -> ApiResponse:
-    """Soft-delete an invitation code. Preserves the row for audit history."""
-    from apps.invitations.services import soft_delete_invitation
-
-    return await soft_delete_invitation(
-        db,
-        code=payload.code,
-        admin_user_id=current_user.id,
-    )
-
-
 @router.patch("/admin/posts/reviewed", response_model=ApiResponse)
 async def admin_publish_or_flag_post(
     payload: AdminPublishPostRequest,
@@ -383,3 +365,62 @@ async def admin_publish_or_flag_post(
         message=_status_messages.get(payload.status, "Post updated successfully"),
         data=format_post_detail(post)
     )
+
+
+# ── Report management ────────────────────────────────────────────────
+
+@router.get(
+    "/admin/reports",
+    response_model=ReportListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get reports list",
+    description="List and filter reports. Admin/moderator only.",
+)
+async def list_reports_admin_route(
+    current_user=Depends(get_current_moderator),
+    db: AsyncSession = Depends(get_session),
+    pagination: PaginationParams = Depends(),
+    report_status: ReportStatus | None = Query(None, alias="status"),
+    entity_type: ReportEntityType | None = Query(None),
+    moderator_id: UUID | None = Query(None),
+) -> ReportListResponse:
+    _ = current_user
+    return await list_reports_admin_service(
+        db,
+        status=report_status,
+        entity_type=entity_type,
+        moderator_id=moderator_id,
+        page=pagination.page,
+        page_size=pagination.pageSize,
+    )
+
+
+@router.get(
+    "/admin/reports/{report_id}",
+    response_model=ReportResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get report details",
+    description="Retrieve details of a report by its ID. Admin/moderator only.",
+)
+async def get_report_details_admin_route(
+    report_id: UUID,
+    current_user=Depends(get_current_moderator),
+    db: AsyncSession = Depends(get_session),
+) -> ReportResponse:
+    _ = current_user
+    return await get_report_details_admin_service(db, report_id)
+
+
+@router.patch(
+    "/admin/reports",
+    response_model=ReportResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Review report",
+    description="Update a report's status and add moderator comments. Admin/moderator only. Pass report_id in the JSON body.",
+)
+async def review_report_admin_route(
+    payload: ReportReviewRequest,
+    current_user=Depends(get_current_moderator),
+    db: AsyncSession = Depends(get_session),
+) -> ReportResponse:
+    return await review_report_admin_service(db, current_user.id, payload)
