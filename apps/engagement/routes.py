@@ -26,6 +26,7 @@ from apps.engagement.schemas import (
     ShareResponse,
     UpsertCommentReactionRequest,
     UpsertPostReactionRequest,
+    ReportCreateRequest,
 )
 from apps.engagement.services import (
     create_post_comment,
@@ -34,13 +35,15 @@ from apps.engagement.services import (
     get_post_reactions,
     list_bookmarked_posts,
     list_liked_posts,
-    toggle_repost,
+    repost_post,
     share_post,
     update_bookmark,
     upsert_comment_reaction,
     upsert_post_reaction,
+    create_report_service,
 )
 from common.enums import ReactionType
+from common.schemas import ApiResponse
 from core.database.session import get_session
 from core.security.auth import get_current_app_user, get_current_user
 
@@ -75,7 +78,7 @@ async def create_post_repost(
     current_user: Annotated[User, Depends(get_current_app_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> RepostResponse:
-    return await toggle_repost(db, current_user.id, payload.post_id, payload.is_reposted)
+    return await repost_post(db, current_user.id, payload.post_id)
 
 
 @router.post(
@@ -268,3 +271,20 @@ async def upsert_comment_reaction_route(
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> CommentReactionResponse:
     return await upsert_comment_reaction(db, current_user.id, payload)
+
+
+@router.post(
+    "/reports",
+    response_model=ApiResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Submit a report",
+    description="Submit a report for a user, post, or comment.",
+)
+async def create_report_route(
+    payload: ReportCreateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> ApiResponse:
+    return await create_report_service(db, current_user.id, payload)
+
+

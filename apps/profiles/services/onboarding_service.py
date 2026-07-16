@@ -20,7 +20,6 @@ async def complete_onboarding(
     profile_photo_key: str | None ,
     banner_photo_key :str | None ,
     db: AsyncSession,
-    invitation_code: str | None = None,
 ) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
     from sqlmodel import select
@@ -130,20 +129,6 @@ async def complete_onboarding(
     db.add(user)
     db.add(profile)
     await db.flush()
-
-    if invitation_code:
-        from apps.invitations.services import redeem_invitation
-
-        invitation = await redeem_invitation(
-            db,
-            code=invitation_code,
-            redeemed_by_user_id=user.id,
-            commit=False,
-        )
-        user.referred_by_user_id = invitation.inviter_user_id
-        db.add(user)
-        await db.flush()
-
     profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
     await db.commit()

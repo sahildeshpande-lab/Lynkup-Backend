@@ -111,15 +111,14 @@ def format_post_detail(
     }
     author_profile = author_profile or getattr(post, "_author_profile", None)
     if author_profile is not None:
-        photo_url = (
-            generate_profile_image_url(author_profile.profile_photo_url)
-            if author_profile.profile_photo_url
-            else None
-        )
         data.update({
             "first_name": author_profile.first_name,
             "last_name": author_profile.last_name,
-            "profilePhoto_url": photo_url,
+            "profile_photo_url": (
+                generate_profile_image_url(author_profile.profile_photo_url)
+                if author_profile.profile_photo_url
+                else None
+            ),
         })
     return data
 
@@ -992,42 +991,7 @@ async def list_user_posts_items_service(
         offset=offset,
         limit=limit,
     )
-
-    # Also fetch posts that the effective user has reposted
-    from apps.engagement.db_models import Repost
-    from apps.profiles.db_models import Profile
-    from sqlalchemy import select as sa_select
-    from sqlalchemy.orm import selectinload
-    from apps.feed.db_models import PostAttachment
-    from core.images import generate_profile_image_url
-
-    repost_items = []
-    if requested_state == PostState.published and effective_user_id is not None:
-        # Find all reposts by this user
-        repost_stmt = (
-            sa_select(Repost, Post, Profile)
-            .join(Post, Post.id == Repost.post_id)
-            .outerjoin(Profile, Profile.user_id == Post.author_user_id)
-            .where(
-                Repost.user_id == effective_user_id,
-                Post.state == PostState.published,
-            )
-            .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
-            .order_by(Repost.created_at.desc())
-        )
-        repost_results = (await db.execute(repost_stmt)).all()
-
-        # Get the reposter's own profile for the reposted_by metadata
-        reposter_profile_stmt = sa_select(Profile).where(Profile.user_id == effective_user_id)
-        reposter_profile = (await db.execute(reposter_profile_stmt)).scalar_one_or_none()
-
-        for repost, post, author_profile in repost_results:
-            repost_items.append((repost, post, author_profile, reposter_profile))
-
     post_ids = [post.id for post, *_ in rows]
-    repost_post_ids = [post.id for _, post, *_ in repost_items]
-    all_post_ids = post_ids + repost_post_ids
-
     from apps.engagement.repositories import fetch_post_engagement_flags
     from apps.engagement.services.post_reaction_formatters import load_latest_post_reactions
     from apps.engagement.services.reaction_service import format_user_reaction
@@ -1035,14 +999,12 @@ async def list_user_posts_items_service(
     engagement_flags = await fetch_post_engagement_flags(
         db,
         current_user.id,
-        all_post_ids,
+        post_ids,
     )
-    latest_reactions = await load_latest_post_reactions(db, all_post_ids, per_type_limit=3)
+    latest_reactions = await load_latest_post_reactions(db, post_ids, per_type_limit=3)
 
-    # Format authored posts (no reposted_by)
-    items = []
-    for post, author_profile, mod_user, mod_profile in rows:
-        post_data = format_post_detail(
+    items = [
+        format_post_detail(
             post,
             author_profile=author_profile,
             moderator_user=mod_user,
@@ -1053,40 +1015,8 @@ async def list_user_posts_items_service(
             user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
             reactions=latest_reactions.get(post.id),
         )
-        post_data["reposted_by"] = None
-        items.append(post_data)
-
-    # Format reposted posts (with reposted_by)
-    for repost, post, author_profile, reposter_profile in repost_items:
-        # Skip if this post is already in the authored list
-        if post.id in post_ids:
-            continue
-        post_data = format_post_detail(
-            post,
-            author_profile=author_profile,
-            is_liked=engagement_flags.user_reaction_for(post.id) is not None,
-            is_reposted=True,
-            is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
-            user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
-            reactions=latest_reactions.get(post.id),
-        )
-        if reposter_profile is not None:
-            photo_url = (
-                generate_profile_image_url(reposter_profile.profile_photo_url)
-                if reposter_profile.profile_photo_url
-                else None
-            )
-            post_data["reposted_by"] = {
-                "id": reposter_profile.user_id,
-                "first_name": reposter_profile.first_name,
-                "last_name": reposter_profile.last_name,
-                "profilePhoto_url": photo_url,
-            }
-        else:
-            post_data["reposted_by"] = None
-        items.append(post_data)
-
-    total_items = total_items + len([ri for ri in repost_items if ri[1].id not in post_ids])
+        for post, author_profile, mod_user, mod_profile in rows
+    ]
     return items, total_items
 
 
@@ -1132,7 +1062,7 @@ def _format_reviewed_post_item(
         "comment_count": getattr(post, "comment_count", 0) or 0,
         "moderator_id": post.moderator_id,
         "moderator_name": _resolve_moderator_name(moderator_user, moderator_profile),
-        "profilePhoto_url": (
+        "profile_photo_url": (
             generate_profile_image_url(profile.profile_photo_url)
             if profile and profile.profile_photo_url
             else None
@@ -1157,7 +1087,7 @@ def _format_processing_post_item(post: Post, profile, mod_user=None, mod_profile
         "user_id": post.author_user_id,
         "first_name": profile.first_name if profile else None,
         "last_name": profile.last_name if profile else None,
-        "profilePhoto_url": (
+        "profile_photo_url": (
             generate_profile_image_url(profile.profile_photo_url)
             if profile and profile.profile_photo_url
             else None

@@ -29,3 +29,5 @@ tech_stackl
 .agents
 sonar-project.properties
 entrypoints/static/uploads/*
+
+alembic/versions/*
