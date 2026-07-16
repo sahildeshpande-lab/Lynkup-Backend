@@ -34,7 +34,7 @@ from apps.engagement.services import (
     get_post_reactions,
     list_bookmarked_posts,
     list_liked_posts,
-    repost_post,
+    toggle_repost,
     share_post,
     update_bookmark,
     upsert_comment_reaction,
@@ -75,7 +75,7 @@ async def create_post_repost(
     current_user: Annotated[User, Depends(get_current_app_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> RepostResponse:
-    return await repost_post(db, current_user.id, payload.post_id)
+    return await toggle_repost(db, current_user.id, payload.post_id, payload.is_reposted)
 
 
 @router.post(

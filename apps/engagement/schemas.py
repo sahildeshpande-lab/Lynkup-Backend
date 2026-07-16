@@ -55,6 +55,7 @@ class PostReactionResponse(ApiResponse):
 
 class RepostPostRequest(BaseModel):
     post_id: UUID
+    is_reposted: bool
 
 
 class RepostData(BaseModel):

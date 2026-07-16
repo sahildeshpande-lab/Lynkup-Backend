@@ -1,5 +1,5 @@
 from .reaction_service import upsert_post_reaction
-from .repost_service import repost_post
+from .repost_service import toggle_repost
 from .share_service import share_post
 from .bookmark_service import update_bookmark
 from .bookmark_list_service import list_bookmarked_posts
@@ -10,7 +10,7 @@ from .comment_reaction_service import upsert_comment_reaction
 
 __all__ = [
     "upsert_post_reaction",
-    "repost_post",
+    "toggle_repost",
     "share_post",
     "update_bookmark",
     "list_bookmarked_posts",

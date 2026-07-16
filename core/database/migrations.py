@@ -79,8 +79,12 @@ def _clear_orphaned_version_rows(connection: Connection) -> None:
 #             autogenerate=True,
 #         )
 
-def _prepare_database(connection: Connection) -> None:
+# def _prepare_database(connection: Connection) -> None:
+#     connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+def _prepare_database(connection):
+    logger.info("Creating pg_trgm extension")
     connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+    logger.info("pg_trgm extension ready")
 
 
 def _upgrade_to_head_with_lock(connection: Connection) -> None:

@@ -7,6 +7,7 @@ from .reaction_repository import (
 )
 from .repost_repository import (
     create_repost,
+    delete_repost,
     get_profile_id_for_user,
     get_user_repost,
     update_post_repost_count,
@@ -59,6 +60,7 @@ __all__ = [
     "update_post_like_count",
     "upsert_user_reaction",
     "create_repost",
+    "delete_repost",
     "get_profile_id_for_user",
     "get_user_repost",
     "update_post_repost_count",

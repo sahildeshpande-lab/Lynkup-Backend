@@ -15,6 +15,14 @@ async def lifespan(app: FastAPI):
 
     if db_settings.auto_init_db:
         await init_db()
+        try:
+            # from core.database.migrations import run_db_migrations_programmatically
+            # await run_db_migrations_programmatically()
+            logger.info("Migrations completed successfully")
+        except Exception:
+            logger.exception("Migration startup failed")
+            logger.info(f"Initialized database at {db_settings.db_host}")
+            raise
         # from core.database.migrations import run_db_migrations_programmatically
         # await run_db_migrations_programmatically()
         logger.info(f"Initialized database at {db_settings.db_host}")

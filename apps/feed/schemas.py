@@ -105,6 +105,14 @@ class PostContentData(BaseModel):
     visibility: str = "public"
 
 
+class ReposterSummary(BaseModel):
+    """Details of the user who reposted the original post."""
+    id: UUID
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    profilePhoto_url: Optional[str] = None
+
+
 class PostDetailData(BaseModel):
     id: UUID
     author_user_id: UUID
@@ -123,3 +131,4 @@ class PostDetailData(BaseModel):
     user_reaction: str | None = None
     reactions: PostReactionsGrouped = Field(default_factory=PostReactionsGrouped)
     media: List[PostMediaData] = Field(default_factory=list)
+    reposted_by: Optional[ReposterSummary] = None
