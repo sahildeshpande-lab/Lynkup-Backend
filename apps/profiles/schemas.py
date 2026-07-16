@@ -45,6 +45,13 @@ class OnboardingRequest(BaseModel):
     education_level_id: int
     bio: Optional[str] = Field(None, max_length=500)
     academic_interests: list[str | int]
+    invitation_code: Optional[str] = Field(
+        default=None,
+        min_length=7,
+        max_length=7,
+        pattern=r"^[A-Za-z]{3}[0-9]{4}$",
+        description="Optional invitation code (e.g. ABC1234) to redeem during onboarding",
+    )
 
 
 class CompletenessWeightsUpdateRequest(BaseModel):

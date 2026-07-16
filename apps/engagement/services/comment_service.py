@@ -197,8 +197,9 @@ async def create_post_comment(
         current_user_id=user_id,
     )
 
+    message = "Reply created successfully" if payload.parent_comment_id is not None else "Comment created successfully"
     return success_response(
-        "Comment created successfully",
+        message,
         new_comment,
         response_cls=CommentResponse,
     )

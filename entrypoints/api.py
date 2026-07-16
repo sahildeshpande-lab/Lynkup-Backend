@@ -76,6 +76,8 @@ def _error_json(message: str) -> dict:
 
 def _api_error_status_code(message: str) -> int:
     lowered = message.lower()
+    if "account doesn't exist" in lowered:
+        return 401
     if any(
         phrase in lowered
         for phrase in (
