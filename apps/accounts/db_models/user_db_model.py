@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import Boolean, Column, DateTime, String, Integer, text
@@ -7,6 +7,9 @@ from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel, Relationship
 
 from common.enums import OnboardingStatus, UserStatus, RegistrationType
+
+if TYPE_CHECKING:
+    from apps.invitations.db_models import Invitation
 
 
 def utc_now() -> datetime:
@@ -63,10 +66,52 @@ class User(SQLModel, table=True):
     purge_after: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     is_deleted: bool = Field(default=False, sa_column=Column(Boolean, server_default=text("false"), nullable=False))
     last_login_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
+    referred_by_user_id: Optional[UUID] = Field(
+        default=None,
+        foreign_key="users.id",
+        nullable=True,
+        index=True,
+    )
 
 
     roles: List[UserRole] = Relationship(
         sa_relationship=relationship("UserRole", back_populates="user", cascade="all, delete-orphan", lazy="selectin")
+    )
+    referred_by: Optional["User"] = Relationship(
+        sa_relationship=relationship(
+            "User",
+            remote_side="User.id",
+            foreign_keys="[User.referred_by_user_id]",
+            back_populates="referrals",
+        )
+    )
+    referrals: List["User"] = Relationship(
+        sa_relationship=relationship(
+            "User",
+            foreign_keys="[User.referred_by_user_id]",
+            back_populates="referred_by",
+        )
+    )
+    invitations_created: List["Invitation"] = Relationship(
+        sa_relationship=relationship(
+            "Invitation",
+            back_populates="inviter",
+            foreign_keys="[Invitation.inviter_user_id]",
+        )
+    )
+    invitations_redeemed: List["Invitation"] = Relationship(
+        sa_relationship=relationship(
+            "Invitation",
+            back_populates="redeemed_by",
+            foreign_keys="[Invitation.redeemed_by_user_id]",
+        )
+    )
+    invitations_deactivated: List["Invitation"] = Relationship(
+        sa_relationship=relationship(
+            "Invitation",
+            back_populates="deactivator",
+            foreign_keys="[Invitation.deactivated_by]",
+        )
     )
     bookmarks: List["Bookmark"] = Relationship(
         sa_relationship=relationship("Bookmark", back_populates="user", cascade="all, delete-orphan", lazy="selectin")

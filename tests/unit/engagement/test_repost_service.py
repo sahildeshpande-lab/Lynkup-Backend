@@ -8,10 +8,11 @@ import pytest
 from fastapi import HTTPException
 
 from apps.engagement.services import repost_service as svc
+from common.enums import PostState
 
 
-def _post(repost_count: int = 0):
-    return SimpleNamespace(id=uuid.uuid4(), repost_count=repost_count)
+def _post(repost_count: int = 0, state: PostState = PostState.published):
+    return SimpleNamespace(id=uuid.uuid4(), repost_count=repost_count, state=state, author_user_id=uuid.uuid4())
 
 
 def _repost():
@@ -32,20 +33,20 @@ async def test_repost_post_creates_repost_and_increments_counter(mock_db):
         patch.object(svc, "create_repost", AsyncMock(return_value=_repost())) as create_repost,
         patch.object(svc, "update_post_repost_count", AsyncMock(return_value=4)) as update_count,
     ):
-        response = await svc.repost_post(db, user_id, post.id)
+        response = await svc.toggle_repost(db, user_id, post.id, is_reposted=True)
 
     assert response.status is True
     assert response.message == "Post reposted successfully"
     assert response.data.post_id == post.id
     assert response.data.is_reposted is True
     assert response.data.repost_count == 4
-    create_repost.assert_awaited_once_with(db, profile_id, post.id)
+    create_repost.assert_awaited_once_with(db, profile_id, user_id, post.id)
     update_count.assert_awaited_once_with(db, post.id, 1)
     db.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_repost_post_returns_false_when_already_reposted(mock_db):
+async def test_repost_post_returns_success_when_already_reposted(mock_db):
     post = _post(repost_count=5)
     user_id = uuid.uuid4()
     profile_id = uuid.uuid4()
@@ -58,12 +59,67 @@ async def test_repost_post_returns_false_when_already_reposted(mock_db):
         patch.object(svc, "create_repost", AsyncMock()) as create_repost,
         patch.object(svc, "update_post_repost_count", AsyncMock()) as update_count,
     ):
-        response = await svc.repost_post(db, user_id, post.id)
+        response = await svc.toggle_repost(db, user_id, post.id, is_reposted=True)
 
-    assert response.status is False
-    assert response.message == "You have already reposted this post"
-    assert response.data is None
+    assert response.status is True
+    assert response.message == "Post reposted successfully"
+    assert response.data.post_id == post.id
+    assert response.data.is_reposted is True
+    assert response.data.repost_count == 5
     create_repost.assert_not_called()
+    update_count.assert_not_called()
+    db.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_remove_repost_deletes_repost_and_decrements_counter(mock_db):
+    post = _post(repost_count=3)
+    user_id = uuid.uuid4()
+    profile_id = uuid.uuid4()
+    existing_repost = _repost()
+    db = mock_db()
+
+    with (
+        patch.object(svc, "get_post_for_update", AsyncMock(return_value=post)),
+        patch.object(svc, "get_profile_id_for_user", AsyncMock(return_value=profile_id)),
+        patch.object(svc, "get_user_repost", AsyncMock(return_value=existing_repost)),
+        patch.object(svc, "delete_repost", AsyncMock()) as delete_repost,
+        patch.object(svc, "update_post_repost_count", AsyncMock(return_value=2)) as update_count,
+    ):
+        response = await svc.toggle_repost(db, user_id, post.id, is_reposted=False)
+
+    assert response.status is True
+    assert response.message == "Repost removed successfully"
+    assert response.data.post_id == post.id
+    assert response.data.is_reposted is False
+    assert response.data.repost_count == 2
+    delete_repost.assert_awaited_once_with(db, existing_repost)
+    update_count.assert_awaited_once_with(db, post.id, -1)
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_remove_repost_returns_success_when_not_reposted(mock_db):
+    post = _post(repost_count=2)
+    user_id = uuid.uuid4()
+    profile_id = uuid.uuid4()
+    db = mock_db()
+
+    with (
+        patch.object(svc, "get_post_for_update", AsyncMock(return_value=post)),
+        patch.object(svc, "get_profile_id_for_user", AsyncMock(return_value=profile_id)),
+        patch.object(svc, "get_user_repost", AsyncMock(return_value=None)),
+        patch.object(svc, "delete_repost", AsyncMock()) as delete_repost,
+        patch.object(svc, "update_post_repost_count", AsyncMock()) as update_count,
+    ):
+        response = await svc.toggle_repost(db, user_id, post.id, is_reposted=False)
+
+    assert response.status is True
+    assert response.message == "Repost removed successfully"
+    assert response.data.post_id == post.id
+    assert response.data.is_reposted is False
+    assert response.data.repost_count == 2
+    delete_repost.assert_not_called()
     update_count.assert_not_called()
     db.commit.assert_not_called()
 
@@ -75,7 +131,7 @@ async def test_repost_post_not_found(mock_db):
 
     with patch.object(svc, "get_post_for_update", AsyncMock(return_value=None)):
         with pytest.raises(HTTPException) as exc:
-            await svc.repost_post(db, uuid.uuid4(), post_id)
+            await svc.toggle_repost(db, uuid.uuid4(), post_id, is_reposted=True)
 
     assert exc.value.status_code == 404
 
@@ -90,6 +146,18 @@ async def test_repost_post_profile_not_found(mock_db):
         patch.object(svc, "get_profile_id_for_user", AsyncMock(return_value=None)),
     ):
         with pytest.raises(HTTPException) as exc:
-            await svc.repost_post(db, uuid.uuid4(), post.id)
+            await svc.toggle_repost(db, uuid.uuid4(), post.id, is_reposted=True)
 
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_repost_non_published_post_fails(mock_db):
+    post = _post(state=PostState.draft)
+    db = mock_db()
+
+    with patch.object(svc, "get_post_for_update", AsyncMock(return_value=post)):
+        with pytest.raises(HTTPException) as exc:
+            await svc.toggle_repost(db, uuid.uuid4(), post.id, is_reposted=True)
+
+    assert exc.value.status_code == 400

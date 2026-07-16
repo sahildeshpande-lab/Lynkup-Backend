@@ -100,6 +100,7 @@ async def complete_onboarding(
         education_level_id=payload.education_level_id,
         bio=payload.bio,
         academic_interests=payload.academic_interests,
+        invitation_code=payload.invitation_code,
         db=db,
     )
     return ApiResponse(message="onboarding completed", data=data)
