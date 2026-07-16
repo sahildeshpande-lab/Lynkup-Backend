@@ -208,36 +208,13 @@ async def get_feed(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    posts, total_items = await get_feed_service(
+    formatted_posts, total_items = await get_feed_service(
         current_user_id=current_user.id,
         page=page,
         page_size=pageSize,
         db=db,
         include_total=True,
     )
-    from apps.engagement.repositories import fetch_post_engagement_flags
-    from apps.engagement.services.post_reaction_formatters import load_latest_post_reactions
-    from apps.engagement.services.reaction_service import format_user_reaction
-
-    post_ids = [post.id for post in posts]
-    engagement_flags = await fetch_post_engagement_flags(
-        db,
-        current_user.id,
-        post_ids,
-    )
-    latest_reactions = await load_latest_post_reactions(db, post_ids, per_type_limit=3)
-    formatted_posts = [
-        format_post_detail(
-            post,
-            author_profile=getattr(post, "_author_profile", None),
-            is_liked=engagement_flags.user_reaction_for(post.id) is not None,
-            is_reposted=post.id in engagement_flags.reposted_post_ids,
-            is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
-            user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
-            reactions=latest_reactions.get(post.id),
-        )
-        for post in posts
-    ]
     if page is None and pageSize is None:
         return success_response(
             "Feed retrieved successfully",
