@@ -23,10 +23,11 @@ def _user(is_deleted=False, deleted_at=None, status=UserStatus.active):
     )
 
 
-def _post(state=PostState.published):
+def _post(state=PostState.published, moderator_id=None):
     return SimpleNamespace(
         id=uuid.uuid4(),
         state=state,
+        moderator_id=moderator_id,
     )
 
 
@@ -55,6 +56,7 @@ def _report():
 @pytest.mark.asyncio
 async def test_create_report_user_success(mock_db, scalar_result):
     reporter_id = uuid.uuid4()
+    moderator_id = uuid.uuid4()
     target_user = _user()
     payload = ReportCreateRequest(
         entity_type=ReportEntityType.user,
@@ -64,12 +66,16 @@ async def test_create_report_user_success(mock_db, scalar_result):
 
     db = mock_db(scalar_result(target_user), scalar_result(None))
 
-    with patch.object(svc, "create_report", AsyncMock(return_value=_report())) as create_report:
+    with (
+        patch.object(svc, "_resolve_report_moderator_id", AsyncMock(return_value=moderator_id)),
+        patch.object(svc, "create_report", AsyncMock(return_value=_report())) as create_report,
+    ):
         response = await svc.create_report_service(db, reporter_id, payload)
 
     assert response.status is True
     assert response.message == "Report submitted successfully."
     create_report.assert_awaited_once()
+    assert create_report.await_args.kwargs["moderator_id"] == moderator_id
     db.commit.assert_awaited_once()
 
 
@@ -107,7 +113,8 @@ async def test_create_report_soft_deleted_user(mock_db, scalar_result):
 @pytest.mark.asyncio
 async def test_create_report_post_success(mock_db, scalar_result):
     reporter_id = uuid.uuid4()
-    post = _post()
+    post_moderator_id = uuid.uuid4()
+    post = _post(moderator_id=post_moderator_id)
     payload = ReportCreateRequest(
         entity_type=ReportEntityType.post,
         entity_id=post.id,
@@ -115,12 +122,56 @@ async def test_create_report_post_success(mock_db, scalar_result):
     )
     db = mock_db(scalar_result(post), scalar_result(None))
 
-    with patch.object(svc, "create_report", AsyncMock(return_value=_report())) as create_report:
+    with (
+        patch.object(
+            svc,
+            "_resolve_report_moderator_id",
+            AsyncMock(return_value=post_moderator_id),
+        ) as resolve_moderator,
+        patch.object(svc, "create_report", AsyncMock(return_value=_report())) as create_report,
+    ):
         response = await svc.create_report_service(db, reporter_id, payload)
 
     assert response.status is True
     assert response.message == "Report submitted successfully."
+    resolve_moderator.assert_awaited_once()
+    assert resolve_moderator.await_args.kwargs["post"] is post
     create_report.assert_awaited_once()
+    assert create_report.await_args.kwargs["moderator_id"] == post_moderator_id
+
+
+@pytest.mark.asyncio
+async def test_resolve_report_moderator_uses_post_moderator():
+    post_moderator_id = uuid.uuid4()
+    post = _post(moderator_id=post_moderator_id)
+    db = AsyncMock()
+
+    result = await svc._resolve_report_moderator_id(
+        db,
+        entity_type=ReportEntityType.post,
+        post=post,
+    )
+
+    assert result == post_moderator_id
+
+
+@pytest.mark.asyncio
+async def test_resolve_report_moderator_round_robin_for_user():
+    moderator_id = uuid.uuid4()
+    db = AsyncMock()
+
+    with patch(
+        "apps.engagement.services.report_service.assign_next_moderator_round_robin",
+        AsyncMock(return_value=moderator_id),
+    ) as rr:
+        result = await svc._resolve_report_moderator_id(
+            db,
+            entity_type=ReportEntityType.user,
+            post=None,
+        )
+
+    assert result == moderator_id
+    rr.assert_awaited_once_with(db)
 
 
 @pytest.mark.asyncio
@@ -142,6 +193,7 @@ async def test_create_report_soft_deleted_post(mock_db, scalar_result):
 @pytest.mark.asyncio
 async def test_create_report_comment_success(mock_db, scalar_result):
     reporter_id = uuid.uuid4()
+    moderator_id = uuid.uuid4()
     comment = _comment()
     payload = ReportCreateRequest(
         entity_type=ReportEntityType.comment,
@@ -150,12 +202,16 @@ async def test_create_report_comment_success(mock_db, scalar_result):
     )
     db = mock_db(scalar_result(comment), scalar_result(None))
 
-    with patch.object(svc, "create_report", AsyncMock(return_value=_report())) as create_report:
+    with (
+        patch.object(svc, "_resolve_report_moderator_id", AsyncMock(return_value=moderator_id)),
+        patch.object(svc, "create_report", AsyncMock(return_value=_report())) as create_report,
+    ):
         response = await svc.create_report_service(db, reporter_id, payload)
 
     assert response.status is True
     assert response.message == "Report submitted successfully."
     create_report.assert_awaited_once()
+    assert create_report.await_args.kwargs["moderator_id"] == moderator_id
 
 
 @pytest.mark.asyncio

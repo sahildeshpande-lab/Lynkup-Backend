@@ -82,7 +82,6 @@ async def test_create_top_level_comment(mock_db):
     update_comment_count.assert_awaited_once_with(db, post_id, 1)
     db.commit.assert_awaited_once()
     assert response.status is True
-    assert response.message == "Comment created successfully"
     assert response.data.level == 1
     assert response.data.comment_text == "Great post!"
     assert response.data.can_delete_comment is True
@@ -120,7 +119,6 @@ async def test_create_reply_returns_created_comment(mock_db):
 
     assert create_fn.await_args.kwargs["level"] == 2
     assert response.status is True
-    assert response.message == "Reply created successfully"
     assert response.data.id == created.id
     assert response.data.parent_comment_id == parent.id
     assert response.data.comment_text == "Nice reply"

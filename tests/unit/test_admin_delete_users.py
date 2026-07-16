@@ -63,7 +63,7 @@ async def test_admin_delete_users_reassigns_posts_before_moderator_delete(monkey
     db = mock_db(scalar_result(superadmin), scalar_result(moderator), scalar_result(None))
 
     reassign = AsyncMock()
-    monkeypatch.setattr(svc, "_reassign_moderator_posts_to_superadmin", reassign)
+    monkeypatch.setattr(svc, "_reassign_moderator_holdings_to_superadmin", reassign)
     monkeypatch.setattr(svc, "build_user_base_response", AsyncMock(return_value={"id": str(moderator.id)}))
 
     result = await svc.admin_delete_users([str(moderator.id)], "moderator", db)
@@ -100,7 +100,7 @@ async def test_admin_delete_users_bulk_moderator_reassignment(monkeypatch, mock_
     )
 
     reassign = AsyncMock()
-    monkeypatch.setattr(svc, "_reassign_moderator_posts_to_superadmin", reassign)
+    monkeypatch.setattr(svc, "_reassign_moderator_holdings_to_superadmin", reassign)
     monkeypatch.setattr(
         svc,
         "build_user_base_response",

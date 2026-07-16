@@ -26,8 +26,14 @@ from apps.engagement.schemas import (
     ReportUserDetail,
 )
 from apps.feed.db_models import Post
+from apps.moderation.services.moderator_assignment_service import (
+    _fetch_active_moderator_ids,
+    _fetch_superadmin_user_ids,
+    assign_next_moderator_round_robin,
+)
 from apps.profiles.db_models import Profile
 from common.enums import PostState, ReportEntityType, ReportStatus, UserStatus
+from common.exceptions import ApiError
 from common.pagination import build_paginated_response
 from common.responses import error_response, success_response
 from common.schemas import ApiResponse
@@ -74,6 +80,40 @@ def format_report_detail(
     )
 
 
+async def _resolve_report_moderator_id(
+    db: AsyncSession,
+    *,
+    entity_type: ReportEntityType,
+    post: Post | None = None,
+) -> UUID | None:
+    """
+    Assign a moderator for a new report.
+
+    - Post reports reuse the moderator already assigned at publish time.
+    - User/comment reports (and posts with no moderator) use the shared
+      round-robin cursor; fall back to first active moderator, then superadmin.
+    """
+    if entity_type == ReportEntityType.post and post is not None and post.moderator_id is not None:
+        return post.moderator_id
+
+    try:
+        return await assign_next_moderator_round_robin(db)
+    except ApiError:
+        logger.warning("No active moderators for report assignment; trying fallbacks")
+    except Exception:
+        logger.exception("Round-robin failed for report assignment; trying fallbacks")
+
+    moderator_ids = await _fetch_active_moderator_ids(db)
+    if moderator_ids:
+        return moderator_ids[0]
+
+    superadmin_ids = await _fetch_superadmin_user_ids(db)
+    if superadmin_ids:
+        return superadmin_ids[0]
+
+    return None
+
+
 async def create_report_service(
     db: AsyncSession,
     user_id: UUID,
@@ -82,6 +122,8 @@ async def create_report_service(
     # 1. Prevent self-reporting
     if payload.entity_type == ReportEntityType.user and payload.entity_id == user_id:
         return error_response("You cannot report yourself", response_cls=ApiResponse)
+
+    post: Post | None = None
 
     # 2. Validate entity existence and soft-deletion status
     if payload.entity_type == ReportEntityType.user:
@@ -116,7 +158,14 @@ async def create_report_service(
     if existing is not None:
         return error_response("You have already reported this entity", response_cls=ApiResponse)
 
-    # 4. Create and save report
+    # 4. Assign moderator (post → existing; user/comment → round-robin)
+    moderator_id = await _resolve_report_moderator_id(
+        db,
+        entity_type=payload.entity_type,
+        post=post,
+    )
+
+    # 5. Create and save report
     try:
         await create_report(
             db,
@@ -124,6 +173,7 @@ async def create_report_service(
             entity_type=payload.entity_type,
             entity_id=payload.entity_id,
             reason=payload.reason,
+            moderator_id=moderator_id,
         )
         await db.commit()
     except Exception:

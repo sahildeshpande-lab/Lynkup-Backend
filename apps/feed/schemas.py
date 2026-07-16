@@ -105,44 +105,9 @@ class PostContentData(BaseModel):
     visibility: str = "public"
 
 
-class RepostedPostData(BaseModel):
-    """Original post payload nested under a repost feed/list item."""
-    id: UUID
-    author_user_id: UUID
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    profile_photo_url: Optional[str] = None
-    profilePhoto_url: Optional[str] = None
-    state: str
-    status: Optional[str] = None
-    revision_number: int
-    content: PostContentData
-    created_at: datetime
-    updated_at: datetime
-    like_count: int = 0
-    repost_count: int = 0
-    share_count: int = 0
-    comment_count: int = 0
-    is_liked: bool = False
-    is_reposted: bool = False
-    is_bookmarked: bool = False
-    user_reaction: str | None = None
-    reactions: PostReactionsGrouped = Field(default_factory=PostReactionsGrouped)
-    is_moderator_reviewed: Optional[bool] = None
-    reviewed_at: Optional[datetime] = None
-    moderator_id: Optional[UUID] = None
-    moderator_name: Optional[str] = None
-    media: List[PostMediaData] = Field(default_factory=list)
-    reposted_data: None = None
-
-
 class PostDetailData(BaseModel):
     id: UUID
     author_user_id: UUID
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    profile_photo_url: Optional[str] = None
-    profilePhoto_url: Optional[str] = None
     state: str
     revision_number: int
     content: PostContentData
@@ -158,4 +123,3 @@ class PostDetailData(BaseModel):
     user_reaction: str | None = None
     reactions: PostReactionsGrouped = Field(default_factory=PostReactionsGrouped)
     media: List[PostMediaData] = Field(default_factory=list)
-    reposted_data: Optional[RepostedPostData] = None

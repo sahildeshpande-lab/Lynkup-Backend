@@ -401,6 +401,42 @@ async def _reassign_moderator_posts_to_superadmin(
     )
 
 
+async def _reassign_moderator_reports_to_superadmin(
+    db: AsyncSession,
+    moderator_id: UUID,
+    superadmin_id: UUID,
+    *,
+    now: datetime,
+) -> None:
+    """
+    Reassign reports currently owned by a departing moderator to Super Admin.
+    """
+    from apps.engagement.db_models import Report
+    from sqlalchemy import update
+
+    await db.execute(
+        update(Report)
+        .where(Report.moderator_id == moderator_id)
+        .values(moderator_id=superadmin_id, updated_at=now)
+    )
+
+
+async def _reassign_moderator_holdings_to_superadmin(
+    db: AsyncSession,
+    moderator_id: UUID,
+    superadmin_id: UUID,
+    *,
+    now: datetime,
+) -> None:
+    """Transfer all moderator-owned review items to Super Admin before delete."""
+    await _reassign_moderator_posts_to_superadmin(
+        db, moderator_id, superadmin_id, now=now
+    )
+    await _reassign_moderator_reports_to_superadmin(
+        db, moderator_id, superadmin_id, now=now
+    )
+
+
 def _soft_delete_user_record(
     user: User,
     *,
@@ -470,8 +506,8 @@ async def admin_delete_users(user_ids: list[str], role: str, db: AsyncSession) -
             continue
 
         if role == "moderator":
-            # Transfer this moderator's assigned posts before soft-delete.
-            await _reassign_moderator_posts_to_superadmin(
+            # Transfer this moderator's assigned posts/reports before soft-delete.
+            await _reassign_moderator_holdings_to_superadmin(
                 db,
                 user.id,
                 superadmin.id,

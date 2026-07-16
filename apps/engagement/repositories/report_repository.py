@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timezone
+from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -19,6 +19,7 @@ async def create_report(
     entity_type: ReportEntityType,
     entity_id: UUID,
     reason: str,
+    moderator_id: UUID | None = None,
 ) -> Report:
     report = Report(
         reported_id=reported_id,
@@ -26,6 +27,7 @@ async def create_report(
         entity_id=entity_id,
         reason=reason,
         status=ReportStatus.under_review,
+        moderator_id=moderator_id,
     )
     db.add(report)
     return report
