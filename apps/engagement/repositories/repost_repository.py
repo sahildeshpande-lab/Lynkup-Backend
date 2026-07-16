@@ -35,26 +35,17 @@ async def get_user_repost(
 async def create_repost(
     db: AsyncSession,
     profile_id: UUID,
-    user_id: UUID,
     post_id: UUID,
     *,
     now: datetime | None = None,
 ) -> Repost:
     repost = Repost(
         profile_id=profile_id,
-        user_id=user_id,
         post_id=post_id,
         created_at=now or utc_now(),
     )
     db.add(repost)
     return repost
-
-
-async def delete_repost(
-    db: AsyncSession,
-    repost: Repost,
-) -> None:
-    await db.delete(repost)
 
 
 async def update_post_repost_count(

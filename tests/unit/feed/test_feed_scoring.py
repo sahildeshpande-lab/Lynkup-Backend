@@ -14,7 +14,7 @@ from apps.feed.services.feed_scoring import (
     viewer_has_relevance_criteria,
 )
 from apps.feed.services.feed_service import get_feed_service
-from common.enums import ProfileVisibility, PostState
+from common.enums import ProfileVisibility
 
 
 VIEWER_UNIVERSITY = uuid.uuid4()
@@ -217,41 +217,9 @@ async def test_feed_service_pagination(mock_db):
         minor="Math",
         university_id=VIEWER_UNIVERSITY,
     )
-    post_one = SimpleNamespace(
-        id=uuid.uuid4(),
-        author_user_id=uuid.uuid4(),
-        state=PostState.published,
-        revision_number=1,
-        content={},
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-        like_count=0,
-        repost_count=0,
-        share_count=0,
-        comment_count=0,
-        is_moderator_reviewed=False,
-        reviewed_at=None,
-        moderator_id=None,
-        attachments=[],
-    )
-    post_two = SimpleNamespace(
-        id=uuid.uuid4(),
-        author_user_id=uuid.uuid4(),
-        state=PostState.published,
-        revision_number=1,
-        content={},
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-        like_count=0,
-        repost_count=0,
-        share_count=0,
-        comment_count=0,
-        is_moderator_reviewed=False,
-        reviewed_at=None,
-        moderator_id=None,
-        attachments=[],
-    )
-    author_profile = SimpleNamespace(first_name="A", last_name="B", profile_photo_url=None, user_id=post_one.author_user_id)
+    post_one = SimpleNamespace(id=uuid.uuid4(), author_user_id=uuid.uuid4())
+    post_two = SimpleNamespace(id=uuid.uuid4(), author_user_id=uuid.uuid4())
+    author_profile = SimpleNamespace(first_name="A", last_name="B", profile_photo_url=None)
 
     db = mock_db()
 
@@ -283,8 +251,7 @@ async def test_feed_service_pagination(mock_db):
     )
     assert total == 5
     assert len(posts) == 2
-    assert posts[0]["first_name"] == "A"
-    assert posts[0]["author_user_id"] == post_one.author_user_id
+    assert posts[0]._author_profile is author_profile
 
 
 @pytest.mark.asyncio

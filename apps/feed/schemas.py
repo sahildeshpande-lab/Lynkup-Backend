@@ -105,30 +105,9 @@ class PostContentData(BaseModel):
     visibility: str = "public"
 
 
-class ReposterSummary(BaseModel):
-    """Details of the user who reposted the original post."""
-    id: UUID
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    profilePhoto_url: Optional[str] = None
-
-
-class RepostedBy(BaseModel):
-    user_id: UUID
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    profilePhoto_url: Optional[str] = None
-    profile_photo_url: Optional[str] = None
-    reposted_at: datetime
-
-
 class PostDetailData(BaseModel):
     id: UUID
     author_user_id: UUID
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    profile_photo_url: Optional[str] = None
-    profilePhoto_url: Optional[str] = None
     state: str
     revision_number: int
     content: PostContentData
@@ -144,4 +123,3 @@ class PostDetailData(BaseModel):
     user_reaction: str | None = None
     reactions: PostReactionsGrouped = Field(default_factory=PostReactionsGrouped)
     media: List[PostMediaData] = Field(default_factory=list)
-    reposted_by: Optional[RepostedBy] = None
