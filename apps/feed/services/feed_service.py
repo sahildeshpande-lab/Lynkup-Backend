@@ -117,6 +117,8 @@ async def get_feed_service(
             formatted["profilePhoto_url"] = p_url
 
         if is_reposted and item["reposted_by_profile"]:
+            if item.get("repost_id"):
+                formatted["id"] = item["repost_id"]
             rp = item["reposted_by_profile"]
             rp_photo = (
                 generate_profile_image_url(rp.profile_photo_url)

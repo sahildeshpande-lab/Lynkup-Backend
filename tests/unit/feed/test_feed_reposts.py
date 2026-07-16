@@ -145,7 +145,7 @@ async def test_get_feed_service_repost_item():
         assert len(results) == 1
         formatted = results[0]
         # Original author details remain Alice
-        assert formatted["id"] == post_id
+        assert formatted["id"] == feed_item["repost_id"]
         assert formatted["author_user_id"] == author_id
         assert formatted["first_name"] == "Alice"
         assert formatted["last_name"] == "Smith"
