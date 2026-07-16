@@ -7,6 +7,7 @@ from apps.feed.db_models import Post, PostRevision, MediaAsset, PostAttachment, 
 from apps.engagement.db_models import PostReaction, Repost, Bookmark, ShareEvent, Comment, CommentReaction
 from apps.moderation.db_models import ModerationWordsConfig, ModerationAssignmentState
 from apps.invitations.db_models import Invitation
+from apps.report.db_models import Report
 
 __all__ = [
     "ConsentRecord",
@@ -44,6 +45,7 @@ __all__ = [
     "ShareEvent",
     "Comment",
     "CommentReaction",
+    "Report",
     "ModerationWordsConfig",
     "ModerationAssignmentState",
     "Invitation",

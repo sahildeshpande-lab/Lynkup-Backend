@@ -1,0 +1,46 @@
+[33mcommit 432675c9c25ae2b7ec3bc125f2689a6a5c643927[m[33m ([m[1;31morigin/report[m[33m)[m
+Author: unknown <sahil.d@ksolves.com>
+Date:   Thu Jul 16 19:20:44 2026 +0530
+
+    report
+
+ .env.example                                       |   6 [32m+[m[31m-[m
+ alembic/env.py                                     |   1 [31m-[m
+ apps/accounts/db_models/user_db_model.py           |  47 [32m+[m[31m---[m
+ apps/administration/routes.py                      | 101 [32m+++++[m[31m---[m
+ .../services/user_management_service.py            |  40 [32m+++[m[31m-[m
+ apps/engagement/db_models/__init__.py              |   2 [32m+[m
+ apps/engagement/db_models/repost_db_model.py       |   3 [31m-[m
+ apps/engagement/repositories/__init__.py           |  18 [32m+[m[31m-[m
+ apps/engagement/repositories/report_repository.py  |   4 [32m+[m[31m-[m
+ apps/engagement/repositories/repost_repository.py  |   9 [31m-[m
+ apps/engagement/routes.py                          |  24 [32m+[m[31m-[m
+ apps/engagement/schemas.py                         |  60 [32m++++[m[31m-[m
+ apps/engagement/services/__init__.py               |  14 [32m+[m[31m-[m
+ apps/engagement/services/comment_service.py        |   3 [32m+[m[31m-[m
+ apps/engagement/services/report_service.py         |  52 [32m++++[m[31m-[m
+ apps/engagement/services/repost_service.py         | 145 [32m++++[m[31m--------[m
+ apps/feed/repositories/feed_repository.py          | 255 [32m++++[m[31m-----------------[m
+ apps/feed/routes.py                                |  25 [32m+[m[31m-[m
+ apps/feed/schemas.py                               |  36 [31m---[m
+ apps/feed/services/__init__.py                     |   3 [32m+[m[31m-[m
+ apps/feed/services/feed_service.py                 | 201 [32m+++++[m[31m-----------[m
+ apps/feed/services/post_service.py                 | 186 [32m++[m[31m-------------[m
+ apps/profiles/routes.py                            |   1 [31m-[m
+ apps/profiles/schemas.py                           |   7 [31m-[m
+ apps/profiles/services/onboarding_service.py       |  15 [31m--[m
+ common/enums.py                                    |  18 [32m+[m[31m-[m
+ common/time.py                                     |  42 [31m----[m
+ core/database/models.py                            |   2 [31m-[m
+ core/lifespan.py                                   |  22 [32m+[m[31m-[m
+ core/routes.py                                     |   2 [31m-[m
+ entrypoints/api.py                                 |   2 [31m-[m
+ tests/unit/conftest.py                             |  10 [32m+[m[31m-[m
+ tests/unit/engagement/test_comment_service.py      |   2 [31m-[m
+ tests/unit/engagement/test_report_service.py       |  66 [32m+++++[m[31m-[m
+ tests/unit/engagement/test_repost_service.py       |  90 [32m+[m[31m-------[m
+ tests/unit/feed/test_feed_scoring.py               |  43 [32m+[m[31m---[m
+ .../feed/test_format_post_detail_engagement.py     |   1 [31m-[m
+ tests/unit/test_admin_delete_users.py              |   4 [32m+[m[31m-[m
+ tests/unit/test_config_and_security.py             |   4 [32m+[m[31m-[m
+ 39 files changed, 575 insertions(+), 991 deletions(-)

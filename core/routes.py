@@ -11,6 +11,7 @@ from apps.feed.routes import router as feed_router
 from apps.engagement.routes import router as engagement_router
 from apps.moderation.routes import router as moderation_router
 from apps.invitations.routes import router as invitations_router
+from apps.report.routes import router as report_router
 
 
 def build_router() -> APIRouter:
@@ -26,4 +27,5 @@ def build_router() -> APIRouter:
     router.include_router(engagement_router)
     router.include_router(feed_router)
     router.include_router(invitations_router)
+    router.include_router(report_router)
     return router
