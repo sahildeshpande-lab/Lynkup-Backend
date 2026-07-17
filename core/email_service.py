@@ -364,21 +364,27 @@ def _render_template(template_name: str, context: dict[str, object], raw_keys: s
     return rendered
 
 
-def _render_email_layout(title: str, body_html: str) -> str:
-    logo_url = os.getenv("LOGO_URL", "https://kampulynk-dev-spaces.sfo3.cdn.digitaloceanspaces.com/logo/logo.png",)
+_DEFAULT_LOGO_URL = "https://kampulynk-dev-spaces.sfo3.digitaloceanspaces.com/logo/logo.png"
 
-    if not logo_url.startswith(("http://", "https://")):
-        # base_url = os.getenv("BASE_URL").rstrip("/")
-        logo_url = f"{logo_url}"
 
+def _resolve_logo_url() -> str:
+    # Prefer EmailSettings (loads .env via pydantic). os.getenv alone often misses LOGO_URL.
+    logo_url = (email_settings.logo_url or os.getenv("LOGO_URL") or "").strip()
+    if logo_url.startswith(("http://", "https://")):
+        return logo_url
+    return _DEFAULT_LOGO_URL
+
+
+def _render_email_layout(title: str, body_html: str, hero_text: str | None = None) -> str:
     return _render_template(
         "layouts/base_email.html",
         {
             "title": title,
+            "hero_text": hero_text or title,
             "body_html": body_html,
-            "logo_url": logo_url,
+            "logo_url": _resolve_logo_url(),
         },
-        raw_keys={"body_html"},
+        raw_keys={"body_html", "logo_url"},
     )
 
 
@@ -386,14 +392,35 @@ def _paragraphs(text: str) -> str:
     return "".join(f'<p style="margin:0 0 14px;">{escape(part)}</p>' for part in text.splitlines() if part.strip())
 
 
-def _otp_template_details(otp_purpose: str) -> tuple[str, str, str]:
+_VERIFICATION_HERO_TEXT = (
+    "Our mission is to connect and empower university students to achieve their educational goals."
+)
+
+
+def _otp_template_details(otp_purpose: str) -> tuple[str, str, str, str]:
+    """Return (subject_title, grey_header, grey_body, hero_text)."""
     match otp_purpose:
         case "email_verification":
-            return ("Email Verification", "Email Verification", "To verify your email use this one time OTP")
+            return (
+                "Email Verification",
+                "Email Verification",
+                "Use this one-time password (OTP) to verify your email address.",
+                _VERIFICATION_HERO_TEXT,
+            )
         case "password_reset":
-            return ("Temporary Password", "Your Temporary Password", "Use this as one-time password to set your password")
+            return (
+                "Temporary Password",
+                "Your Temporary Password",
+                "Use this as one-time password to set your password",
+                "Temporary Password",
+            )
         case _:
-            return ("Email Verification", "Email Verification", "To verify your email use this one time OTP")
+            return (
+                "Email Verification",
+                "Email Verification",
+                "Use this one-time password (OTP) to verify your email address.",
+                _VERIFICATION_HERO_TEXT,
+            )
 
 
 def _build_otp_display_html(otp: str, brand_blue: str) -> str:
@@ -404,8 +431,9 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
     return (
         '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 8px 0 4px;">'
         "<tr>"
-        '<td align="center" style="padding: 28px 20px; background-color: #F8FAFC; border: 1.5px dashed #CBD5E1;">'
-        f'<span class="otp-font" style="font-size: 32px; font-weight: 700; color: #071A35; letter-spacing: 10px; font-family: \'Courier New\', Courier, monospace; display: inline-block; padding-left: 10px;">{spaced}</span>'
+        f'<td align="center" style="padding: 28px 20px; background-color: #FFFFFF; border: 2px dashed {brand_blue}; border-radius: 8px;">'
+        f'<div style="font-size: 11px; font-weight: 600; color: {brand_blue}; letter-spacing: 1.5px; text-transform: uppercase; font-family: Arial, Helvetica, sans-serif; margin-bottom: 10px;">Your OTP</div>'
+        f'<span class="otp-font" style="font-size: 36px; font-weight: 700; color: #071A35; letter-spacing: 12px; font-family: \'Courier New\', Courier, monospace; display: inline-block; padding-left: 12px;">{spaced}</span>'
         "</td>"
         "</tr>"
         "</table>"
@@ -413,19 +441,25 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
 
 
 def build_otp_email_html(otp: str, otp_purpose: str = "email_verification") -> str:
-    title, header, body_text = _otp_template_details(otp_purpose)
+    title, header, body_text, hero_text = _otp_template_details(otp_purpose)
     otp_expire_minutes = email_settings.otp_expire_minutes
-    
+
     brand_blue = str(BRAND_COLORS.get("brand_blue", "#0B5FA5"))
     otp_display_html = _build_otp_display_html(otp, brand_blue)
 
     raw_keys = {"otp_display"}
     body_html = _render_template(
         "auth/otp_email.html",
-        {"otp": otp, "header": header, "body_text": body_text, "otp_display": otp_display_html,"otp_expire_minutes":otp_expire_minutes},
+        {
+            "otp": otp,
+            "header": header,
+            "body_text": body_text,
+            "otp_display": otp_display_html,
+            "otp_expire_minutes": otp_expire_minutes,
+        },
         raw_keys=raw_keys,
     )
-    return _render_email_layout(title, body_html)
+    return _render_email_layout(title, body_html, hero_text=hero_text)
 
 
 def _notification_template_name(notification_type: str) -> str:
@@ -507,11 +541,11 @@ async def send_otp_email(
     background_tasks: BackgroundTasks | None = None,
 ) -> bool:
     """Send OTP in the background. Users are actively waiting for this."""
-    title, _, _ = _otp_template_details(otp_purpose)
+    title, _, _, _ = _otp_template_details(otp_purpose)
     purpose = f"OTP: {otp_purpose}"
     subject = f"KampuLynk {title}"
     html_content = build_otp_email_html(otp, otp_purpose)
-    
+
     send_email_in_background(background_tasks, to_email, subject, html_content, purpose)
     return True
 
