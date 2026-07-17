@@ -3,6 +3,8 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
     <title>{{title}}</title>
 
     <!--[if mso]>
@@ -16,12 +18,23 @@
     <![endif]-->
 
     <style>
+      :root {
+        color-scheme: light dark;
+        supported-color-schemes: light dark;
+      }
+
       /* Reset & Client-specific Adjustments */
       body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
       table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
       img { -ms-interpolation-mode: bicubic; border: 0; display: block; }
       table { border-collapse: collapse !important; }
-      body { height: 100% !important; margin: 0 !important; padding: 0 !important; width: 100% !important; background-color: #F3F4F6; }
+      body {
+        height: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 100% !important;
+        background-color: #F3F4F6;
+      }
       a[x-apple-data-detectors] { color: inherit !important; text-decoration: none !important; }
 
       /* Responsive Styles */
@@ -33,13 +46,92 @@
         .footer-pad { padding: 24px 20px !important; }
         .otp-font { font-size: 28px !important; letter-spacing: 8px !important; }
       }
+
+      /* Dark mode: follow device system theme */
+      @media (prefers-color-scheme: dark) {
+        body,
+        .email-bg {
+          background-color: #000000 !important;
+        }
+        .email-container {
+          background-color: #000000 !important;
+          border-color: #1F2937 !important;
+          box-shadow: none !important;
+        }
+        .header-pad {
+          background-color: #000000 !important;
+          border-bottom-color: #1F2937 !important;
+        }
+        .tagline-text {
+          color: #94A3B8 !important;
+        }
+        .brand-fallback {
+          color: #34D399 !important;
+        }
+        .hero-pad {
+          background-color: #0B1220 !important;
+        }
+        .hero-text {
+          color: #F8FAFC !important;
+        }
+        .content-pad {
+          background-color: #000000 !important;
+          color: #E2E8F0 !important;
+        }
+        .footer-pad {
+          background-color: #0A0A0A !important;
+          border-top-color: #1F2937 !important;
+        }
+        .footer-text {
+          color: #94A3B8 !important;
+        }
+        .body-text {
+          color: #CBD5E1 !important;
+        }
+        .muted-text {
+          color: #94A3B8 !important;
+        }
+        .otp-card {
+          background-color: #111827 !important;
+          border-color: #4473BD !important;
+        }
+        .otp-label {
+          color: #93C5FD !important;
+        }
+        .otp-digits {
+          color: #F8FAFC !important;
+        }
+      }
+
+      /* Outlook.com / some webmail dark mode helpers */
+      [data-ogsc] body,
+      [data-ogsc] .email-bg {
+        background-color: #000000 !important;
+      }
+      [data-ogsc] .email-container,
+      [data-ogsc] .header-pad,
+      [data-ogsc] .content-pad {
+        background-color: #000000 !important;
+      }
+      [data-ogsc] .footer-pad {
+        background-color: #0A0A0A !important;
+      }
+      [data-ogsc] .body-text,
+      [data-ogsc] .content-pad {
+        color: #E2E8F0 !important;
+      }
+      [data-ogsc] .muted-text,
+      [data-ogsc] .footer-text,
+      [data-ogsc] .tagline-text {
+        color: #94A3B8 !important;
+      }
     </style>
   </head>
 
   <body style="margin: 0; padding: 0; background-color: #F3F4F6;">
 
     <!-- Background Table -->
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #F3F4F6;">
+    <table class="email-bg" role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #F3F4F6;">
       <tr>
         <td align="center" style="padding: 40px 12px;">
 
@@ -72,13 +164,13 @@
                         height="48"
                         style="display: block; border: 0; outline: none; text-decoration: none; border-radius: 8px; width: 48px; height: 48px;"
                       >
-                      <div style="font-size: 12px; color: #64748B; margin-top: 8px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; letter-spacing: 0.3px;">
+                      <div class="tagline-text" style="font-size: 12px; color: #64748B; margin-top: 8px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; letter-spacing: 0.3px;">
                         Connect. Collaborate. Achieve.
                       </div>
                     </td>
                     <td align="right" valign="middle" style="font-size: 22px; font-weight: bold; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; white-space: nowrap; padding-left: 16px;">
                       <!-- Fallback color for clients that don't support text-gradients -->
-                      <span style="color: #00A74F;">
+                      <span class="brand-fallback" style="color: #00A74F;">
                         <span style="background: linear-gradient(180deg, #00A74F 0%, #4473BD 100%); -webkit-background-clip: text; background-clip: text; color: transparent;">
                           KampuLynk
                         </span>
@@ -92,7 +184,7 @@
             <!-- Hero Banner -->
             <tr>
               <td class="hero-pad" style="background-color: #0F172A; padding: 32px;">
-                <p style="margin: 0; font-size: 18px; font-weight: 500; color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; text-align: center;">
+                <p class="hero-text" style="margin: 0; font-size: 18px; font-weight: 500; color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; text-align: center;">
                   {{hero_text}}
                 </p>
               </td>
@@ -108,12 +200,12 @@
             <!-- Footer Section -->
             <tr>
               <td class="footer-pad" style="background-color: #F8FAFC; padding: 24px 32px; border-top: 1px solid #E2E8F0;">
-                <p style="margin: 0 0 12px; font-size: 12px; color: #94A3B8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; text-align: center;">
+                <p class="footer-text" style="margin: 0 0 12px; font-size: 12px; color: #94A3B8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; text-align: center;">
                   This is an automated security notification sent by KampuLynk.
                 </p>
 
                 <div style="padding-top: 12px;">
-                  <p style="margin: 0; font-size: 12px; color: #94A3B8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; text-align: center;">
+                  <p class="footer-text" style="margin: 0; font-size: 12px; color: #94A3B8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; text-align: center;">
                     &#169; 2026 KampuLynk. All rights reserved.
                   </p>
                 </div>
