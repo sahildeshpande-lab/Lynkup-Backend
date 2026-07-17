@@ -107,6 +107,57 @@ async def get_academic_interests(
     return paginated.model_dump()
 
 
+async def create_academic_interest(
+    name: str,
+    education_level_id: int,
+    db: AsyncSession,
+) -> dict:
+    from apps.profiles.db_models.education_level_db_model import EducationLevel
+    from common.exceptions import ApiError
+    from sqlalchemy.exc import IntegrityError
+
+    education_level = (
+        await db.execute(
+            select(EducationLevel).where(
+                EducationLevel.id == education_level_id,
+                EducationLevel.is_active == True,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+    if education_level is None:
+        raise ApiError("Education level not found")
+
+    existing = (
+        await db.execute(
+            select(AcademicInterest).where(
+                func.lower(AcademicInterest.name) == name.lower()
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise ApiError("Academic interest already exists")
+
+    interest = AcademicInterest(
+        name=name,
+        education_level_id=education_level_id,
+        is_active=True,
+    )
+    db.add(interest)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise ApiError("Academic interest already exists") from None
+    await db.refresh(interest)
+
+    return {
+        "id": str(interest.id),
+        "name": interest.name,
+        "educationLevelId": str(interest.education_level_id),
+        "isActive": interest.is_active,
+    }
+
+
 async def _get_education_levels_with_interests(
     db: AsyncSession,
     *,

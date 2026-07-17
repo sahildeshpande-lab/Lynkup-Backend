@@ -12,7 +12,12 @@ from apps.moderation.services import moderation_words_service
 from apps.profiles.db_models import CompletenessWeight, Profile
 from apps.profiles.services import completeness_service
 from apps.search.schemas import UniversitySearchParams
-from apps.search.services import get_academic_interests, get_academics_info, search_universities
+from apps.search.services import (
+    create_academic_interest,
+    get_academic_interests,
+    get_academics_info,
+    search_universities,
+)
 
 
 @pytest.mark.asyncio
@@ -74,6 +79,7 @@ async def test_search_universities_and_academic_interests(mock_db, scalar_result
     interests = await get_academic_interests("a", 1, 10, db)
     assert interests["items"] == [{"id": "1", "name": "AI"}]
 
+
     bachelors = SimpleNamespace(id=1, name="Bachelors", is_active=True)
     masters = SimpleNamespace(id=2, name="Masters", is_active=True)
     chemistry = SimpleNamespace(id=5, name="Chemistry", education_level_id=1, is_active=True)
@@ -106,6 +112,28 @@ async def test_search_universities_and_academic_interests(mock_db, scalar_result
     assert info["countries"]["totalItems"] == 0
     assert info["hashtags"]["items"] == []
     assert info["hashtags"]["totalItems"] == 0
+
+
+@pytest.mark.asyncio
+async def test_create_academic_interest(mock_db, scalar_result):
+    education_level = SimpleNamespace(id=1, name="Bachelors", is_active=True)
+    db = mock_db(scalar_result(education_level), scalar_result(None))
+
+    async def set_generated_id(interest):
+        interest.id = 9
+
+    db.refresh.side_effect = set_generated_id
+
+    result = await create_academic_interest("Data Science", 1, db)
+
+    assert result == {
+        "id": "9",
+        "name": "Data Science",
+        "educationLevelId": "1",
+        "isActive": True,
+    }
+    db.add.assert_called_once()
+    db.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

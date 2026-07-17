@@ -124,6 +124,41 @@ def test_get_academics_info_returns_success(monkeypatch) -> None:
     assert body["data"]["educationLevels"][1]["interests"][0]["name"] == "Artificial Intelligence"
 
 
+def test_create_academic_interest_returns_created(monkeypatch) -> None:
+    async def _create_academic_interest(name, education_level_id, db) -> dict:
+        assert name == "Data Science"
+        assert education_level_id == 1
+        return {
+            "id": "7",
+            "name": name,
+            "educationLevelId": str(education_level_id),
+            "isActive": True,
+        }
+
+    monkeypatch.setattr(
+        search_routes.services,
+        "create_academic_interest",
+        _create_academic_interest,
+    )
+
+    response = client.post(
+        "/api/v1/academic-interests",
+        json={"name": "  Data   Science  ", "educationLevelId": 1},
+    )
+
+    assert response.status_code == 201
+    assert response.json() == {
+        "status": True,
+        "message": "Academic interest created successfully",
+        "data": {
+            "id": "7",
+            "name": "Data Science",
+            "educationLevelId": "1",
+            "isActive": True,
+        },
+    }
+
+
 def test_search_users_route(monkeypatch) -> None:
     async def _mock_search_users(current_user, db, query, page, page_size):
         return {

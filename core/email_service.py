@@ -105,6 +105,8 @@ async def _deliver_email_via_sendgrid(to_email: str, subject: str, html_body: st
             subject=subject,
             html_content=html_body,
         )
+        if f"cid:{_LOGO_CID}" in html_body:
+            _attach_inline_logo(message)
         client = SendGridAPIClient(api_key)
         response = client.send(message)
         success = 200 <= response.status_code < 300
@@ -365,14 +367,53 @@ def _render_template(template_name: str, context: dict[str, object], raw_keys: s
 
 
 _DEFAULT_LOGO_URL = "https://kampulynk-dev-spaces.sfo3.digitaloceanspaces.com/logo/logo.png"
+_LOGO_CID = "kampulynk-logo"
+_LOGO_FILE = Path(__file__).resolve().parents[1] / "static" / "email" / "kampulynk-logo.png"
 
 
-def _resolve_logo_url() -> str:
-    # Prefer EmailSettings (loads .env via pydantic). os.getenv alone often misses LOGO_URL.
+def _resolve_logo_url(*, prefer_cid: bool = True) -> str:
+    """Return logo src for HTML.
+
+    Prefer cid: when the bundled logo file exists so SendGrid can embed it
+    inline (remote Spaces URLs are often blocked or fail to load in clients).
+    """
+    if prefer_cid and _LOGO_FILE.is_file():
+        return f"cid:{_LOGO_CID}"
+
     logo_url = (email_settings.logo_url or os.getenv("LOGO_URL") or "").strip()
     if logo_url.startswith(("http://", "https://")):
         return logo_url
     return _DEFAULT_LOGO_URL
+
+
+def _attach_inline_logo(message) -> None:
+    """Attach bundled logo as inline CID image when HTML references it."""
+    if not _LOGO_FILE.is_file():
+        return
+    try:
+        import base64
+
+        from sendgrid.helpers.mail import (
+            Attachment,
+            ContentId,
+            Disposition,
+            FileContent,
+            FileName,
+            FileType,
+        )
+    except Exception:
+        logger.exception("Could not import SendGrid attachment helpers for logo")
+        return
+
+    encoded = base64.b64encode(_LOGO_FILE.read_bytes()).decode("ascii")
+    attachment = Attachment(
+        FileContent(encoded),
+        FileName("kampulynk-logo.png"),
+        FileType("image/png"),
+        Disposition("inline"),
+        ContentId(_LOGO_CID),
+    )
+    message.add_attachment(attachment)
 
 
 def _render_email_layout(title: str, body_html: str, hero_text: str | None = None) -> str:
@@ -380,7 +421,8 @@ def _render_email_layout(title: str, body_html: str, hero_text: str | None = Non
         "layouts/base_email.html",
         {
             "title": title,
-            "hero_text": hero_text or title,
+            "hero_text": hero_text
+            or "Connecting and empowering university students to achieve their educational goals.",
             "body_html": body_html,
             "logo_url": _resolve_logo_url(),
         },
@@ -393,34 +435,17 @@ def _paragraphs(text: str) -> str:
 
 
 _VERIFICATION_HERO_TEXT = (
-    "Our mission is to connect and empower university students to achieve their educational goals."
+    "Connecting and empowering university students to achieve their educational goals."
 )
 
 
-def _otp_template_details(otp_purpose: str) -> tuple[str, str, str, str]:
-    """Return (subject_title, grey_header, grey_body, hero_text)."""
+def _otp_template_details(otp_purpose: str) -> tuple[str, str]:
+    """Return (subject_title, hero_text)."""
     match otp_purpose:
-        case "email_verification":
-            return (
-                "Email Verification",
-                "Email Verification",
-                "Use this one-time password (OTP) to verify your email address.",
-                _VERIFICATION_HERO_TEXT,
-            )
         case "password_reset":
-            return (
-                "Temporary Password",
-                "Your Temporary Password",
-                "Use this as one-time password to set your password",
-                "Temporary Password",
-            )
-        case _:
-            return (
-                "Email Verification",
-                "Email Verification",
-                "Use this one-time password (OTP) to verify your email address.",
-                _VERIFICATION_HERO_TEXT,
-            )
+            return ("Temporary Password", "Temporary Password")
+        case "email_verification" | _:
+            return ("Email Verification", _VERIFICATION_HERO_TEXT)
 
 
 def _build_otp_display_html(otp: str, brand_blue: str) -> str:
@@ -431,9 +456,9 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
     return (
         '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 8px 0 4px;">'
         "<tr>"
-        f'<td align="center" style="padding: 28px 20px; background-color: #FFFFFF; border: 2px dashed {brand_blue}; border-radius: 8px;">'
-        f'<div style="font-size: 11px; font-weight: 600; color: {brand_blue}; letter-spacing: 1.5px; text-transform: uppercase; font-family: Arial, Helvetica, sans-serif; margin-bottom: 10px;">Your OTP</div>'
-        f'<span class="otp-font" style="font-size: 36px; font-weight: 700; color: #071A35; letter-spacing: 12px; font-family: \'Courier New\', Courier, monospace; display: inline-block; padding-left: 12px;">{spaced}</span>'
+        f'<td align="center" style="padding: 28px 20px; background-color: #F8FAFC; border: 2px dashed {brand_blue}; border-radius: 12px;">'
+        f'<div style="font-size: 12px; font-weight: 600; color: {brand_blue}; letter-spacing: 1.5px; text-transform: uppercase; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; margin-bottom: 12px;">Your OTP</div>'
+        f'<span class="otp-font" style="font-size: 36px; font-weight: 700; color: #0F172A; letter-spacing: 12px; font-family: \'Courier New\', Courier, monospace; display: inline-block; padding-left: 12px;">{spaced}</span>'
         "</td>"
         "</tr>"
         "</table>"
@@ -441,23 +466,19 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
 
 
 def build_otp_email_html(otp: str, otp_purpose: str = "email_verification") -> str:
-    title, header, body_text, hero_text = _otp_template_details(otp_purpose)
+    title, hero_text = _otp_template_details(otp_purpose)
     otp_expire_minutes = email_settings.otp_expire_minutes
 
     brand_blue = str(BRAND_COLORS.get("brand_blue", "#0B5FA5"))
     otp_display_html = _build_otp_display_html(otp, brand_blue)
 
-    raw_keys = {"otp_display"}
     body_html = _render_template(
         "auth/otp_email.html",
         {
-            "otp": otp,
-            "header": header,
-            "body_text": body_text,
             "otp_display": otp_display_html,
             "otp_expire_minutes": otp_expire_minutes,
         },
-        raw_keys=raw_keys,
+        raw_keys={"otp_display"},
     )
     return _render_email_layout(title, body_html, hero_text=hero_text)
 
@@ -541,7 +562,7 @@ async def send_otp_email(
     background_tasks: BackgroundTasks | None = None,
 ) -> bool:
     """Send OTP in the background. Users are actively waiting for this."""
-    title, _, _, _ = _otp_template_details(otp_purpose)
+    title, _ = _otp_template_details(otp_purpose)
     purpose = f"OTP: {otp_purpose}"
     subject = f"KampuLynk {title}"
     html_content = build_otp_email_html(otp, otp_purpose)

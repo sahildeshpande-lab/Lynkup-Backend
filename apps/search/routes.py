@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 from common.exceptions import ApiError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,7 +8,12 @@ from common.pagination import PaginationParams
 from core.database.session import get_session
 from core.security.auth import get_current_app_user, get_current_user_or_superadmin
 from apps.accounts.db_models import User
-from .schemas import ApiResponse, PostSearchResponse, UniversitySearchParams
+from .schemas import (
+    AcademicInterestCreate,
+    ApiResponse,
+    PostSearchResponse,
+    UniversitySearchParams,
+)
 from . import services
 from typing import Optional
 
@@ -53,6 +58,24 @@ async def list_academics_info(
         db=db,
     )
     return ApiResponse(message="Academics info fetched successfully", data=data)
+
+
+@router.post(
+    "/academic-interests",
+    response_model=ApiResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_academic_interest(
+    payload: AcademicInterestCreate,
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user_or_superadmin),
+) -> ApiResponse:
+    data = await services.create_academic_interest(
+        name=payload.name,
+        education_level_id=payload.educationLevelId,
+        db=db,
+    )
+    return ApiResponse(message="Academic interest created successfully", data=data)
 
 
 @router.get("/search-user", response_model=ApiResponse)
