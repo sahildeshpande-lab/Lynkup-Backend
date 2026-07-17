@@ -15,17 +15,17 @@ async def lifespan(app: FastAPI):
 
     if db_settings.auto_init_db:
         await init_db()
-        # try:
-        #     # from core.database.migrations import run_db_migrations_programmatically
-        #     # logger.info("Start DB Migrations")
-        #     # await run_db_migrations_programmatically()
-        #     logger.info("Migrations completed successfully")
-        # except Exception as e:
-        #     logger.exception(f"Migration startup failed: {e}")
-        #     raise
-        # # from core.database.migrations import run_db_migrations_programmatically
-        # # await run_db_migrations_programmatically()
-        # logger.info(f"Initialized database at {db_settings.db_host}")
+        try:
+            from core.database.migrations import run_db_migrations_programmatically
+            logger.info("Start DB Migrations")
+            await run_db_migrations_programmatically()
+            logger.info("Migrations completed successfully")
+        except Exception as e:
+            logger.exception(f"Migration startup failed: {e}")
+            raise
+        from core.database.migrations import run_db_migrations_programmatically
+        await run_db_migrations_programmatically()
+        logger.info(f"Initialized database at {db_settings.db_host}")
 
     # Load email settings from .env early so SendGrid config is available.
     from core.email.config import settings as email_settings

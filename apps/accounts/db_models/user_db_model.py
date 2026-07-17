@@ -69,8 +69,7 @@ class User(SQLModel, table=True):
     referred_by_user_id: Optional[UUID] = Field(
         default=None,
         foreign_key="users.id",
-        nullable=True,
-        index=True,
+        nullable=True
     )
 
 

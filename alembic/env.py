@@ -8,6 +8,7 @@ from apps.profiles.db_models import *
 from apps.feed.db_models import *
 from apps.invitations.db_models import *
 from apps.engagement.db_models import *
+from apps.report.db_models import *
 from core.database import models as _models  # noqa: F401
 
 from alembic import context

@@ -37,8 +37,7 @@ class Report(SQLModel, table=True):
         sa_column=Column(
             SqlEnum(ReportStatus, name="reportstatus"),
             nullable=False,
-            default=ReportStatus.under_review,
-            index=True,
+            default=ReportStatus.under_review
         ),
     )
     moderator_id: UUID | None = Field(

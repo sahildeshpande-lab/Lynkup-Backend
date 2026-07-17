@@ -268,3 +268,4 @@ async def upsert_comment_reaction_route(
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> CommentReactionResponse:
     return await upsert_comment_reaction(db, current_user.id, payload)
+

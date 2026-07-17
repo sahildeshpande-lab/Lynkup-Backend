@@ -117,6 +117,7 @@ class InvitationStatus(str, Enum):
     expired = "EXPIRED"
     deactivated = "DEACTIVATED"
 
+
 class ReportEntityType(str, Enum):
     user = "user"
     post = "post"
@@ -127,7 +128,6 @@ class ReportStatus(str, Enum):
     under_review = "under_review"
     rejected = "rejected"
     actioned = "actioned"
-
 
 
 from typing import Literal
