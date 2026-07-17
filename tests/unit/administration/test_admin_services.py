@@ -330,7 +330,19 @@ async def test_export_users() -> None:
             stmt_interest = select(AcademicInterest).where(AcademicInterest.name == "Artificial Intelligence")
             interest = (await session.execute(stmt_interest)).scalar_one_or_none()
             if not interest:
-                interest = AcademicInterest(name="Artificial Intelligence", is_active=True)
+                from apps.profiles.db_models.education_level_db_model import EducationLevel
+
+                level = (
+                    await session.execute(select(EducationLevel).where(EducationLevel.id == 2))
+                ).scalar_one_or_none()
+                if level is None:
+                    session.add(EducationLevel(id=2, name="Masters", is_active=True))
+                    await session.flush()
+                interest = AcademicInterest(
+                    name="Artificial Intelligence",
+                    education_level_id=2,
+                    is_active=True,
+                )
                 session.add(interest)
                 await session.flush()
 

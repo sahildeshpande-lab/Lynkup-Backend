@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from apps.feed.content_utils import extract_hashtags, validate_hashtag_count, validate_content
+from apps.feed.schemas import PostContentPayload
 
 
 def test_extract_hashtags_from_caption_and_content_html() -> None:
@@ -39,3 +40,18 @@ def test_validate_content_enforces_hashtag_limit() -> None:
 
 def test_validate_content_allows_caption_only() -> None:
     validate_content({"caption": "Caption only", "visibility": "public"})
+
+
+def test_validate_content_allows_missing_caption() -> None:
+    validate_content(
+        {
+            "content_html": "<p>Post body without a caption</p>",
+            "visibility": "public",
+        }
+    )
+
+
+def test_post_content_payload_defaults_caption_to_none() -> None:
+    payload = PostContentPayload(content_html="<p>Media description</p>")
+
+    assert payload.caption is None

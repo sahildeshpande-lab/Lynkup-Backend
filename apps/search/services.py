@@ -106,6 +106,61 @@ async def get_academic_interests(
     return paginated.model_dump()
 
 
+async def _get_education_levels_with_interests(
+    db: AsyncSession,
+    *,
+    query: Optional[str],
+) -> list[dict]:
+    """Return education levels with nested academic interests."""
+    from apps.profiles.db_models.education_level_db_model import EducationLevel
+
+    levels = list(
+        (
+            await db.execute(
+                select(EducationLevel)
+                .where(EducationLevel.is_active == True)  # noqa: E712
+                .order_by(EducationLevel.id.asc())
+            )
+        ).scalars().all()
+    )
+
+    interests_stmt = (
+        select(AcademicInterest)
+        .where(AcademicInterest.is_active == True)  # noqa: E712
+        .order_by(AcademicInterest.name.asc())
+    )
+    clean_query = (query or "").strip()
+    if clean_query:
+        similarity_score = func.similarity(AcademicInterest.name, clean_query)
+        interests_stmt = (
+            select(AcademicInterest)
+            .where(
+                AcademicInterest.is_active == True,  # noqa: E712
+                AcademicInterest.name.ilike(f"%{clean_query}%"),
+            )
+            .order_by(similarity_score.desc(), AcademicInterest.name.asc())
+        )
+
+    interests = list((await db.execute(interests_stmt)).scalars().all())
+    interests_by_level: dict[int, list[dict]] = {}
+    for interest in interests:
+        interests_by_level.setdefault(interest.education_level_id, []).append(
+            {
+                "id": str(interest.id),
+                "name": interest.name,
+            }
+        )
+
+    return [
+        {
+            "id": str(level.id),
+            "name": level.name,
+            "interests": interests_by_level.get(level.id, []),
+        }
+        for level in levels
+    ]
+
+
 async def _get_allowed_countries(
     db: AsyncSession,
     *,
@@ -175,20 +230,11 @@ async def get_academics_info(
     page_size: int | None,
     db: AsyncSession,
 ) -> dict:
-    from common.enums import EducationLevel
-
-    edu_levels = [{"id": str(level.id), "name": level.value} for level in EducationLevel]
-    interests_data = await get_academic_interests(
-        query=query,
-        page=page,
-        page_size=page_size,
-        db=db,
-    )
+    education_levels = await _get_education_levels_with_interests(db, query=query)
     countries_data = await _get_allowed_countries(db, page=page, page_size=page_size)
     hashtags_data = await _get_post_hashtags(db, page=page, page_size=page_size)
     return {
-        "educationLevels": edu_levels,
-        "interests": interests_data,
+        "educationLevels": education_levels,
         "countries": countries_data,
         "hashtags": hashtags_data,
     }

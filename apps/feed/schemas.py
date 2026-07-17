@@ -32,7 +32,7 @@ class MediaItem(BaseModel):
 
 class PostContentPayload(BaseModel):
     """Content payload for creating or updating a post."""
-    caption: str = Field(..., max_length=255)
+    caption: Optional[str] = Field(default=None, max_length=255)
     content_html: Optional[str] = None
     visibility: Literal["public", "hidden"] = "public"
 

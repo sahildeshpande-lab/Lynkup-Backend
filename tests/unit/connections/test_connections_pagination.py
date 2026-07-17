@@ -158,26 +158,31 @@ async def test_get_recommendations_no_pagination(test_users) -> None:
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
-            # Return all active normal users with relationship flags.
             data = body["data"]
             assert isinstance(data, dict)
             assert "items" in data
             assert data["page"] == 1
-            assert data["pageSize"] >= 5
-            assert data["totalItems"] >= 5
             assert data["totalPages"] == 1
-            eve_recommendation = next((item for item in data["items"] if item["first_name"] == "Eve"), None)
+
+            # Pending-request users are excluded from recommendations.
+            alice_recommendation = next(
+                (item for item in data["items"] if item["first_name"] == "Alice"),
+                None,
+            )
+            assert alice_recommendation is None
+
+            # Eve shares the same major and has no pending request.
+            eve_recommendation = next(
+                (item for item in data["items"] if item["first_name"] == "Eve"),
+                None,
+            )
             assert eve_recommendation is not None
             assert eve_recommendation["profilePhoto_url"].endswith("photo_eve.png")
             assert eve_recommendation["first_name"] == "Eve"
             assert eve_recommendation["is_deleted"] is False
             assert eve_recommendation["request_received"] is False
-
-            alice_recommendation = next((item for item in data["items"] if item["first_name"] == "Alice"), None)
-            assert alice_recommendation is not None
-            assert alice_recommendation["is_deleted"] is False
-            assert alice_recommendation["request_received"] is True
-            assert alice_recommendation["request_sent"] is False
+            assert eve_recommendation["mutual_connections_count"] == 0
+            assert "Same major" in (eve_recommendation["match_reason"] or "")
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -193,8 +198,10 @@ async def test_get_recommendations_with_pagination(test_users) -> None:
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
-            # Verify all visible users are paginated with flags.
-            response = await ac.get("/api/v1/recommendations/connections", params={"page": 1, "pageSize": 200})
+            response = await ac.get(
+                "/api/v1/recommendations/connections",
+                params={"page": 1, "pageSize": 200},
+            )
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
@@ -203,12 +210,65 @@ async def test_get_recommendations_with_pagination(test_users) -> None:
             assert "items" in data
             assert data["page"] == 1
             assert data["pageSize"] == 200
-            assert data["totalItems"] >= 5
-            # Find Eve in items
-            eve_recommendation = next((item for item in data["items"] if item["first_name"] == "Eve"), None)
+            eve_recommendation = next(
+                (item for item in data["items"] if item["first_name"] == "Eve"),
+                None,
+            )
             assert eve_recommendation is not None
             assert eve_recommendation["profilePhoto_url"].endswith("photo_eve.png")
             assert eve_recommendation["is_deleted"] is False
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_get_recommendations_includes_mutual_connection_friend(test_users) -> None:
+    """A ↔ B and B ↔ C => A should see C via mutual connection."""
+    primary, users = test_users
+    alice, bob, charlie, david, eve = users
+
+    async with async_session_factory() as session:
+        # Clear pending requests so they don't block recommendations.
+        pending = (
+            await session.execute(
+                select(ConnectionRequest).where(
+                    ConnectionRequest.receiver_user_id == primary.id
+                )
+            )
+        ).scalars().all()
+        for req in pending:
+            await session.delete(req)
+
+        # primary ↔ bob, bob ↔ charlie (friends of friends)
+        low_pb, high_pb = build_connection_pair(primary.id, bob.id)
+        low_bc, high_bc = build_connection_pair(bob.id, charlie.id)
+        session.add(Connection(user_low_id=low_pb, user_high_id=high_pb, is_active=True))
+        session.add(Connection(user_low_id=low_bc, user_high_id=high_bc, is_active=True))
+        await session.commit()
+
+    async def _override_get_current_user():
+        return primary
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.get("/api/v1/recommendations/connections")
+            assert response.status_code == 200
+            items = response.json()["data"]["items"]
+
+            # Direct connection is excluded.
+            bob_item = next((item for item in items if item["user_id"] == str(bob.id)), None)
+            assert bob_item is None
+
+            charlie_item = next(
+                (item for item in items if item["user_id"] == str(charlie.id)),
+                None,
+            )
+            assert charlie_item is not None
+            assert charlie_item["mutual_connections_count"] == 1
+            assert "mutual connection" in (charlie_item["match_reason"] or "").lower()
+            assert charlie_item["score"] >= 25
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 

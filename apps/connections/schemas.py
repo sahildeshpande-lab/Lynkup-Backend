@@ -83,6 +83,7 @@ class RecommendedUserResponse(BaseModel):
     user_id: UUID
     score: float
     match_reason: str | None = None
+    mutual_connections_count: int = 0
     first_name: str | None = None
     last_name: str | None = None
     university: str | None = None

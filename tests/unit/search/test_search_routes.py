@@ -87,14 +87,20 @@ def test_university_search_returns_matches(monkeypatch) -> None:
 
 async def _get_academics_info(query, page, page_size, db) -> dict:
     return {
-        "interests": {
-            "items": [{"id": "int-1", "name": "Math"}],
-            "page": page,
-            "pageSize": page_size,
-            "totalItems": 1,
-            "totalPages": 1,
-        },
-        "educationLevels": [{"id": "1", "name": "Bachelors"}, {"id": "2", "name": "Masters"}],
+        "educationLevels": [
+            {
+                "id": "1",
+                "name": "Bachelors",
+                "interests": [{"id": "5", "name": "Chemistry"}],
+            },
+            {
+                "id": "2",
+                "name": "Masters",
+                "interests": [{"id": "1", "name": "Artificial Intelligence"}],
+            },
+        ],
+        "countries": {"items": [], "page": 1, "pageSize": 20, "totalItems": 0, "totalPages": 0},
+        "hashtags": {"items": [], "page": 1, "pageSize": 20, "totalItems": 0, "totalPages": 0},
     }
 
 
@@ -107,10 +113,14 @@ def test_get_academics_info_returns_success(monkeypatch) -> None:
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Academics info fetched successfully"
-    assert "interests" in body["data"]
+    assert "interests" not in body["data"]
     assert "educationLevels" in body["data"]
-    assert body["data"]["interests"]["items"][0]["name"] == "Math"
-    assert {"id": "1", "name": "Bachelors"} in body["data"]["educationLevels"]
+    assert body["data"]["educationLevels"][0] == {
+        "id": "1",
+        "name": "Bachelors",
+        "interests": [{"id": "5", "name": "Chemistry"}],
+    }
+    assert body["data"]["educationLevels"][1]["interests"][0]["name"] == "Artificial Intelligence"
 
 
 def test_search_users_route(monkeypatch) -> None:

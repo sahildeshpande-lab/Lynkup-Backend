@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from uuid import UUID
+
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.connections.db_models import Block, Connection
-from apps.accounts.db_models import User, UserRole, Role
+from apps.accounts.db_models import Role, User, UserRole
+from apps.connections.db_models import Block, Connection, ConnectionRequest
 from apps.profiles.db_models.profile_db_model import Profile
 from common.enums import ProfileVisibility, UserStatus
 from core.images import generate_profile_image_url
@@ -120,7 +121,8 @@ def calculate_recommendation_score(
         score += 10.0
 
     if mutual_connections_count > 0:
-        score += 5.0
+        # Friends-of-friends are a primary recommendation signal.
+        score += min(25.0 * mutual_connections_count, 50.0)
 
     return min(100.0, score)
 
@@ -131,14 +133,34 @@ def calculate_recommendation_score(
 
 async def _get_excluded_user_ids(db: AsyncSession, user_id: UUID) -> set[UUID]:
     """
-    Return the set of user IDs that should never appear in recommendations:
+    Return user IDs that should never appear in recommendations:
+    - Already connected users
+    - Users with a pending request in either direction
     - Users who have blocked or been blocked by current_user
     """
     excluded: set[UUID] = set()
 
+    connected_ids = await get_user_connections(db, user_id)
+    excluded.update(connected_ids)
+
+    pending_stmt = select(ConnectionRequest).where(
+        ConnectionRequest.status == "pending",
+        or_(
+            ConnectionRequest.sender_user_id == user_id,
+            ConnectionRequest.receiver_user_id == user_id,
+        ),
+    )
+    for req in (await db.execute(pending_stmt)).scalars().all():
+        other = (
+            req.receiver_user_id
+            if req.sender_user_id == user_id
+            else req.sender_user_id
+        )
+        excluded.add(other)
+
     # Blocked (either direction)
     block_stmt = select(Block).where(
-        Block.is_active == True,
+        Block.is_active == True,  # noqa: E712
         or_(
             Block.blocker_user_id == user_id,
             Block.blocked_user_id == user_id,
@@ -165,17 +187,17 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
 
     Scoring weights:
       - Same major       : +30 pts   (global suggestion trigger)
+      - Mutual connection: +25 pts each (capped at +50)
       - Same university  : +20 pts
       - Shared interests : +20 pts
       - Same minor       : +15 pts   (global suggestion trigger)
       - Same edu level   : +10 pts
-      - Mutual connection:  +5 pts
 
     Candidates are excluded if they are already connected, have a pending
     request, or are blocked in either direction.
 
-    Only candidates with score > 0 are returned, ensuring that *global
-    suggestions* (major / minor matches) are always surfaced while
+    Only candidates with score > 0 are returned, ensuring that mutual
+    connections (friends of friends) and profile matches are surfaced while
     completely unrelated users are omitted.
     """
     # 1. Load the current user's profile
@@ -204,7 +226,7 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
         .where(
             Profile.user_id != user_id,
             User.status == UserStatus.active,
-            User.is_deleted == False,
+            User.is_deleted == False,  # noqa: E712
             User.deleted_at.is_(None),
             Role.name.notin_(["moderator", "viewer", "superadmin"]),
         )
@@ -226,7 +248,7 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
         )
         score = calculate_recommendation_score(current_profile, candidate, mutuals)
 
-        # Global suggestions: major/minor matches always have score > 0 (≥15 or ≥30).
+        # Mutual friends-of-friends and profile matches always have score > 0.
         # Skip candidates with zero score — they share nothing in common.
         if score <= 0:
             continue
@@ -238,6 +260,7 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
                 "user_id": candidate.user_id,
                 "score": score,
                 "match_reason": ", ".join(match_reasons) if match_reasons else None,
+                "mutual_connections_count": mutuals,
                 "first_name": candidate.first_name,
                 "last_name": candidate.last_name,
                 "university": university_name,

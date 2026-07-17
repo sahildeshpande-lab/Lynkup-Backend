@@ -6,6 +6,7 @@ import pytest
 from sqlmodel import select
 
 from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
+from apps.profiles.db_models.education_level_db_model import EducationLevel
 from apps.profiles.services.interest_service import _resolve_academic_interest_ids
 from core.database.init import init_db
 from core.database.session import async_session_factory, engine
@@ -18,7 +19,18 @@ async def test_resolve_academic_interest_ids_by_name_and_id() -> None:
         unique = uuid.uuid4().hex[:8]
 
         async with async_session_factory() as session:
-            existing = AcademicInterest(name=f"Physics_{unique}", is_active=True)
+            level = (
+                await session.execute(select(EducationLevel).where(EducationLevel.id == 1))
+            ).scalar_one_or_none()
+            if level is None:
+                session.add(EducationLevel(id=1, name="Bachelors", is_active=True))
+                await session.flush()
+
+            existing = AcademicInterest(
+                name=f"Physics_{unique}",
+                education_level_id=1,
+                is_active=True,
+            )
             session.add(existing)
             await session.commit()
             await session.refresh(existing)
@@ -36,5 +48,6 @@ async def test_resolve_academic_interest_ids_by_name_and_id() -> None:
                 )
             ).scalar_one()
             assert math.id in resolved
+            assert math.education_level_id == 1
     finally:
         await engine.dispose()

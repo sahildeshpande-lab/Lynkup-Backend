@@ -24,7 +24,11 @@ async def _resolve_academic_interest_ids(values: list[str | int], db: AsyncSessi
         stmt_interest = select(AcademicInterest).where(AcademicInterest.name.ilike(tag_clean))
         interest_rec = (await db.execute(stmt_interest)).scalar_one_or_none()
         if not interest_rec:
-            interest_rec = AcademicInterest(name=tag_clean, is_active=True)
+            interest_rec = AcademicInterest(
+                name=tag_clean,
+                education_level_id=1,
+                is_active=True,
+            )
             db.add(interest_rec)
             await db.flush()
         if interest_rec.id is not None:

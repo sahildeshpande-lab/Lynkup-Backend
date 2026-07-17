@@ -170,15 +170,11 @@ def validate_content(content: dict) -> None:
     Raises ``ValueError`` with a descriptive message on validation failure.
 
     Rules:
-    - ``caption`` is mandatory.
+    - ``caption`` is optional.
     - ``visibility`` must be ``"public"`` or ``"private"``.
     - If ``content_html`` is provided, its normalized text must be ≤ 5 000
       Unicode characters.
     """
-    caption = content.get("caption")
-    if not caption or not str(caption).strip():
-        raise ValueError("Caption is required")
-
     visibility = content.get("visibility", "public")
     if visibility not in ("public", "private", "hidden"):
         raise ValueError(f"Invalid visibility value: {visibility}. Must be 'public', 'private', or 'hidden'")

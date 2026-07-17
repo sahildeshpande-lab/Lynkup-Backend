@@ -73,18 +73,34 @@ async def test_search_universities_and_academic_interests(mock_db, scalar_result
     interests = await get_academic_interests("a", 1, 10, db)
     assert interests["items"] == [{"id": "1", "name": "AI"}]
 
-    # interests + countries + hashtags each need count + rows
+    bachelors = SimpleNamespace(id=1, name="Bachelors", is_active=True)
+    masters = SimpleNamespace(id=2, name="Masters", is_active=True)
+    chemistry = SimpleNamespace(id=5, name="Chemistry", education_level_id=1, is_active=True)
+    ai = SimpleNamespace(id=1, name="Artificial Intelligence", education_level_id=2, is_active=True)
+
+    # education levels + interests + countries + hashtags
     db = mock_db(
-        scalar_result(0),
-        scalar_result(values=[]),
+        scalar_result(values=[bachelors, masters]),
+        scalar_result(values=[chemistry, ai]),
         scalar_result(0),
         scalar_result(values=[]),
         scalar_result(0),
         scalar_result(values=[]),
     )
     info = await get_academics_info(None, 1, 10, db)
-    assert info["educationLevels"][0] == {"id": "1", "name": "Bachelors"}
-    assert info["interests"]["items"] == []
+    assert info["educationLevels"] == [
+        {
+            "id": "1",
+            "name": "Bachelors",
+            "interests": [{"id": "5", "name": "Chemistry"}],
+        },
+        {
+            "id": "2",
+            "name": "Masters",
+            "interests": [{"id": "1", "name": "Artificial Intelligence"}],
+        },
+    ]
+    assert "interests" not in info
     assert info["countries"]["items"] == []
     assert info["countries"]["totalItems"] == 0
     assert info["hashtags"]["items"] == []
