@@ -478,6 +478,11 @@ async def admin_delete_users(user_ids: list[str], role: str, db: AsyncSession) -
                 now=now,
             )
 
+        from apps.profiles.services.profile_stats_service import (
+            adjust_counts_for_deleting_user,
+        )
+
+        await adjust_counts_for_deleting_user(db, user.id)
         _soft_delete_user_record(user, now=now)
         deleted_users.append(await _build_deleted_user_payload(user, db))
 

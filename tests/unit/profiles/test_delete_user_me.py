@@ -35,6 +35,10 @@ async def test_delete_user_me_soft_deletes_and_disables_firebase(mock_db, scalar
             create=True,
         ),
         patch("core.auth.services.disable_firebase_user") as disable_firebase,
+        patch(
+            "apps.profiles.services.profile_stats_service.adjust_counts_for_deleting_user",
+            AsyncMock(),
+        ) as adjust_counts,
     ):
         # Patch where the service imports from
         with patch(
@@ -50,6 +54,7 @@ async def test_delete_user_me_soft_deletes_and_disables_firebase(mock_db, scalar
     assert user.deleted_at is not None
     assert user.purge_after is not None
     db.commit.assert_awaited_once()
+    adjust_counts.assert_awaited_once_with(db, user.id)
     disable_firebase.assert_called_once_with("firebase-uid")
 
 

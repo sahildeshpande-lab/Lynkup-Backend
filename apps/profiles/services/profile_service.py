@@ -116,17 +116,18 @@ async def update_profile_me(
     await db.refresh(current_user)
     await db.refresh(profile)
 
-    try:
-        import logging
-        local_logger = logging.getLogger(__name__)
-        from core.email_service import send_profile_updated_email
-        full_name = f"{profile.first_name} {profile.last_name}".strip() or None
-        await send_profile_updated_email(current_user.email, full_name)
-        local_logger.info("Profile updated email queued for user ID %s", current_user.id)
-    except Exception as e:
-        import logging
-        local_logger = logging.getLogger(__name__)
-        local_logger.exception("Failed to queue profile updated email: %s", e)
+    # Temporarily disabled: profile updated email
+    # try:
+    #     import logging
+    #     local_logger = logging.getLogger(__name__)
+    #     from core.email_service import send_profile_updated_email
+    #     full_name = f"{profile.first_name} {profile.last_name}".strip() or None
+    #     await send_profile_updated_email(current_user.email, full_name)
+    #     local_logger.info("Profile updated email queued for user ID %s", current_user.id)
+    # except Exception as e:
+    #     import logging
+    #     local_logger = logging.getLogger(__name__)
+    #     local_logger.exception("Failed to queue profile updated email: %s", e)
 
     user_data = await build_user_base_response(
         current_user,
@@ -167,6 +168,12 @@ async def delete_user_me(user: User, db: AsyncSession) -> dict:
     user.deleted_at = now
     user.purge_after = now + timedelta(days=1)
     db.add(user)
+
+    from apps.profiles.services.profile_stats_service import (
+        adjust_counts_for_deleting_user,
+    )
+
+    await adjust_counts_for_deleting_user(db, user.id)
     await db.commit()
     await db.refresh(user)
 
@@ -355,17 +362,18 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
     await db.commit()
     await db.refresh(profile)
 
-    try:
-        import logging
-        local_logger = logging.getLogger(__name__)
-        from core.email_service import send_profile_updated_email
-        full_name = f"{profile.first_name} {profile.last_name}".strip() or None
-        await send_profile_updated_email(user.email, full_name)
-        local_logger.info("Profile updated email queued for user ID %s", user.id)
-    except Exception as e:
-        import logging
-        local_logger = logging.getLogger(__name__)
-        local_logger.exception("Failed to queue profile updated email: %s", e)
+    # Temporarily disabled: profile updated email
+    # try:
+    #     import logging
+    #     local_logger = logging.getLogger(__name__)
+    #     from core.email_service import send_profile_updated_email
+    #     full_name = f"{profile.first_name} {profile.last_name}".strip() or None
+    #     await send_profile_updated_email(user.email, full_name)
+    #     local_logger.info("Profile updated email queued for user ID %s", user.id)
+    # except Exception as e:
+    #     import logging
+    #     local_logger = logging.getLogger(__name__)
+    #     local_logger.exception("Failed to queue profile updated email: %s", e)
 
     return await get_my_profile_service(user, db)
 
@@ -495,17 +503,18 @@ async def update_user_profile_by_admin_service(
     await db.commit()
     await db.refresh(profile)
 
-    try:
-        import logging
-        local_logger = logging.getLogger(__name__)
-        from core.email_service import send_profile_updated_email
-        full_name = f"{profile.first_name} {profile.last_name}".strip() or None
-        await send_profile_updated_email(user.email, full_name)
-        local_logger.info("Profile updated email queued for user ID %s", user.id)
-    except Exception as e:
-        import logging
-        local_logger = logging.getLogger(__name__)
-        local_logger.exception("Failed to queue profile updated email: %s", e)
+    # Temporarily disabled: profile updated email
+    # try:
+    #     import logging
+    #     local_logger = logging.getLogger(__name__)
+    #     from core.email_service import send_profile_updated_email
+    #     full_name = f"{profile.first_name} {profile.last_name}".strip() or None
+    #     await send_profile_updated_email(user.email, full_name)
+    #     local_logger.info("Profile updated email queued for user ID %s", user.id)
+    # except Exception as e:
+    #     import logging
+    #     local_logger = logging.getLogger(__name__)
+    #     local_logger.exception("Failed to queue profile updated email: %s", e)
 
     return await get_my_profile_service(user, db)
 

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from apps.connections.db_models import ConnectionRequest
 from apps.connections.services.recommendation_service import get_user_connections
 from apps.feed.db_models import Post
 from apps.feed.repositories.feed_repository import (
@@ -86,6 +87,42 @@ async def _load_profile_details(
     }
 
 
+async def _load_requested_user_ids(
+    db: AsyncSession,
+    current_user_id: UUID,
+    target_user_ids: set[UUID],
+) -> set[UUID]:
+    """Return users with a pending request in either direction with the viewer."""
+    if not target_user_ids:
+        return set()
+
+    rows = (
+        await db.execute(
+            select(ConnectionRequest).where(
+                ConnectionRequest.status == "pending",
+                or_(
+                    and_(
+                        ConnectionRequest.sender_user_id == current_user_id,
+                        ConnectionRequest.receiver_user_id.in_(target_user_ids),
+                    ),
+                    and_(
+                        ConnectionRequest.receiver_user_id == current_user_id,
+                        ConnectionRequest.sender_user_id.in_(target_user_ids),
+                    ),
+                ),
+            )
+        )
+    ).scalars().all()
+
+    requested_ids: set[UUID] = set()
+    for request in rows:
+        if request.sender_user_id == current_user_id:
+            requested_ids.add(request.receiver_user_id)
+        else:
+            requested_ids.add(request.sender_user_id)
+    return requested_ids
+
+
 async def get_feed_service(
     current_user_id: UUID,
     db: AsyncSession,
@@ -162,6 +199,11 @@ async def get_feed_service(
             profiles_by_user_id[reposter_user_id] = reposter_profile
 
     profile_details = await _load_profile_details(db, profiles_by_user_id)
+    requested_user_ids = await _load_requested_user_ids(
+        db,
+        current_user_id,
+        set(profiles_by_user_id),
+    )
     engagement_flags = await fetch_post_engagement_flags(
         db,
         current_user_id,
@@ -189,8 +231,12 @@ async def get_feed_service(
                 repost_id=item["repost_id"],
                 reposted_at=item["reposted_at"],
                 original_author_is_connected=post.author_user_id in connection_ids,
+                original_author_is_requested=post.author_user_id in requested_user_ids,
                 reposter_is_connected=(
                     item["reposted_by_profile"].user_id in connection_ids
+                ),
+                reposter_is_requested=(
+                    item["reposted_by_profile"].user_id in requested_user_ids
                 ),
                 original_author_details=profile_details.get(post.author_user_id),
                 reposter_details=profile_details.get(
@@ -207,6 +253,7 @@ async def get_feed_service(
                 post,
                 author_profile=author_profile,
                 is_connected=post.author_user_id in connection_ids,
+                is_requested=post.author_user_id in requested_user_ids,
                 profile_details=profile_details.get(post.author_user_id),
                 is_liked=is_liked,
                 is_reposted=viewer_has_reposted,

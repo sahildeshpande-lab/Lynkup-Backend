@@ -114,6 +114,7 @@ class RepostedPostData(BaseModel):
     profile_photo_url: Optional[str] = None
     profilePhoto_url: Optional[str] = None
     is_connected: bool = False
+    is_requested: bool = False
     university: Optional[str] = None
     bio: Optional[str] = None
     academic_interest: List[str] = Field(default_factory=list)
@@ -150,6 +151,7 @@ class PostDetailData(BaseModel):
     profile_photo_url: Optional[str] = None
     profilePhoto_url: Optional[str] = None
     is_connected: bool = False
+    is_requested: bool = False
     university: Optional[str] = None
     bio: Optional[str] = None
     academic_interest: List[str] = Field(default_factory=list)

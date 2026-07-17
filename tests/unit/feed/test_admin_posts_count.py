@@ -82,3 +82,63 @@ async def test_admin_publish_from_flagged_increments_posts_count(mock_db):
     assert result.state == PostState.published
     inc.assert_awaited_once_with(db, post.author_user_id)
     dec.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_post_service_decrements_posts_count_for_published(mock_db):
+    post = _post(state=PostState.published)
+    db = mock_db()
+
+    post_result = MagicMock()
+    post_result.scalar_one_or_none.return_value = post
+    db.execute = AsyncMock(return_value=post_result)
+
+    with patch(
+        "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
+        AsyncMock(),
+    ) as dec:
+        result = await svc.delete_post_service(post.id, post.author_user_id, db)
+
+    assert result.state == PostState.deleted
+    dec.assert_awaited_once_with(db, post.author_user_id)
+    assert db.commit.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_post_service_skips_decrement_for_draft(mock_db):
+    post = _post(state=PostState.draft)
+    db = mock_db()
+
+    post_result = MagicMock()
+    post_result.scalar_one_or_none.return_value = post
+    db.execute = AsyncMock(return_value=post_result)
+
+    with patch(
+        "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
+        AsyncMock(),
+    ) as dec:
+        result = await svc.delete_post_service(post.id, post.author_user_id, db)
+
+    assert result.state == PostState.deleted
+    dec.assert_not_called()
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_delete_post_service_idempotent_when_already_deleted(mock_db):
+    post = _post(state=PostState.deleted)
+    db = mock_db()
+
+    post_result = MagicMock()
+    post_result.scalar_one_or_none.return_value = post
+    db.execute = AsyncMock(return_value=post_result)
+
+    with patch(
+        "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
+        AsyncMock(),
+    ) as dec:
+        result = await svc.delete_post_service(post.id, post.author_user_id, db)
+
+    assert result.state == PostState.deleted
+    dec.assert_not_called()
+    db.commit.assert_not_called()

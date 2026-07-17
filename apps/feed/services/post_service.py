@@ -63,6 +63,7 @@ def format_post_detail(
     moderator_user=None,
     moderator_profile=None,
     is_connected: bool | None = None,
+    is_requested: bool | None = None,
     profile_details: dict | None = None,
     is_liked: bool = False,
     is_reposted: bool = False,
@@ -127,6 +128,8 @@ def format_post_detail(
         })
     if is_connected is not None:
         data["is_connected"] = is_connected
+    if is_requested is not None:
+        data["is_requested"] = is_requested
     if profile_details is not None:
         data.update(profile_details)
     return data
@@ -140,7 +143,9 @@ def format_repost_item(
     repost_id: UUID,
     reposted_at: datetime,
     original_author_is_connected: bool | None = None,
+    original_author_is_requested: bool | None = None,
     reposter_is_connected: bool | None = None,
+    reposter_is_requested: bool | None = None,
     original_author_details: dict | None = None,
     reposter_details: dict | None = None,
     is_liked: bool = False,
@@ -161,6 +166,7 @@ def format_repost_item(
         moderator_user=moderator_user,
         moderator_profile=moderator_profile,
         is_connected=original_author_is_connected,
+        is_requested=original_author_is_requested,
         profile_details=original_author_details,
         is_liked=is_liked,
         is_reposted=viewer_has_reposted,
@@ -216,6 +222,8 @@ def format_repost_item(
     }
     if reposter_is_connected is not None:
         data["is_connected"] = reposter_is_connected
+    if reposter_is_requested is not None:
+        data["is_requested"] = reposter_is_requested
     if reposter_details is not None:
         data.update(reposter_details)
     return data
@@ -790,13 +798,14 @@ async def admin_publish_post_service(
             post.state,
         )
 
-    if author_user and author_user.email:
-        try:
-            from core.email_service import send_post_review_email
-
-            await send_post_review_email(author_user.email, status, author_full_name)
-        except Exception as e:
-            logger.exception("Failed to queue post review email: %s", e)
+    # Temporarily disabled: post moderated/published/flagged email
+    # if author_user and author_user.email:
+    #     try:
+    #         from core.email_service import send_post_review_email
+    #
+    #         await send_post_review_email(author_user.email, status, author_full_name)
+    #     except Exception as e:
+    #         logger.exception("Failed to queue post review email: %s", e)
 
     return post
 
@@ -915,6 +924,10 @@ async def delete_post_service(
     if post.author_user_id != user_id:
         raise ApiError("Post does not belong to the authenticated user")
 
+    previous_state = post.state
+    if previous_state == PostState.deleted:
+        return post
+
     post.state = PostState.deleted
     post.updated_at = utc_now()
 
@@ -924,6 +937,22 @@ async def delete_post_service(
     except Exception as e:
         await db.rollback()
         raise ApiError("Failed to delete post")
+
+    # Profile posts_count tracks published/reinstated posts only.
+    if previous_state in (PostState.published, PostState.reinstate):
+        try:
+            from apps.profiles.services.profile_stats_service import (
+                decrement_posts_count_for_user,
+            )
+
+            await decrement_posts_count_for_user(db, post.author_user_id)
+            await db.commit()
+        except Exception:
+            logger.exception(
+                "Failed to update posts_count for user %s after deleting post %s",
+                post.author_user_id,
+                post.id,
+            )
 
     return post
 

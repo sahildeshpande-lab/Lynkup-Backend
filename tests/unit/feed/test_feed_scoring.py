@@ -263,6 +263,10 @@ async def test_feed_service_pagination(mock_db):
             "apps.feed.services.feed_service.fetch_feed_posts",
             AsyncMock(return_value=[(post_one, author_profile), (post_two, author_profile)]),
         ) as fetch_posts,
+        patch(
+            "apps.feed.services.feed_service._load_requested_user_ids",
+            AsyncMock(return_value=set()),
+        ),
     ):
         posts, total = await get_feed_service(
             user_id,

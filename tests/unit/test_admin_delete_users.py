@@ -33,6 +33,11 @@ async def test_admin_delete_users_soft_deletes_user_role(monkeypatch, mock_db, s
     db = mock_db(scalar_result(user), scalar_result(None))
 
     monkeypatch.setattr(svc, "build_user_base_response", AsyncMock(return_value={"id": str(user.id)}))
+    adjust_counts = AsyncMock()
+    monkeypatch.setattr(
+        "apps.profiles.services.profile_stats_service.adjust_counts_for_deleting_user",
+        adjust_counts,
+    )
 
     result = await svc.admin_delete_users([str(user.id)], "user", db)
 
@@ -41,6 +46,7 @@ async def test_admin_delete_users_soft_deletes_user_role(monkeypatch, mock_db, s
     assert user.is_deleted is True
     assert user.deleted_at is not None
     assert user.purge_after is not None
+    adjust_counts.assert_awaited_once_with(db, user.id)
     db.commit.assert_awaited_once()
 
 
@@ -65,6 +71,10 @@ async def test_admin_delete_users_reassigns_posts_before_moderator_delete(monkey
     reassign = AsyncMock()
     monkeypatch.setattr(svc, "_reassign_moderator_posts_to_superadmin", reassign)
     monkeypatch.setattr(svc, "build_user_base_response", AsyncMock(return_value={"id": str(moderator.id)}))
+    monkeypatch.setattr(
+        "apps.profiles.services.profile_stats_service.adjust_counts_for_deleting_user",
+        AsyncMock(),
+    )
 
     result = await svc.admin_delete_users([str(moderator.id)], "moderator", db)
 
@@ -105,6 +115,10 @@ async def test_admin_delete_users_bulk_moderator_reassignment(monkeypatch, mock_
         svc,
         "build_user_base_response",
         AsyncMock(side_effect=[{"id": str(moderator_one.id)}, {"id": str(moderator_two.id)}]),
+    )
+    monkeypatch.setattr(
+        "apps.profiles.services.profile_stats_service.adjust_counts_for_deleting_user",
+        AsyncMock(),
     )
 
     result = await svc.admin_delete_users(

@@ -6,7 +6,42 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from apps.feed.services.feed_service import _load_profile_details, get_feed_service
+from apps.feed.services.feed_service import (
+    _load_profile_details,
+    _load_requested_user_ids,
+    get_feed_service,
+)
+
+
+@pytest.mark.asyncio
+async def test_load_requested_user_ids_returns_outgoing_and_incoming_targets():
+    current_user_id = uuid.uuid4()
+    outgoing_user_id = uuid.uuid4()
+    incoming_user_id = uuid.uuid4()
+    db = AsyncMock()
+    db.execute.return_value = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(
+            all=lambda: [
+                SimpleNamespace(
+                    sender_user_id=current_user_id,
+                    receiver_user_id=outgoing_user_id,
+                ),
+                SimpleNamespace(
+                    sender_user_id=incoming_user_id,
+                    receiver_user_id=current_user_id,
+                ),
+            ]
+        )
+    )
+
+    requested_ids = await _load_requested_user_ids(
+        db,
+        current_user_id,
+        {outgoing_user_id, incoming_user_id, uuid.uuid4()},
+    )
+
+    assert requested_ids == {outgoing_user_id, incoming_user_id}
+    db.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -108,6 +143,10 @@ async def test_get_feed_service_normal_post():
                 }
             ),
         ),
+        patch(
+            "apps.feed.services.feed_service._load_requested_user_ids",
+            AsyncMock(return_value={author_id}),
+        ),
         patch("apps.feed.services.feed_service.fetch_post_engagement_flags") as mock_flags,
         patch("apps.feed.services.feed_service.load_latest_post_reactions", AsyncMock(return_value={})),
     ):
@@ -127,6 +166,7 @@ async def test_get_feed_service_normal_post():
         assert formatted["last_name"] == "Smith"
         assert "alice_photo.png" in formatted["profilePhoto_url"]
         assert formatted["is_connected"] is True
+        assert formatted["is_requested"] is True
         assert formatted["university"] == "Lynkup University"
         assert formatted["bio"] == "Student bio"
         assert formatted["academic_interest"] == ["Computer Science"]
@@ -214,6 +254,10 @@ async def test_get_feed_service_repost_item():
                 }
             ),
         ),
+        patch(
+            "apps.feed.services.feed_service._load_requested_user_ids",
+            AsyncMock(return_value={reposter_user_id}),
+        ),
         patch("apps.feed.services.feed_service.fetch_post_engagement_flags") as mock_flags,
         patch("apps.feed.services.feed_service.load_latest_post_reactions", AsyncMock(return_value={})),
     ):
@@ -235,6 +279,7 @@ async def test_get_feed_service_repost_item():
         assert formatted["last_name"] == "Jones"
         assert "bob_photo.png" in formatted["profilePhoto_url"]
         assert formatted["is_connected"] is False
+        assert formatted["is_requested"] is True
         assert formatted["university"] == "Reposter University"
         assert formatted["bio"] == "Reposter bio"
         assert formatted["academic_interest"] == ["Design"]
@@ -256,6 +301,7 @@ async def test_get_feed_service_repost_item():
         assert nested["last_name"] == "Smith"
         assert "alice_photo.png" in nested["profilePhoto_url"]
         assert nested["is_connected"] is True
+        assert nested["is_requested"] is False
         assert nested["university"] == "Original University"
         assert nested["bio"] == "Original author bio"
         assert nested["academic_interest"] == ["Biology"]
@@ -305,6 +351,10 @@ async def test_get_feed_service_tuples_normalization():
         patch("apps.feed.services.feed_service.get_user_connections", AsyncMock(return_value=set())),
         patch("apps.feed.services.feed_service.count_feed_posts", AsyncMock(return_value=1)),
         patch("apps.feed.services.feed_service.fetch_feed_posts", AsyncMock(return_value=[(post, author_profile)])),
+        patch(
+            "apps.feed.services.feed_service._load_requested_user_ids",
+            AsyncMock(return_value=set()),
+        ),
         patch("apps.feed.services.feed_service.fetch_post_engagement_flags") as mock_flags,
         patch("apps.feed.services.feed_service.load_latest_post_reactions", AsyncMock(return_value={})),
     ):

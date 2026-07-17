@@ -991,8 +991,12 @@ async def test_delete_post_service_success(test_users) -> None:
         content=PostContentPayload(caption="Delete me", content_html="Bye", visibility="public")
     )
     async with async_session_factory() as session:
+        session.add(Profile(user_id=user.id, first_name="Post", last_name="Author", posts_count=0))
+        await session.commit()
         post = await save_post_service(user.id, payload, session)
         post_id = post.id
+        profile = (await session.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one()
+        assert profile.posts_count == 1
 
     async with async_session_factory() as session:
         await delete_post_service(post_id, user.id, session)
@@ -1000,6 +1004,8 @@ async def test_delete_post_service_success(test_users) -> None:
     async with async_session_factory() as session:
         post = await get_post_service(post_id, user.id, session)
         assert post.state == PostState.deleted
+        profile = (await session.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one()
+        assert profile.posts_count == 0
 
 
 @pytest.mark.asyncio

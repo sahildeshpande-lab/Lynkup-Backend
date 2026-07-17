@@ -91,3 +91,53 @@ async def decrement_posts_count_for_user(
     if not profile:
         return
     profile.posts_count = max((profile.posts_count or 0) - 1, 0)
+
+
+async def adjust_counts_for_deleting_user(
+    db: AsyncSession,
+    user_id: UUID,
+) -> None:
+    """Zero the deleting user's counts and decrement peers' LynkUp counts.
+
+    Operates only on currently active connections so a retry against an
+    already-deleting account is a no-op for peers.
+    """
+    from sqlalchemy import or_
+
+    from apps.connections.db_models import Connection
+
+    profile_result = await db.execute(select(Profile).where(Profile.user_id == user_id))
+    profile = profile_result.scalar_one_or_none()
+    if profile is not None:
+        profile.posts_count = 0
+        stats = await get_or_create_profile_stats(db, profile.id)
+        stats.connection_count = 0
+
+    connections = (
+        await db.execute(
+            select(Connection).where(
+                Connection.is_active == True,  # noqa: E712
+                or_(
+                    Connection.user_low_id == user_id,
+                    Connection.user_high_id == user_id,
+                ),
+            )
+        )
+    ).scalars().all()
+
+    for connection in connections:
+        peer_id = (
+            connection.user_high_id
+            if connection.user_low_id == user_id
+            else connection.user_low_id
+        )
+        connection.is_active = False
+        db.add(connection)
+
+        peer_profile = (
+            await db.execute(select(Profile).where(Profile.user_id == peer_id))
+        ).scalar_one_or_none()
+        if peer_profile is None:
+            continue
+        peer_stats = await get_or_create_profile_stats(db, peer_profile.id)
+        peer_stats.connection_count = max((peer_stats.connection_count or 0) - 1, 0)
