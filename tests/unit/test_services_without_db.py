@@ -57,6 +57,7 @@ async def test_search_universities_and_academic_interests(mock_db, scalar_result
         id=uuid4(),
         name="Kampu University",
         slug="kampu",
+        website=None,
         major="Computer Science",
         minor="Design",
         academic_program="BS",

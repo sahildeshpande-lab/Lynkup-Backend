@@ -13,6 +13,7 @@ class University(SQLModel, table=True):
     name: str = Field(sa_column=Column(String(255), nullable=False, index=True))
     slug: str = Field(sa_column=Column(String(255), nullable=False, unique=True, index=True))
     country_id: UUID = Field(foreign_key="countries.id", nullable=False, index=True)
+    website: str | None = Field(default=None, sa_column=Column(String(2048), nullable=True))
     major: list[dict] | None = Field(default=None, sa_column=Column(JSON))
     minor: list[dict] | None = Field(default=None, sa_column=Column(JSON))
     academic_program: list[dict] | None = Field(default=None, sa_column=Column(JSON))

@@ -49,6 +49,7 @@ async def _search_universities(_params, _db) -> dict:
                  "name": "Kampu University",
                  "country": "United States",
                  "slug": "kampu-university",
+                 "website": None,
                  "major": [{"name": "Computer Science"}],
                  "minor": [{"name": "Psychology"}],
                  "academic_program": [{"name": "Undergraduate"}],

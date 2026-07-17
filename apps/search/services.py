@@ -55,6 +55,7 @@ async def search_universities(params: UniversitySearchParams, db: AsyncSession) 
             "name": university.name,
             "country": country_name or "Unknown",
             "slug": university.slug,
+            "website": university.website,
             "major": university.major,
             "minor": university.minor,
             "academic_program": university.academic_program,
