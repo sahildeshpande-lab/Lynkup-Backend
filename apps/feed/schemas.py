@@ -113,6 +113,12 @@ class RepostedPostData(BaseModel):
     last_name: Optional[str] = None
     profile_photo_url: Optional[str] = None
     profilePhoto_url: Optional[str] = None
+    is_connected: bool = False
+    university: Optional[str] = None
+    bio: Optional[str] = None
+    academic_interest: List[str] = Field(default_factory=list)
+    major: Optional[str] = None
+    minor: Optional[str] = None
     state: str
     status: Optional[str] = None
     revision_number: int
@@ -143,6 +149,12 @@ class PostDetailData(BaseModel):
     last_name: Optional[str] = None
     profile_photo_url: Optional[str] = None
     profilePhoto_url: Optional[str] = None
+    is_connected: bool = False
+    university: Optional[str] = None
+    bio: Optional[str] = None
+    academic_interest: List[str] = Field(default_factory=list)
+    major: Optional[str] = None
+    minor: Optional[str] = None
     state: str
     revision_number: int
     content: PostContentData

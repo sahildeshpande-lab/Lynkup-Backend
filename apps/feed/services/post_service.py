@@ -62,6 +62,8 @@ def format_post_detail(
     author_profile=None,
     moderator_user=None,
     moderator_profile=None,
+    is_connected: bool | None = None,
+    profile_details: dict | None = None,
     is_liked: bool = False,
     is_reposted: bool = False,
     is_bookmarked: bool = False,
@@ -123,6 +125,10 @@ def format_post_detail(
             "last_name": author_profile.last_name,
             "profilePhoto_url": photo_url,
         })
+    if is_connected is not None:
+        data["is_connected"] = is_connected
+    if profile_details is not None:
+        data.update(profile_details)
     return data
 
 
@@ -133,6 +139,10 @@ def format_repost_item(
     reposter_profile,
     repost_id: UUID,
     reposted_at: datetime,
+    original_author_is_connected: bool | None = None,
+    reposter_is_connected: bool | None = None,
+    original_author_details: dict | None = None,
+    reposter_details: dict | None = None,
     is_liked: bool = False,
     viewer_has_reposted: bool = False,
     is_bookmarked: bool = False,
@@ -150,6 +160,8 @@ def format_repost_item(
         author_profile=original_author_profile,
         moderator_user=moderator_user,
         moderator_profile=moderator_profile,
+        is_connected=original_author_is_connected,
+        profile_details=original_author_details,
         is_liked=is_liked,
         is_reposted=viewer_has_reposted,
         is_bookmarked=is_bookmarked,
@@ -170,7 +182,7 @@ def format_repost_item(
         else PostReactionsGrouped().model_dump()
     )
 
-    return {
+    data = {
         "id": repost_id,
         "author_user_id": getattr(reposter_profile, "user_id", None),
         "first_name": getattr(reposter_profile, "first_name", None) if reposter_profile else None,
@@ -202,6 +214,11 @@ def format_repost_item(
         "media": [],
         "reposted_data": nested,
     }
+    if reposter_is_connected is not None:
+        data["is_connected"] = reposter_is_connected
+    if reposter_details is not None:
+        data.update(reposter_details)
+    return data
 
 # Post states that require a moderator to be assigned for review.
 _MODERATION_STATES = (PostState.processing, PostState.published)
