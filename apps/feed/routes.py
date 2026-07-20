@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 
@@ -84,11 +84,7 @@ async def get_post(
         user_id=current_user.id,
         db=db
     )
-    return success_response(
-        "Post retrieved successfully",
-        format_post_detail(post, viewer_user_id=current_user.id),
-        response_cls=ApiResponse,
-    )
+    return success_response("Post retrieved successfully", format_post_detail(post), response_cls=ApiResponse)
 
 
 @router.patch("/posts", response_model=ApiResponse)
@@ -102,11 +98,7 @@ async def edit_post(
         payload=payload,
         db=db
     )
-    return success_response(
-        "Post updated successfully",
-        format_post_detail(post, viewer_user_id=current_user.id),
-        response_cls=ApiResponse,
-    )
+    return success_response("Post updated successfully", format_post_detail(post), response_cls=ApiResponse)
 
 
 @router.delete("/posts", response_model=ApiResponse)
@@ -190,7 +182,7 @@ async def list_draft_posts(
     )
     return success_response(
         "Draft posts retrieved successfully",
-        [format_post_detail(p, viewer_user_id=current_user.id) for p in posts],
+        [format_post_detail(p) for p in posts],
         response_cls=ApiResponse,
     )
 
@@ -211,19 +203,25 @@ async def delete_draft_post(
 
 @router.get("/feed", response_model=ApiResponse)
 async def get_feed(
+    response: Response,
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
+    cursor: str | None = Query(default=None),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    formatted_posts, total_items = await get_feed_service(
+    formatted_posts, total_items, next_cursor = await get_feed_service(
         current_user_id=current_user.id,
         page=page,
         page_size=pageSize,
+        cursor=cursor,
         db=db,
         include_total=True,
     )
-    if page is None and pageSize is None:
+    if next_cursor:
+        # Keep JSON body identical; expose keyset cursor out-of-band for clients that want it.
+        response.headers["X-Next-Cursor"] = next_cursor
+    if page is None and pageSize is None and cursor is None:
         return success_response(
             "Feed retrieved successfully",
             formatted_posts,

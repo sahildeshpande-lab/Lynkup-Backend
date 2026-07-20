@@ -128,7 +128,7 @@ async def test_get_feed_service_normal_post():
         patch("apps.feed.services.feed_service.fetch_viewer_profile", AsyncMock(return_value=None)),
         patch("apps.feed.services.feed_service.get_user_connections", AsyncMock(return_value={author_id})),
         patch("apps.feed.services.feed_service.count_feed_posts", AsyncMock(return_value=1)),
-        patch("apps.feed.services.feed_service.fetch_feed_posts", AsyncMock(return_value=[feed_item])),
+        patch("apps.feed.services.feed_service.fetch_feed_posts", AsyncMock(return_value=([feed_item], None))),
         patch(
             "apps.feed.services.feed_service._load_profile_details",
             AsyncMock(
@@ -232,7 +232,7 @@ async def test_get_feed_service_repost_item():
         patch("apps.feed.services.feed_service.fetch_viewer_profile", AsyncMock(return_value=None)),
         patch("apps.feed.services.feed_service.get_user_connections", AsyncMock(return_value={author_id})),
         patch("apps.feed.services.feed_service.count_feed_posts", AsyncMock(return_value=1)),
-        patch("apps.feed.services.feed_service.fetch_feed_posts", AsyncMock(return_value=[feed_item])),
+        patch("apps.feed.services.feed_service.fetch_feed_posts", AsyncMock(return_value=([feed_item], None))),
         patch(
             "apps.feed.services.feed_service._load_profile_details",
             AsyncMock(
@@ -350,7 +350,7 @@ async def test_get_feed_service_tuples_normalization():
         patch("apps.feed.services.feed_service.fetch_viewer_profile", AsyncMock(return_value=None)),
         patch("apps.feed.services.feed_service.get_user_connections", AsyncMock(return_value=set())),
         patch("apps.feed.services.feed_service.count_feed_posts", AsyncMock(return_value=1)),
-        patch("apps.feed.services.feed_service.fetch_feed_posts", AsyncMock(return_value=[(post, author_profile)])),
+        patch("apps.feed.services.feed_service.fetch_feed_posts", AsyncMock(return_value=([(post, author_profile)], None))),
         patch(
             "apps.feed.services.feed_service._load_requested_user_ids",
             AsyncMock(return_value=set()),

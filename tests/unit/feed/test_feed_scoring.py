@@ -236,7 +236,7 @@ async def test_feed_service_pagination(mock_db):
     )
     post_two = SimpleNamespace(
         id=uuid.uuid4(),
-        author_user_id=uuid.uuid4(),
+        author_user_id=post_one.author_user_id,
         state=PostState.published,
         revision_number=1,
         content={},
@@ -251,9 +251,22 @@ async def test_feed_service_pagination(mock_db):
         moderator_id=None,
         attachments=[],
     )
-    author_profile = SimpleNamespace(first_name="A", last_name="B", profile_photo_url=None, user_id=post_one.author_user_id)
+    filler_one = SimpleNamespace(**{**post_one.__dict__, "id": uuid.uuid4()})
+    filler_two = SimpleNamespace(**{**post_two.__dict__, "id": uuid.uuid4()})
+    author_profile = SimpleNamespace(
+        first_name="A",
+        last_name="B",
+        profile_photo_url=None,
+        user_id=post_one.author_user_id,
+    )
 
     db = mock_db()
+    page_rows = [
+        (filler_one, author_profile),
+        (filler_two, author_profile),
+        (post_one, author_profile),
+        (post_two, author_profile),
+    ]
 
     with (
         patch("apps.feed.services.feed_service.fetch_viewer_profile", AsyncMock(return_value=viewer_profile)),
@@ -261,14 +274,21 @@ async def test_feed_service_pagination(mock_db):
         patch("apps.feed.services.feed_service.count_feed_posts", AsyncMock(return_value=5)) as count_posts,
         patch(
             "apps.feed.services.feed_service.fetch_feed_posts",
-            AsyncMock(return_value=[(post_one, author_profile), (post_two, author_profile)]),
+            AsyncMock(return_value=(page_rows, None)),
         ) as fetch_posts,
         patch(
             "apps.feed.services.feed_service._load_requested_user_ids",
             AsyncMock(return_value=set()),
         ),
+        patch("apps.feed.services.feed_service.fetch_post_engagement_flags") as mock_flags,
+        patch("apps.feed.services.feed_service.load_latest_post_reactions", AsyncMock(return_value={})),
     ):
-        posts, total = await get_feed_service(
+        mock_flags.return_value = SimpleNamespace(
+            user_reaction_for=lambda pid: None,
+            reposted_post_ids=frozenset(),
+            bookmarked_post_ids=frozenset(),
+        )
+        posts, total, _next_cursor = await get_feed_service(
             user_id,
             db,
             page=2,
@@ -282,8 +302,8 @@ async def test_feed_service_pagination(mock_db):
         user_id,
         viewer_profile,
         set(),
-        offset=2,
-        limit=2,
+        cursor=None,
+        limit=4,
     )
     assert total == 5
     assert len(posts) == 2
@@ -300,17 +320,41 @@ async def test_feed_service_without_pagination_fetches_all(mock_db):
         patch("apps.feed.services.feed_service.fetch_viewer_profile", AsyncMock(return_value=None)),
         patch("apps.feed.services.feed_service.get_user_connections", AsyncMock(return_value=set())),
         patch("apps.feed.services.feed_service.count_feed_posts", AsyncMock(return_value=0)),
-        patch("apps.feed.services.feed_service.fetch_feed_posts", AsyncMock(return_value=[])) as fetch_posts,
+        patch(
+            "apps.feed.services.feed_service.fetch_feed_posts",
+            AsyncMock(return_value=([], None)),
+        ) as fetch_posts,
     ):
-        posts, total = await get_feed_service(user_id, db, include_total=True)
+        posts, total, _next_cursor = await get_feed_service(user_id, db, include_total=True)
 
     fetch_posts.assert_awaited_once_with(
         db,
         user_id,
         None,
         set(),
-        offset=0,
+        cursor=None,
         limit=None,
     )
     assert posts == []
     assert total == 0
+
+
+def test_encode_decode_cursor_roundtrip():
+    from apps.feed.services.feed_cursor import decode_cursor, encode_cursor
+
+    post_id = uuid.uuid4()
+    created_at = datetime(2026, 7, 18, 12, 30, 0, tzinfo=timezone.utc)
+    cursor = encode_cursor(relevance=6, created_at=created_at, post_id=post_id)
+    decoded = decode_cursor(cursor)
+    assert decoded["relevance"] == 6
+    assert decoded["created_at"] == created_at
+    assert decoded["id"] == post_id
+
+
+def test_decode_cursor_rejects_malformed():
+    from apps.feed.services.feed_cursor import decode_cursor
+    from common.exceptions import ApiError
+    import pytest as _pytest
+
+    with _pytest.raises(ApiError, match="Invalid cursor"):
+        decode_cursor("not-a-valid-cursor")

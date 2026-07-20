@@ -313,13 +313,15 @@ async def list_reviewed_posts(
         except ValueError as exc:
             raise ApiError("Invalid moderator_id") from exc
 
+    # Post.state is the source of truth. When no status is supplied the service
+    # defaults to state='published' (across all moderators unless moderator_id
+    # is provided).
     data = await list_reviewed_posts_by_state_service(
         db,
         moderator_id=target_moderator_id,
         status=status,
         page=page,
         page_size=pageSize,
-        viewer_user_id=current_user.id,
     )
     return ApiResponse(message="Posts fetched successfully", data=data)
 
@@ -379,5 +381,5 @@ async def admin_publish_or_flag_post(
     return ApiResponse(
         status=True,
         message=_status_messages.get(payload.status, "Post updated successfully"),
-        data=format_post_detail(post, viewer_user_id=current_user.id),
+        data=format_post_detail(post)
     )

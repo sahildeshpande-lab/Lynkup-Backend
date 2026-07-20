@@ -1213,7 +1213,7 @@ async def test_get_feed_service_success(test_users) -> None:
         await session.commit()
         
     async with async_session_factory() as session:
-        feed, total = await get_feed_service(visitor.id, session, include_total=True)
+        feed, total, _next_cursor = await get_feed_service(visitor.id, session, include_total=True)
         assert len(feed) >= 2
         captions = {item["content"]["caption"] for item in feed}
         assert "Published Post 1" in captions
@@ -1314,7 +1314,7 @@ async def test_feed_service_connection_priority(test_users) -> None:
         await session.commit()
 
     async with async_session_factory() as session:
-        feed, total = await get_feed_service(user.id, session, include_total=True)
+        feed, total, _next_cursor = await get_feed_service(user.id, session, include_total=True)
         assert len(feed) >= 2
         captions = [item["content"]["caption"] for item in feed]
         assert "Connection Post" in captions

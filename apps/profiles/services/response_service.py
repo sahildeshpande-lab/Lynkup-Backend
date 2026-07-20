@@ -83,11 +83,8 @@ async def build_user_base_response(
 		},
         "major": profile.major if profile else None,
         "minor": profile.minor if profile else None,
-        "country": str(profile.country_id) if (profile and profile.country_id) else None,
-        "country_details": {
-            "id": profile.country_id if profile else None,
-            "country_name": country_name,
-        },
+        "county": country_name or "",
+        "country": country_name,
         "educationLevel": profile.edu_level if profile else None,
         "educationLevel_details": (
             {

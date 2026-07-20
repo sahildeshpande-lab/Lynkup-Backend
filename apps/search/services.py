@@ -514,7 +514,6 @@ async def search_posts(
                 is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
                 user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
                 reactions=latest_reactions.get(post.id),
-                viewer_user_id=current_user.id,
             )
             for post, author_profile, mod_user, mod_profile in rows
         ]

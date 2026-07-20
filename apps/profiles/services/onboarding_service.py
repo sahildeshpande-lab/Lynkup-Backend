@@ -14,7 +14,6 @@ async def complete_onboarding(
     bio: str | None ,
     major: str,
     minor: str | None,
-    country_id: str,
     university_id: str,
     education_level_id: int,
     academic_interests: list[str],
@@ -92,24 +91,6 @@ async def complete_onboarding(
         profile = Profile(user_id=user.id, first_name="", last_name="", completeness_score=0)
         db.add(profile)
         await db.flush()
-
-    if country_id:
-        try:
-            country_uuid = UUID(str(country_id))
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid country_id",
-            ) from exc
-        from apps.profiles.db_models.country_db_model import Country
-        country = (await db.execute(select(Country).where(Country.id == country_uuid))).scalar_one_or_none()
-        if not country:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid country_id",
-            )
-        profile.country_id = country_uuid
-    profile_data["countryId"] = str(profile.country_id) if profile.country_id else None
 
     if university_id:
         try:

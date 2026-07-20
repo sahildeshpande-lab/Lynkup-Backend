@@ -1,89 +1,179 @@
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import and_, case, false, func, or_, select, literal, union_all, UUID as SqlUUID
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
 from apps.connections.db_models import Block
 from apps.engagement.db_models import Repost
-import sqlalchemy as sa
-
 from apps.feed.db_models import Post, PostAttachment
-from apps.feed.services.feed_scoring import viewer_has_relevance_criteria as _viewer_has_relevance_criteria
+from apps.feed.services.feed_cursor import decode_cursor, encode_cursor
 from apps.profiles.db_models import Profile
-from apps.accounts.db_models import User
-from common.enums import PostState, ProfileVisibility
-from common.user_visibility import visible_user_filters
+
+#  to check post visibility
+def _visible_author_sql(alias: str) -> str:
+    """SQL fragment excluding soft-deleted / suspended / banned / deleting users."""
+    return f"""
+        {alias}.is_deleted = false
+        AND {alias}.deleted_at IS NULL
+        AND {alias}.status::text NOT IN ('suspended', 'banned', 'deleting')
+    """
+
+#  to check account status
+def _not_blocked_sql(author_user_expr: str) -> str:
+    return f"""
+        NOT EXISTS (
+            SELECT 1
+            FROM blocks b
+            WHERE b.is_active = true
+              AND (
+                    (b.blocker_user_id = :current_user AND b.blocked_user_id = {author_user_expr})
+                 OR (b.blocked_user_id = :current_user AND b.blocker_user_id = {author_user_expr})
+              )
+        )
+    """
+
+# to check for connected user
+def _connected_sql(author_user_expr: str) -> str:
+    return f"""
+        EXISTS (
+            SELECT 1
+            FROM connections c
+            WHERE c.is_active = true
+              AND (
+                    (c.user_low_id = :current_user AND c.user_high_id = {author_user_expr})
+                 OR (c.user_high_id = :current_user AND c.user_low_id = {author_user_expr})
+              )
+        )
+    """
+
+# Scoring for similary university , major , minor
+def _relevance_sql(author_profile_alias: str) -> str:
+    """Compute relevance once: university=4, major=2, minor=1."""
+    return f"""
+        (
+            CASE
+                WHEN me.university_id IS NOT NULL
+                 AND {author_profile_alias}.university_id = me.university_id
+                THEN 4
+                ELSE 0
+            END
+            +
+            CASE
+                WHEN me.major IS NOT NULL
+                 AND btrim(me.major) <> ''
+                 AND {author_profile_alias}.major IS NOT NULL
+                 AND lower(btrim({author_profile_alias}.major)) = lower(btrim(me.major))
+                THEN 2
+                ELSE 0
+            END
+            +
+            CASE
+                WHEN me.minor IS NOT NULL
+                 AND btrim(me.minor) <> ''
+                 AND {author_profile_alias}.minor IS NOT NULL
+                 AND lower(btrim({author_profile_alias}.minor)) = lower(btrim(me.minor))
+                THEN 1
+                ELSE 0
+            END
+        )
+    """
+# Ranking post
+def _visibility_sql(author_profile_alias: str, author_user_expr: str) -> str:
+    """Existing feed visibility: public always, private/connections_only if connected."""
+    return f"""
+        (
+            {author_profile_alias}.profile_visibility::text = 'public'
+            OR (
+                {author_profile_alias}.profile_visibility::text IN ('private', 'connections_only')
+                AND {_connected_sql(author_user_expr)}
+            )
+        )
+    """
 
 
-def _normalized_string_match(column, value: str | None):
-    normalized = (value or "").strip().lower()
-    if not normalized:
-        return false()
-    return and_(
-        column.isnot(None),
-        func.lower(func.trim(column)) == normalized,
+_FEED_EVENTS_SQL = f"""
+WITH ranked_posts AS (
+    SELECT
+        p.id AS post_id,
+        CAST(NULL AS uuid) AS repost_id,
+        p.created_at AS created_at,
+        'post' AS event_type,
+        {_relevance_sql("author_profile")} AS relevance
+    FROM posts p
+    JOIN profiles author_profile
+        ON author_profile.user_id = p.author_user_id
+    JOIN users author_user
+        ON author_user.id = p.author_user_id
+    LEFT JOIN profiles me
+        ON me.user_id = :current_user
+    WHERE p.state::text = 'published'
+      AND p.author_user_id <> :current_user
+      AND {_visible_author_sql("author_user")}
+      AND {_visibility_sql("author_profile", "p.author_user_id")}
+      AND {_not_blocked_sql("p.author_user_id")}
+
+    UNION ALL
+
+    SELECT
+        p.id AS post_id,
+        r.id AS repost_id,
+        r.created_at AS created_at,
+        'repost' AS event_type,
+        {_relevance_sql("author_profile")} AS relevance
+    FROM reposts r
+    JOIN profiles reposter_profile
+        ON reposter_profile.id = r.profile_id
+    JOIN users reposter_user
+        ON reposter_user.id = reposter_profile.user_id
+    JOIN posts p
+        ON p.id = r.post_id
+    JOIN profiles author_profile
+        ON author_profile.user_id = p.author_user_id
+    JOIN users author_user
+        ON author_user.id = p.author_user_id
+    LEFT JOIN profiles me
+        ON me.user_id = :current_user
+    WHERE p.state::text = 'published'
+      AND reposter_profile.user_id <> :current_user
+      AND {_visible_author_sql("reposter_user")}
+      AND {_visible_author_sql("author_user")}
+      AND {_visibility_sql("reposter_profile", "reposter_profile.user_id")}
+      AND {_visibility_sql("author_profile", "p.author_user_id")}
+      AND {_not_blocked_sql("reposter_profile.user_id")}
+      AND {_not_blocked_sql("p.author_user_id")}
+)
+SELECT
+    post_id,
+    repost_id,
+    created_at,
+    event_type,
+    relevance
+FROM ranked_posts
+WHERE
+    (
+        CAST(:has_cursor AS boolean) = false
+        OR relevance < :last_relevance
+        OR (
+            relevance = :last_relevance
+            AND created_at < :last_created_at
+        )
+        OR (
+            relevance = :last_relevance
+            AND created_at = :last_created_at
+            AND post_id < :last_post_id
+        )
     )
+ORDER BY
+    relevance DESC,
+    created_at DESC,
+    post_id DESC
+"""
 
-
-def _university_match(column, university_id: UUID | None):
-    if university_id is None:
-        return false()
-    return and_(column.isnot(None), column == university_id)
-
-
-def _build_feed_match_expressions(
-    author_profile,
-    *,
-    viewer_major: str | None,
-    viewer_minor: str | None,
-    viewer_university_id: UUID | None,
-):
-    major_match = _normalized_string_match(author_profile.major, viewer_major)
-    minor_match = _normalized_string_match(author_profile.minor, viewer_minor)
-    university_match = _university_match(author_profile.university_id, viewer_university_id)
-    relevance_match = or_(major_match, minor_match, university_match)
-    return relevance_match
-
-
-def _build_feed_filters(
-    *,
-    current_user_id: UUID,
-    author_profile,
-    author_user,
-    connected_author_ids: set[UUID],
-):
-    if connected_author_ids:
-        connected_clause = Post.author_user_id.in_(connected_author_ids)
-    else:
-        connected_clause = false()
-
-    private_profile = author_profile.profile_visibility.in_(
-        [ProfileVisibility.private, ProfileVisibility.connections_only]
-    )
-    public_profile = author_profile.profile_visibility == ProfileVisibility.public
-
-    visibility_filter = or_(
-        and_(private_profile, connected_clause),
-        public_profile,
-    )
-
-    return [
-        Post.state == PostState.published,
-        Post.author_user_id != current_user_id,
-        visibility_filter,
-        *visible_user_filters(author_user),
-    ]
-
-
-def _viewer_profile_fields(viewer_profile: Profile | None):
-    if viewer_profile is None:
-        return None, None, None
-    return viewer_profile.major, viewer_profile.minor, viewer_profile.university_id
-
-
+# get user profile
 async def fetch_viewer_profile(db: AsyncSession, user_id: UUID) -> Profile | None:
     stmt = select(Profile).where(Profile.user_id == user_id)
     return (await db.execute(stmt)).scalar_one_or_none()
@@ -91,14 +181,14 @@ async def fetch_viewer_profile(db: AsyncSession, user_id: UUID) -> Profile | Non
 
 async def fetch_blocked_user_ids(db: AsyncSession, user_id: UUID) -> set[UUID]:
     stmt = select(Block.blocker_user_id, Block.blocked_user_id).where(
-        Block.is_active == True,
+        Block.is_active == True,  # noqa: E712
         or_(
             Block.blocker_user_id == user_id,
-            Block.blocked_user_id == user_id
-        )
+            Block.blocked_user_id == user_id,
+        ),
     )
     res = await db.execute(stmt)
-    blocked_ids = set()
+    blocked_ids: set[UUID] = set()
     for blocker, blocked in res.all():
         if blocker == user_id:
             blocked_ids.add(blocked)
@@ -107,176 +197,119 @@ async def fetch_blocked_user_ids(db: AsyncSession, user_id: UUID) -> set[UUID]:
     return blocked_ids
 
 
+_FEED_COUNT_SQL = f"""
+WITH ranked_posts AS (
+    SELECT
+        p.id AS post_id
+    FROM posts p
+    JOIN profiles author_profile
+        ON author_profile.user_id = p.author_user_id
+    JOIN users author_user
+        ON author_user.id = p.author_user_id
+    WHERE p.state::text = 'published'
+      AND p.author_user_id <> :current_user
+      AND {_visible_author_sql("author_user")}
+      AND {_visibility_sql("author_profile", "p.author_user_id")}
+      AND {_not_blocked_sql("p.author_user_id")}
+
+    UNION ALL
+
+    SELECT
+        p.id AS post_id
+    FROM reposts r
+    JOIN profiles reposter_profile
+        ON reposter_profile.id = r.profile_id
+    JOIN users reposter_user
+        ON reposter_user.id = reposter_profile.user_id
+    JOIN posts p
+        ON p.id = r.post_id
+    JOIN profiles author_profile
+        ON author_profile.user_id = p.author_user_id
+    JOIN users author_user
+        ON author_user.id = p.author_user_id
+    WHERE p.state::text = 'published'
+      AND reposter_profile.user_id <> :current_user
+      AND {_visible_author_sql("reposter_user")}
+      AND {_visible_author_sql("author_user")}
+      AND {_visibility_sql("reposter_profile", "reposter_profile.user_id")}
+      AND {_visibility_sql("author_profile", "p.author_user_id")}
+      AND {_not_blocked_sql("reposter_profile.user_id")}
+      AND {_not_blocked_sql("p.author_user_id")}
+)
+SELECT COUNT(*) FROM ranked_posts
+"""
+
+# count the post
 async def count_feed_posts(
     db: AsyncSession,
     current_user_id: UUID,
     viewer_profile: Profile | None,
     connected_author_ids: set[UUID],
 ) -> int:
-    blocked_user_ids = await fetch_blocked_user_ids(db, current_user_id)
-    
-    author_profile = aliased(Profile, name="author_profile")
-    author_user = aliased(User, name="author_user")
-    
-    reposter_profile = aliased(Profile, name="reposter_profile")
-    reposter_user = aliased(User, name="reposter_user")
-
-    # Visibility filters
-    connected_clause = Post.author_user_id.in_(connected_author_ids) if connected_author_ids else false()
-    private_profile = author_profile.profile_visibility.in_([ProfileVisibility.private, ProfileVisibility.connections_only])
-    public_profile = author_profile.profile_visibility == ProfileVisibility.public
-    visibility_filter = or_(and_(private_profile, connected_clause), public_profile)
-
-    posts_filters = [
-        Post.state == PostState.published,
-        Post.author_user_id != current_user_id,
-        visibility_filter,
-        *visible_user_filters(author_user),
-    ]
-    if blocked_user_ids:
-        posts_filters.append(~Post.author_user_id.in_(blocked_user_ids))
-
-    post_stmt = (
-        select(Post.id.label("post_id"), literal(None, type_=SqlUUID).label("repost_id"))
-        .join(author_profile, author_profile.user_id == Post.author_user_id)
-        .join(author_user, author_user.id == Post.author_user_id)
-        .where(*posts_filters)
+    """Count feed events using the same ranked CTE visibility rules (no OFFSET)."""
+    del viewer_profile, connected_author_ids  # visibility is evaluated in SQL
+    result = await db.execute(
+        text(_FEED_COUNT_SQL),
+        {"current_user": current_user_id},
     )
+    return int(result.scalar_one())
 
-    reposter_connected_clause = reposter_profile.user_id.in_(connected_author_ids) if connected_author_ids else false()
-    reposter_private = reposter_profile.profile_visibility.in_([ProfileVisibility.private, ProfileVisibility.connections_only])
-    reposter_public = reposter_profile.profile_visibility == ProfileVisibility.public
-    reposter_visibility = or_(and_(reposter_private, reposter_connected_clause), reposter_public)
-
-    reposts_filters = [
-        Post.state == PostState.published,
-        reposter_profile.user_id != current_user_id,
-        reposter_visibility,
-        visibility_filter,
-        *visible_user_filters(reposter_user),
-        *visible_user_filters(author_user),
-    ]
-    if blocked_user_ids:
-        reposts_filters.append(~reposter_profile.user_id.in_(blocked_user_ids))
-        reposts_filters.append(~Post.author_user_id.in_(blocked_user_ids))
-
-    repost_stmt = (
-        select(Post.id.label("post_id"), Repost.id.label("repost_id"))
-        .join(reposter_profile, reposter_profile.id == Repost.profile_id)
-        .join(reposter_user, reposter_user.id == reposter_profile.user_id)
-        .join(Post, Post.id == Repost.post_id)
-        .join(author_profile, author_profile.user_id == Post.author_user_id)
-        .join(author_user, author_user.id == Post.author_user_id)
-        .where(*reposts_filters)
-    )
-
-    union_stmt = union_all(post_stmt, repost_stmt)
-    count_subquery = union_stmt.subquery("combined_feed")
-    stmt = select(func.count()).select_from(count_subquery)
-    return int((await db.execute(stmt)).scalar_one())
-
-
+# Fetch the post
 async def fetch_feed_posts(
     db: AsyncSession,
     current_user_id: UUID,
     viewer_profile: Profile | None,
     connected_author_ids: set[UUID],
     *,
-    offset: int = 0,
+    cursor: str | None = None,
     limit: int | None = None,
-) -> list[dict]:
-    blocked_user_ids = await fetch_blocked_user_ids(db, current_user_id)
-    
-    author_profile = aliased(Profile, name="author_profile")
-    author_user = aliased(User, name="author_user")
-    
-    reposter_profile = aliased(Profile, name="reposter_profile")
-    reposter_user = aliased(User, name="reposter_user")
+) -> tuple[list[dict], str | None]:
+    """
+    Fetch feed events with keyset (cursor) pagination via a PostgreSQL CTE.
 
-    # Visibility filters
-    connected_clause = Post.author_user_id.in_(connected_author_ids) if connected_author_ids else false()
-    private_profile = author_profile.profile_visibility.in_([ProfileVisibility.private, ProfileVisibility.connections_only])
-    public_profile = author_profile.profile_visibility == ProfileVisibility.public
-    visibility_filter = or_(and_(private_profile, connected_clause), public_profile)
+    Returns:
+        (feed_items, next_cursor) where next_cursor is None on the last/empty page.
+    """
+    del viewer_profile, connected_author_ids  # visibility/relevance evaluated in SQL
 
-    posts_filters = [
-        Post.state == PostState.published,
-        Post.author_user_id != current_user_id,
-        visibility_filter,
-        *visible_user_filters(author_user),
-    ]
-    if blocked_user_ids:
-        posts_filters.append(~Post.author_user_id.in_(blocked_user_ids))
+    last_relevance = 0
+    last_created_at: datetime = datetime.min
+    last_post_id = UUID(int=0)
+    has_cursor = False
 
-    post_stmt = (
-        select(
-            Post.id.label("post_id"),
-            literal(None, type_=SqlUUID).label("repost_id"),
-            Post.created_at.label("event_time"),
-            literal("post").label("event_type")
-        )
-        .join(author_profile, author_profile.user_id == Post.author_user_id)
-        .join(author_user, author_user.id == Post.author_user_id)
-        .where(*posts_filters)
-    )
+    if cursor:
+        decoded = decode_cursor(cursor)
+        last_relevance = decoded["relevance"]
+        last_created_at = decoded["created_at"]
+        last_post_id = decoded["id"]
+        has_cursor = True
 
-    reposter_connected_clause = reposter_profile.user_id.in_(connected_author_ids) if connected_author_ids else false()
-    reposter_private = reposter_profile.profile_visibility.in_([ProfileVisibility.private, ProfileVisibility.connections_only])
-    reposter_public = reposter_profile.profile_visibility == ProfileVisibility.public
-    reposter_visibility = or_(and_(reposter_private, reposter_connected_clause), reposter_public)
+    # Fetch one extra row to detect whether another page exists.
+    fetch_limit = None if limit is None else limit + 1
+    sql = _FEED_EVENTS_SQL if fetch_limit is None else _FEED_EVENTS_SQL + "\nLIMIT :limit"
 
-    reposts_filters = [
-        Post.state == PostState.published,
-        reposter_profile.user_id != current_user_id,
-        reposter_visibility,
-        visibility_filter,
-        *visible_user_filters(reposter_user),
-        *visible_user_filters(author_user),
-    ]
-    if blocked_user_ids:
-        reposts_filters.append(~reposter_profile.user_id.in_(blocked_user_ids))
-        reposts_filters.append(~Post.author_user_id.in_(blocked_user_ids))
+    params: dict = {
+        "current_user": current_user_id,
+        "has_cursor": has_cursor,
+        "last_relevance": last_relevance,
+        "last_created_at": last_created_at,
+        "last_post_id": last_post_id,
+    }
+    if fetch_limit is not None:
+        params["limit"] = fetch_limit
 
-    repost_stmt = (
-        select(
-            Post.id.label("post_id"),
-            Repost.id.label("repost_id"),
-            Repost.created_at.label("event_time"),
-            literal("repost").label("event_type")
-        )
-        .join(reposter_profile, reposter_profile.id == Repost.profile_id)
-        .join(reposter_user, reposter_user.id == reposter_profile.user_id)
-        .join(Post, Post.id == Repost.post_id)
-        .join(author_profile, author_profile.user_id == Post.author_user_id)
-        .join(author_user, author_user.id == Post.author_user_id)
-        .where(*reposts_filters)
-    )
-
-    union_stmt = union_all(post_stmt, repost_stmt)
-    paginated_subquery = union_stmt.subquery("combined_feed")
-    feed_stmt = (
-        select(
-            paginated_subquery.c.post_id,
-            paginated_subquery.c.repost_id,
-            paginated_subquery.c.event_time,
-            paginated_subquery.c.event_type
-        )
-        .order_by(paginated_subquery.c.event_time.desc())
-    )
-
-    if offset:
-        feed_stmt = feed_stmt.offset(offset)
-    if limit is not None:
-        feed_stmt = feed_stmt.limit(limit)
-
-    events = (await db.execute(feed_stmt)).all()
+    events = (await db.execute(text(sql), params)).mappings().all()
     if not events:
-        return []
+        return [], None
 
-    post_ids = {row.post_id for row in events}
-    repost_ids = {row.repost_id for row in events if row.repost_id}
+    has_more = False
+    if limit is not None and len(events) > limit:
+        has_more = True
+        events = events[:limit]
 
-    # Batch fetch posts + original author profiles
+    post_ids = {row["post_id"] for row in events}
+    repost_ids = {row["repost_id"] for row in events if row["repost_id"]}
+
     post_author_profile = aliased(Profile, name="post_author_profile")
     post_stmt = (
         select(Post, post_author_profile)
@@ -287,8 +320,7 @@ async def fetch_feed_posts(
     post_results = await db.execute(post_stmt)
     posts_map = {post.id: (post, profile) for post, profile in post_results.all()}
 
-    # Batch fetch reposts + reposter profiles
-    reposts_map = {}
+    reposts_map: dict = {}
     if repost_ids:
         repost_stmt = (
             select(Repost, Profile)
@@ -298,35 +330,58 @@ async def fetch_feed_posts(
         repost_results = await db.execute(repost_stmt)
         reposts_map = {repost.id: (repost, profile) for repost, profile in repost_results.all()}
 
-    # Reconstruct feed in correct timeline order
-    results = []
+    results: list[dict] = []
     for row in events:
-        post_data = posts_map.get(row.post_id)
+        post_data = posts_map.get(row["post_id"])
         if not post_data:
             continue
         post, author_profile = post_data
 
-        if row.event_type == "repost" and row.repost_id:
-            repost_data = reposts_map.get(row.repost_id)
+        if row["event_type"] == "repost" and row["repost_id"]:
+            repost_data = reposts_map.get(row["repost_id"])
             if not repost_data:
                 continue
             repost, reposter_profile = repost_data
-            results.append({
-                "post": post,
-                "author_profile": author_profile,
-                "is_reposted": True,
-                "repost_id": repost.id,
-                "reposted_by_profile": reposter_profile,
-                "reposted_at": repost.created_at,
-            })
+            results.append(
+                {
+                    "post": post,
+                    "author_profile": author_profile,
+                    "is_reposted": True,
+                    "repost_id": repost.id,
+                    "reposted_by_profile": reposter_profile,
+                    "reposted_at": repost.created_at,
+                    "_relevance": int(row["relevance"]),
+                    "_cursor_created_at": row["created_at"],
+                    "_cursor_post_id": row["post_id"],
+                }
+            )
         else:
-            results.append({
-                "post": post,
-                "author_profile": author_profile,
-                "is_reposted": False,
-                "repost_id": None,
-                "reposted_by_profile": None,
-                "reposted_at": None,
-            })
+            results.append(
+                {
+                    "post": post,
+                    "author_profile": author_profile,
+                    "is_reposted": False,
+                    "repost_id": None,
+                    "reposted_by_profile": None,
+                    "reposted_at": None,
+                    "_relevance": int(row["relevance"]),
+                    "_cursor_created_at": row["created_at"],
+                    "_cursor_post_id": row["post_id"],
+                }
+            )
 
-    return results
+    next_cursor = None
+    if has_more and results:
+        last = results[-1]
+        next_cursor = encode_cursor(
+            relevance=last["_relevance"],
+            created_at=last["_cursor_created_at"],
+            post_id=last["_cursor_post_id"],
+        )
+
+    for item in results:
+        item.pop("_relevance", None)
+        item.pop("_cursor_created_at", None)
+        item.pop("_cursor_post_id", None)
+
+    return results, next_cursor
