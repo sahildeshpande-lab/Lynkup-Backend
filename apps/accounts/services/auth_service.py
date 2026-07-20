@@ -9,7 +9,7 @@ from pwdlib import PasswordHash
 from pwdlib.hashers.bcrypt import BcryptHasher
 from apps.accounts.db_models import User, UserInstallation
 from apps.profiles.db_models import Profile
-from common.enums import UserStatus, inactive_account_message
+from common.enums import OnboardingStatus, UserStatus, inactive_account_message
 from core.auth.config import settings as auth_settings
 from core.email_service import send_otp_email, send_verification_success_email, build_email_verified_success_html
 from ..schemas import ApiResponse, LoginRequest, ResendOtpRequest, OtpVerifyRequest, UserBaseResponse
@@ -159,6 +159,7 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
         return ApiResponse(status=False, message="OTP has expired. Please request a new OTP", data=None)
 
     if user.email_otp == payload.otp:
+        onboarding_completed = user.onboarding_status == OnboardingStatus.completed
         user.email_verified_at = _now()
         user.status = UserStatus.active
         user.email_otp = None
@@ -166,13 +167,11 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
         db.add(user)
         await db.commit()
 
-        stmt_profile = select(Profile).where(Profile.user_id == user.id)
-        profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-        full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip() if profile else None
-
-        # Send a verification success email using existing account_created_email template
-        from core.email_service import send_verification_success_email
-        await send_verification_success_email(user.email, full_name)
+        if not onboarding_completed:
+            stmt_profile = select(Profile).where(Profile.user_id == user.id)
+            profile = (await db.execute(stmt_profile)).scalar_one_or_none()
+            full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip() if profile else None
+            await send_verification_success_email(user.email, full_name)
 
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()
@@ -194,6 +193,7 @@ async def verify_email(token: str, db: AsyncSession) -> HTMLResponse | ApiRespon
     if user.email_otp_created_at and (_now() - user.email_otp_created_at) > timedelta(minutes=auth_settings.otp_expire_minutes):
         return HTMLResponse(content="<h1>Token expired</h1>", status_code=400)
 
+    onboarding_completed = user.onboarding_status == OnboardingStatus.completed
     user.email_verified_at = _now()
     user.status = UserStatus.active
     user.email_otp = None
@@ -201,10 +201,12 @@ async def verify_email(token: str, db: AsyncSession) -> HTMLResponse | ApiRespon
     db.add(user)
     await db.commit()
 
+    if onboarding_completed:
+        return HTMLResponse(content="", status_code=200)
+
     stmt_profile = select(Profile).where(Profile.user_id == user.id)
     profile = (await db.execute(stmt_profile)).scalar_one_or_none()
     full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip() if profile else None
-
     html_content = build_email_verified_success_html(full_name)
     return HTMLResponse(content=html_content, status_code=200)
 

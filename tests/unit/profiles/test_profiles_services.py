@@ -173,6 +173,7 @@ async def test_profiles_complete_onboarding(monkeypatch) -> None:
                 bio="Test bio",
                 major="Physics",
                 minor="Math",
+                country_id=str(country.id),
                 university_id=str(univ_id),
                 education_level_id=2,
                 academic_interests=["Math", "Physics"],
@@ -182,6 +183,8 @@ async def test_profiles_complete_onboarding(monkeypatch) -> None:
             )
             assert res["user"]["id"] == str(user.id)
             assert res["user"]["major"] == "Physics"
+            assert res["user"]["country"] == str(country.id)
+            assert res["user"]["country_details"]["country_name"] == "United States"
             assert res["user"]["educationLevel"] == EducationLevel.masters.value
     finally:
         await engine.dispose()
