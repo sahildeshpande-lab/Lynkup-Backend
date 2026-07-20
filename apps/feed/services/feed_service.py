@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from apps.connections.db_models import ConnectionRequest
 from apps.connections.services.recommendation_service import get_user_connections
+from apps.feed.db_models import Post
 from apps.feed.repositories.feed_repository import (
     count_feed_posts,
     fetch_feed_posts,
@@ -14,10 +17,110 @@ from apps.engagement.repositories import fetch_post_engagement_flags
 from apps.engagement.services.post_reaction_formatters import load_latest_post_reactions
 from apps.engagement.services.reaction_service import format_user_reaction
 from apps.feed.services.post_service import format_post_detail, format_repost_item
-from apps.feed.services.profile_enrichment import (
-    load_profile_details as _load_profile_details,
-    load_requested_user_ids as _load_requested_user_ids,
-)
+from apps.profiles.db_models import AcademicInterest, University
+
+
+async def _load_profile_details(
+    db: AsyncSession,
+    profiles_by_user_id: dict[UUID, object],
+) -> dict[UUID, dict]:
+    """Batch-resolve feed profile fields that are stored as foreign-key IDs."""
+    university_ids = {
+        profile.university_id
+        for profile in profiles_by_user_id.values()
+        if getattr(profile, "university_id", None) is not None
+    }
+    profile_interest_ids: dict[UUID, list[int]] = {}
+    for user_id, profile in profiles_by_user_id.items():
+        normalized_ids = []
+        for interest_id in (
+            getattr(profile, "profile_interests_id", None) or []
+        ):
+            try:
+                normalized_ids.append(int(interest_id))
+            except (TypeError, ValueError):
+                continue
+        profile_interest_ids[user_id] = normalized_ids
+    interest_ids = {
+        interest_id
+        for normalized_ids in profile_interest_ids.values()
+        for interest_id in normalized_ids
+    }
+
+    university_names: dict[UUID, str] = {}
+    if university_ids:
+        rows = (
+            await db.execute(
+                select(University.id, University.name).where(
+                    University.id.in_(university_ids)
+                )
+            )
+        ).all()
+        university_names = {row.id: row.name for row in rows}
+
+    interest_names: dict[int, str] = {}
+    if interest_ids:
+        rows = (
+            await db.execute(
+                select(AcademicInterest.id, AcademicInterest.name).where(
+                    AcademicInterest.id.in_(interest_ids)
+                )
+            )
+        ).all()
+        interest_names = {row.id: row.name for row in rows}
+
+    return {
+        user_id: {
+            "university": university_names.get(
+                getattr(profile, "university_id", None)
+            ),
+            "bio": getattr(profile, "bio", None),
+            "academic_interest": [
+                interest_names[interest_id]
+                for interest_id in profile_interest_ids[user_id]
+                if interest_id in interest_names
+            ],
+            "major": getattr(profile, "major", None),
+            "minor": getattr(profile, "minor", None),
+        }
+        for user_id, profile in profiles_by_user_id.items()
+    }
+
+
+async def _load_requested_user_ids(
+    db: AsyncSession,
+    current_user_id: UUID,
+    target_user_ids: set[UUID],
+) -> set[UUID]:
+    """Return users with a pending request in either direction with the viewer."""
+    if not target_user_ids:
+        return set()
+
+    rows = (
+        await db.execute(
+            select(ConnectionRequest).where(
+                ConnectionRequest.status == "pending",
+                or_(
+                    and_(
+                        ConnectionRequest.sender_user_id == current_user_id,
+                        ConnectionRequest.receiver_user_id.in_(target_user_ids),
+                    ),
+                    and_(
+                        ConnectionRequest.receiver_user_id == current_user_id,
+                        ConnectionRequest.sender_user_id.in_(target_user_ids),
+                    ),
+                ),
+            )
+        )
+    ).scalars().all()
+
+    requested_ids: set[UUID] = set()
+    for request in rows:
+        if request.sender_user_id == current_user_id:
+            requested_ids.add(request.receiver_user_id)
+        else:
+            requested_ids.add(request.sender_user_id)
+    return requested_ids
 
 
 async def get_feed_service(
@@ -25,37 +128,60 @@ async def get_feed_service(
     db: AsyncSession,
     page: int | None = None,
     page_size: int | None = None,
+    cursor: str | None = None,
     include_total: bool = False,
-) -> list[dict] | tuple[list[dict], int]:
+) -> list[dict] | tuple[list[dict], int, str | None]:
     """
-    Return feed events (posts and reposts) ordered by event creation timestamp.
+    Return feed events (posts and reposts) ordered by relevance, then created_at.
+
+    Pagination uses keyset (cursor) internally. Legacy page/pageSize remain supported
+    without changing the JSON response contract. When include_total=True, also returns
+    next_cursor (opaque, or None on the last page).
     """
     viewer_profile = await fetch_viewer_profile(db, current_user_id)
     connection_ids = await get_user_connections(db, current_user_id)
     total_items = await count_feed_posts(db, current_user_id, viewer_profile, connection_ids)
 
-    if page is None and page_size is None:
-        offset = 0
+    if page is None and page_size is None and cursor is None:
+        fetch_cursor = None
         limit = None
+        slice_start = None
+    elif cursor is not None:
+        # Cursor path: ignore page offset; pageSize still caps the page.
+        fetch_cursor = cursor
+        limit = page_size or 20
+        slice_start = None
     else:
         p = page or 1
         ps = page_size or 20
-        offset = (p - 1) * ps
-        limit = ps
+        if p == 1:
+            fetch_cursor = None
+            limit = ps
+            slice_start = None
+        else:
+            # No SQL OFFSET: fetch through the requested page, then slice.
+            fetch_cursor = None
+            limit = p * ps
+            slice_start = (p - 1) * ps
 
-    raw_items = await fetch_feed_posts(
+    raw_items, next_cursor = await fetch_feed_posts(
         db,
         current_user_id,
         viewer_profile,
         connection_ids,
-        offset=offset,
+        cursor=fetch_cursor,
         limit=limit,
     )
+
+    if slice_start is not None:
+        ps = page_size or 20
+        raw_items = raw_items[slice_start : slice_start + ps]
+        next_cursor = None
 
     if not raw_items:
         results = []
         if include_total:
-            return results, total_items
+            return results, total_items, next_cursor
         return results
 
     # Normalize raw items for compatibility with old test mock formats
@@ -144,7 +270,6 @@ async def get_feed_service(
                 is_bookmarked=is_bookmarked,
                 user_reaction=user_reaction,
                 reactions=reactions,
-                viewer_user_id=current_user_id,
             )
         else:
             formatted = format_post_detail(
@@ -159,12 +284,11 @@ async def get_feed_service(
                 user_reaction=user_reaction,
                 reactions=reactions,
                 reposted_data=None,
-                viewer_user_id=current_user_id,
             )
 
         formatted_posts.append(formatted)
 
     if include_total:
-        return formatted_posts, total_items
+        return formatted_posts, total_items, next_cursor
     return formatted_posts
 

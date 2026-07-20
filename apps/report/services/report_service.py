@@ -18,7 +18,6 @@ from apps.profiles.db_models import Profile
 from apps.report.db_models import Report
 from apps.report.repositories.report_repository import (
     count_reports,
-    count_reports_by_entity_keys,
     create_report,
     get_duplicate_report,
     get_report_by_id,
@@ -49,8 +48,6 @@ def format_report_detail(
     reporter_profile: Profile | None,
     moderator_user: User | None,
     moderator_profile: Profile | None,
-    *,
-    report_count: int = 0,
 ) -> ReportDetailData:
     reporter_details = ReportUserDetail(
         id=reporter_user.id,
@@ -81,7 +78,6 @@ def format_report_detail(
         updated_at=report.updated_at,
         reporter_details=reporter_details,
         moderator_info=moderator_info,
-        report_count=report_count,
     )
 
 
@@ -219,19 +215,8 @@ async def list_reports_admin_service(
         moderator_id=moderator_id,
     )
 
-    report_counts = await count_reports_by_entity_keys(
-        db,
-        [(row[0].entity_type, row[0].entity_id) for row in rows],
-    )
     items = [
-        format_report_detail(
-            row[0],
-            row[1],
-            row[2],
-            row[3],
-            row[4],
-            report_count=report_counts.get((row[0].entity_type, row[0].entity_id), 0),
-        )
+        format_report_detail(row[0], row[1], row[2], row[3], row[4])
         for row in rows
     ]
 
@@ -258,19 +243,7 @@ async def get_report_details_admin_service(
     if row is None:
         return error_response("Report not found", response_cls=ReportResponse)
 
-    report = row[0]
-    report_counts = await count_reports_by_entity_keys(
-        db,
-        [(report.entity_type, report.entity_id)],
-    )
-    detail = format_report_detail(
-        row[0],
-        row[1],
-        row[2],
-        row[3],
-        row[4],
-        report_count=report_counts.get((report.entity_type, report.entity_id), 0),
-    )
+    detail = format_report_detail(row[0], row[1], row[2], row[3], row[4])
     return success_response(
         message="Report details retrieved successfully",
         data=detail,
@@ -303,18 +276,12 @@ async def review_report_admin_service(
         return error_response("Failed to update report", response_cls=ReportResponse)
 
     updated_row = await get_report_by_id(db, report_id)
-    report = updated_row[0]
-    report_counts = await count_reports_by_entity_keys(
-        db,
-        [(report.entity_type, report.entity_id)],
-    )
     detail = format_report_detail(
         updated_row[0],
         updated_row[1],
         updated_row[2],
         updated_row[3],
         updated_row[4],
-        report_count=report_counts.get((report.entity_type, report.entity_id), 0),
     )
     return success_response(
         message="Report reviewed successfully",

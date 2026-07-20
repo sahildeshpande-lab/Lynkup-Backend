@@ -14,6 +14,7 @@ from .post_service import utc_now, format_post_detail, format_repost_item, save_
 
 from . import feed_service as _service_module_3
 from .feed_service import get_feed_service
+from .feed_cursor import encode_cursor, decode_cursor
 
 _SERVICE_MODULES = (_service_module_0, _service_module_1, _service_module_2, _service_module_3,)
 
@@ -53,4 +54,6 @@ __all__ = [
     "list_processing_posts_service",
     "list_reviewed_posts_by_state_service",
     "get_feed_service",
+    "encode_cursor",
+    "decode_cursor",
 ]

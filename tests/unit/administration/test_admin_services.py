@@ -414,16 +414,14 @@ async def test_export_users() -> None:
             # Verify names are displayed instead of IDs
             item1 = next(item for item in res_all["items"] if item["email"] == email1)
             assert item1["university"] == "Stanford University"
-            assert item1["country"] == str(country.id)
-            assert item1["country_details"]["id"] == country.id
-            assert item1["country_details"]["country_name"] == "United States"
+            assert item1["country"] == "United States"
+            assert item1["county"] == "United States"
             assert "Artificial Intelligence" in item1["academicInterests"]
 
             item2 = next(item for item in res_all["items"] if item["email"] == email2)
             assert item2["university"] is None
             assert item2["country"] is None
-            assert item2["country_details"]["id"] is None
-            assert item2["country_details"]["country_name"] is None
+            assert item2["county"] == ""
             assert len(item2["academicInterests"]) == 0
 
             # Test paginated case
