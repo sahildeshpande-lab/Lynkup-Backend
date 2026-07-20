@@ -84,7 +84,11 @@ async def get_post(
         user_id=current_user.id,
         db=db
     )
-    return success_response("Post retrieved successfully", format_post_detail(post), response_cls=ApiResponse)
+    return success_response(
+        "Post retrieved successfully",
+        format_post_detail(post, viewer_user_id=current_user.id),
+        response_cls=ApiResponse,
+    )
 
 
 @router.patch("/posts", response_model=ApiResponse)
@@ -98,7 +102,11 @@ async def edit_post(
         payload=payload,
         db=db
     )
-    return success_response("Post updated successfully", format_post_detail(post), response_cls=ApiResponse)
+    return success_response(
+        "Post updated successfully",
+        format_post_detail(post, viewer_user_id=current_user.id),
+        response_cls=ApiResponse,
+    )
 
 
 @router.delete("/posts", response_model=ApiResponse)
@@ -182,7 +190,7 @@ async def list_draft_posts(
     )
     return success_response(
         "Draft posts retrieved successfully",
-        [format_post_detail(p) for p in posts],
+        [format_post_detail(p, viewer_user_id=current_user.id) for p in posts],
         response_cls=ApiResponse,
     )
 

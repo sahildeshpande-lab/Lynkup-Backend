@@ -22,3 +22,22 @@ def test_resolve_edu_level():
     assert repo._resolve_edu_level("Bachelors") == "Bachelors"
     assert repo._resolve_edu_level("masters") == "Masters"
     assert repo._resolve_edu_level("99") is None
+
+
+def test_split_filter_values_preserves_university_names_with_commas():
+    assert repo._split_filter_values("University of California, Berkeley") == [
+        "University of California, Berkeley"
+    ]
+
+
+def test_split_filter_values_splits_compact_ids_and_lists():
+    uni_a = str(uuid.uuid4())
+    uni_b = str(uuid.uuid4())
+    assert repo._split_filter_values(f"{uni_a},{uni_b}") == [uni_a, uni_b]
+    assert repo._split_filter_values([uni_a, uni_b]) == [uni_a, uni_b]
+    assert repo._split_filter_values("ai|ml;nlp") == ["ai", "ml", "nlp"]
+
+
+def test_split_filter_values_hashtag_whitespace():
+    assert repo._split_filter_values("ai ml", split_whitespace=True) == ["ai", "ml"]
+    assert repo._split_filter_values("#AI,#ML", split_whitespace=True) == ["#AI", "#ML"]

@@ -88,8 +88,17 @@ async def _get_user(_user_id: str, _db) -> dict:
     return {"found": True, "userId": str(_user_id)}
 
 
-async def _delete_users(_user_ids: list, _db) -> dict:
-    return {"deleted": [{"userId": str(uid), "status": "deleting"} for uid in _user_ids]}
+async def _delete_users(_user_ids: list, _role: str, _db) -> dict:
+    return {
+        "deleted_users": [
+            {
+                "deleted": True,
+                "status": "deleting",
+                "user": {"id": str(uid), "userId": str(uid)},
+            }
+            for uid in _user_ids
+        ]
+    }
 
 
 async def _update_status(_user_id: str, status, _db) -> dict:
@@ -147,13 +156,13 @@ def test_admin_user_routes_use_users_path(monkeypatch) -> None:
     delete_response = client.request(
         "DELETE",
         "/api/v1/users/",
-        json={"userIds": [user_id]},
+        json={"userIds": [user_id], "role": "user"},
     )
 
     assert get_response.status_code == 200
     assert get_response.json()["data"]["found"] is True
     assert delete_response.status_code == 200
-    assert delete_response.json()["data"]["deleted"][0]["userId"] == user_id
+    assert delete_response.json()["data"]["deleted_users"][0]["user"]["userId"] == user_id
 
 
 def test_admin_update_user_status(monkeypatch) -> None:
@@ -480,7 +489,7 @@ def test_list_reviewed_posts_route(monkeypatch) -> None:
                     "user_id": "11111111-1111-1111-1111-111111111111",
                     "caption": "Reviewed post",
                     "content_html": "<p>Reviewed</p>",
-                    "review_status": "publish",
+                    "status": "published",
                     "is_moderator_reviewed": True,
                     "reviewed_at": "2026-01-01T00:00:00+00:00",
                     "created_at": "2026-01-01T00:00:00+00:00",
@@ -499,15 +508,15 @@ def test_list_reviewed_posts_route(monkeypatch) -> None:
         }
 
     import apps.feed.services as feed_services
-    monkeypatch.setattr(feed_services, "list_reviewed_posts_service", _mock_list_reviewed_posts)
+    monkeypatch.setattr(feed_services, "list_reviewed_posts_by_state_service", _mock_list_reviewed_posts)
 
-    response = client.get("/api/v1/admin/posts/reviewed", params={"status": "publish", "page": 1, "pageSize": 10})
+    response = client.get("/api/v1/admin/posts/reviewed", params={"status": "published", "page": 1, "pageSize": 10})
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Posts fetched successfully"
-    assert body["data"]["items"][0]["review_status"] == "publish"
+    assert body["data"]["items"][0]["status"] == "published"
 
 
 def test_list_processing_posts_route_viewer(monkeypatch) -> None:
@@ -538,10 +547,8 @@ def test_list_processing_posts_route_viewer(monkeypatch) -> None:
         app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
 
 
-def test_list_reviewed_posts_route_viewer(monkeypatch) -> None:
-    app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
-
-    called_moderator_id = None
+def test_list_reviewed_posts_route_without_moderator_filter(monkeypatch) -> None:
+    called_moderator_id = "sentinel"
 
     async def _mock_list_reviewed_posts(_db, moderator_id=None, status=None, page=None, page_size=None):
         nonlocal called_moderator_id
@@ -555,15 +562,12 @@ def test_list_reviewed_posts_route_viewer(monkeypatch) -> None:
         }
 
     import apps.feed.services as feed_services
-    monkeypatch.setattr(feed_services, "list_reviewed_posts_service", _mock_list_reviewed_posts)
+    monkeypatch.setattr(feed_services, "list_reviewed_posts_by_state_service", _mock_list_reviewed_posts)
 
-    try:
-        response = client.get("/api/v1/admin/posts/reviewed")
-        assert response.status_code == 200
-        # Viewer should be able to fetch reviewed posts
-        assert called_moderator_id is None
-    finally:
-        app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
+    response = client.get("/api/v1/admin/posts/reviewed")
+    assert response.status_code == 200
+    # Without moderator_id query param, service is called with moderator_id=None.
+    assert called_moderator_id is None
 
 
 def test_list_users_route_viewer(monkeypatch) -> None:

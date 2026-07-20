@@ -16,7 +16,7 @@ from apps.engagement.repositories.report_repository import (
     get_reports,
     update_report,
 )
-from apps.engagement.schemas import (
+from apps.report.schemas import (
     ReportCreateRequest,
     ReportDetailData,
     ReportListData,

@@ -320,6 +320,7 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
     user = User(
         firebase_uid=uid,
         email=email,
+        password_hash=None,  # Social auth never stores a password
         registration_type=RegistrationType(provider_name),
         status=UserStatus.pending,
         onboarding_status=OnboardingStatus.not_started,
@@ -391,8 +392,11 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     existing_user_email = (await db.execute(stmt)).scalar_one_or_none()
     if existing_user_email:
         if existing_user_email.registration_type == RegistrationType.email:
+            password_hash = _hash_password(payload.password)
+            if not password_hash:
+                return ApiResponse(status=False, message="Password is required", data=None)
             existing_user_email.firebase_uid = firebase_user["uid"]
-            existing_user_email.password_hash = _hash_password(payload.password)
+            existing_user_email.password_hash = password_hash
             existing_user_email.updated_at = now
             existing_user_email.last_login_at = now
             db.add(existing_user_email)
@@ -472,11 +476,14 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     # 2. Create User record from verified Firebase identity
     now = _now()
     reg_type = RegistrationType.email
+    password_hash = _hash_password(payload.password)
+    if not password_hash:
+        return ApiResponse(status=False, message="Password is required", data=None)
 
     user = User(
         firebase_uid=firebase_user["uid"],
         email=email,
-        password_hash=_hash_password(payload.password),
+        password_hash=password_hash,
         registration_type=reg_type,
         status=UserStatus.pending,
         onboarding_status=OnboardingStatus.not_started,

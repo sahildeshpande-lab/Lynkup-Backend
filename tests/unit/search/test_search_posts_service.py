@@ -170,6 +170,32 @@ async def test_search_posts_combined_filters(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_search_posts_multi_hashtag_and_university_filters(mock_db):
+    user = _user()
+    db = mock_db()
+    hashtags = ["ai", "ml"]
+    universities = ["State University", "Tech University"]
+
+    with (
+        patch("apps.search.repositories.count_search_posts", AsyncMock(return_value=0)) as count_posts,
+        patch("apps.search.repositories.search_posts_with_details", AsyncMock(return_value=[])) as search_posts_repo,
+    ):
+        await search_posts(
+            user,
+            db,
+            hashtag=hashtags,
+            university_name=universities,
+            page=1,
+            page_size=20,
+        )
+
+    assert count_posts.await_args.kwargs["hashtag"] == hashtags
+    assert count_posts.await_args.kwargs["university_name"] == universities
+    assert search_posts_repo.await_args.kwargs["hashtag"] == hashtags
+    assert search_posts_repo.await_args.kwargs["university_name"] == universities
+
+
+@pytest.mark.asyncio
 async def test_search_posts_private_visibility_uses_repository(mock_db):
     user = _user()
     db = mock_db()

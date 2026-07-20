@@ -72,7 +72,7 @@ class EmailSignupRequest(BaseModel):
             raise ValueError("password must contain at least one uppercase letter")
         if not any(char.isdigit() for char in value):
             raise ValueError("password must contain at least one number")
-        return value
+        return value.strip()
 
 
 class LoginRequest(BaseModel):
@@ -101,7 +101,7 @@ class LoginRequest(BaseModel):
     def validate_password(cls, value: str) -> str:
         if not value or not value.strip():
             raise ValueError("password cannot be blank")
-        return value
+        return value.strip()
 
 
 EmailLoginRequest = LoginRequest

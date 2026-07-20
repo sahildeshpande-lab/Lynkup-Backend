@@ -182,7 +182,7 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
             "sender_user_id": req.sender_user_id,
             "receiver_user_id": req.receiver_user_id,
             "status": req.status,
-            "is_connected": False,
+            "is_connected": is_accepted,
             "request_sent": False,
             "request_received": False,
             "is_sent": False,

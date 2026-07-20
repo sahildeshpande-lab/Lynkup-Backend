@@ -51,7 +51,7 @@ def test_upload_image_rejects_invalid_content_type() -> None:
 
 
 def test_upload_image_rejects_oversized_file() -> None:
-    oversized = b"x" * (5 * 1024 * 1024 + 1)
+    oversized = b"x" * (10 * 1024 * 1024 + 1)
     response = client.post(
         "/api/v1/uploads/image",
         data={"prefix": "banners"},

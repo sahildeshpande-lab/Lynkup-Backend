@@ -26,8 +26,8 @@ def test_content_utils_sanitize_normalize_extract_and_validate():
         content_utils.validate_hashtag_count("#one #two", None, limit=1)
 
     content_utils.validate_content({"caption": "A post", "visibility": "hidden"})
-    with pytest.raises(ValueError, match="Caption is required"):
-        content_utils.validate_content({"caption": "   "})
+    # Caption is optional — blank captions are allowed.
+    content_utils.validate_content({"caption": "   "})
     with pytest.raises(ValueError, match="Invalid visibility"):
         content_utils.validate_content({"caption": "x", "visibility": "friends"})
     with pytest.raises(ValueError, match="Content exceeds"):

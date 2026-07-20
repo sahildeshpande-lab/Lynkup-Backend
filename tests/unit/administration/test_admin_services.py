@@ -116,13 +116,16 @@ async def test_admin_create_user_via_signup_removed_uses_admin_create_user(monke
         async def _mock_temp_password_email(*_args, **_kwargs):
             return True
 
-        def _mock_create_firebase_user(email, password, display_name=None):
+        def _mock_create_firebase_user(*, email, password, display_name=None):
             class MockFirebaseUser:
-                uid = "mock-firebase-uid"
+                uid = f"mock-firebase-uid-{email}"
             return MockFirebaseUser()
 
         monkeypatch.setattr("core.email_service.send_temporary_password_email", _mock_temp_password_email)
-        monkeypatch.setattr("core.auth.services.create_firebase_user", _mock_create_firebase_user)
+        monkeypatch.setattr(
+            "apps.administration.services.user_management_service.create_firebase_user",
+            _mock_create_firebase_user,
+        )
 
         email = f"user_admin_create_{uuid.uuid4()}@example.com"
         payload = AdminUserCreateRequest(
@@ -193,8 +196,14 @@ async def test_admin_create_user_creates_firebase_account(monkeypatch) -> None:
         async def _mock_temp_password_email(*_args, **_kwargs):
             return True
 
-        monkeypatch.setattr("core.auth.services.create_firebase_user", _mock_create_firebase_user)
-        monkeypatch.setattr("core.auth.services.delete_firebase_user", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            "apps.administration.services.user_management_service.create_firebase_user",
+            _mock_create_firebase_user,
+        )
+        monkeypatch.setattr(
+            "apps.administration.services.user_management_service.delete_firebase_user",
+            lambda *_args, **_kwargs: None,
+        )
         monkeypatch.setattr("core.email_service.send_temporary_password_email", _mock_temp_password_email)
 
         email = f"firebase_admin_create_{uuid.uuid4()}@example.com"
@@ -447,7 +456,7 @@ async def test_admin_actions(monkeypatch) -> None:
             
         # Test delete user
         async with async_session_factory() as session:
-            del_res = await admin_delete_user(str(user.id), session)
+            del_res = await admin_delete_user(str(user.id), "user", session)
             assert del_res["deleted"] is True
             assert del_res["status"] == "deleting"
             assert "user" in del_res

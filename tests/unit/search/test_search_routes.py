@@ -160,7 +160,17 @@ def test_create_academic_interest_returns_created(monkeypatch) -> None:
 
 
 def test_search_users_route(monkeypatch) -> None:
-    async def _mock_search_users(current_user, db, query, page, page_size):
+    async def _mock_search_users(
+        current_user,
+        db,
+        query,
+        page,
+        page_size,
+        university_name=None,
+        edu_level=None,
+    ):
+        assert university_name == "Kampu University|State University"
+        assert edu_level == "1"
         return {
             "items": [
                 {
@@ -184,6 +194,8 @@ def test_search_users_route(monkeypatch) -> None:
         "/api/v1/search-user",
         params={
             "query": "John Kampu CS Math Bachelors",
+            "university_name": "Kampu University|State University",
+            "edu_level": "1",
             "page": 1,
             "pageSize": 10,
         },

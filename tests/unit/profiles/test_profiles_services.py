@@ -406,33 +406,30 @@ async def test_get_my_profile_service_relationship_flags() -> None:
             u1_data = res1["user"]
             assert u1_data["is_connected"] is False
             assert u1_data["request_sent"] is False
-            assert u1_data["request_send"] is False
             assert u1_data["request_received"] is False
             assert u1_data["is_sent"] is False
             assert u1_data["is_request"] is False
 
             # 2. Fetch other profile (user1 fetching user2)
             # Since user1 sent a request to user2:
-            # - request_sent / request_send / is_sent should be True
+            # - request_sent / is_sent should be True
             # - request_received / is_request should be False
             res2 = await get_my_profile_service(user1, session, target_user_id=user2.id)
             u2_data = res2["user"]
             assert u2_data["is_connected"] is False
             assert u2_data["request_sent"] is True
-            assert u2_data["request_send"] is True
             assert u2_data["request_received"] is False
             assert u2_data["is_sent"] is True
             assert u2_data["is_request"] is False
 
             # 3. Fetch other profile (user2 fetching user1)
             # Since user2 received a request from user1:
-            # - request_sent / request_send / is_sent should be False
+            # - request_sent / is_sent should be False
             # - request_received / is_request should be True
             res3 = await get_my_profile_service(user2, session, target_user_id=user1.id)
             u3_data = res3["user"]
             assert u3_data["is_connected"] is False
             assert u3_data["request_sent"] is False
-            assert u3_data["request_send"] is False
             assert u3_data["request_received"] is True
             assert u3_data["is_sent"] is False
             assert u3_data["is_request"] is True

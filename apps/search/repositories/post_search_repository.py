@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from uuid import UUID
 
 from sqlalchemy import and_, cast, exists, false, func, or_, select
@@ -18,15 +19,76 @@ from common.user_visibility import visible_user_filters
 from sqlalchemy.dialects.postgresql import JSONB
 
 
-def _normalize_hashtag(value: str) -> str:
-    return value.strip().lstrip("#").lower()
-
-
 def _try_parse_uuid(value: str) -> UUID | None:
     try:
         return UUID(value.strip())
     except (TypeError, ValueError, AttributeError):
         return None
+
+
+def _is_compact_filter_token(value: str) -> bool:
+    """True for ids/tags safe to split on commas (not multi-word names)."""
+    cleaned = value.strip()
+    if not cleaned:
+        return False
+    if _try_parse_uuid(cleaned) is not None or cleaned.isdigit():
+        return True
+    # Hashtag-like tokens: no spaces, short enough to be a tag/slug.
+    return " " not in cleaned and len(cleaned) <= 64
+
+
+def _split_filter_values(
+    value: str | list[str] | None,
+    *,
+    split_whitespace: bool = False,
+) -> list[str]:
+    """Normalize filter values from repeated query params or joined strings.
+
+    Commas only split when every token looks like an id/tag so names such as
+    "University of California, Berkeley" stay intact. Pipe/semicolon always split.
+    """
+    if value is None:
+        return []
+    raw_parts = value if isinstance(value, list) else [value]
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def _add(cleaned: str) -> None:
+        key = cleaned.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        values.append(cleaned)
+
+    for part in raw_parts:
+        if part is None:
+            continue
+        text = str(part).strip()
+        if not text:
+            continue
+
+        if re.search(r"[|;]", text):
+            tokens = re.split(r"[|;]", text)
+        elif "," in text:
+            comma_tokens = [token.strip() for token in text.split(",") if token.strip()]
+            if comma_tokens and all(_is_compact_filter_token(token) for token in comma_tokens):
+                tokens = comma_tokens
+            else:
+                tokens = [text]
+        elif split_whitespace:
+            tokens = re.split(r"\s+", text)
+        else:
+            tokens = [text]
+
+        for token in tokens:
+            cleaned = token.strip()
+            if cleaned:
+                _add(cleaned)
+    return values
+
+
+def _normalize_hashtag(value: str) -> str:
+    return value.strip().lstrip("#").lower()
 
 
 def _resolve_edu_level(value: str) -> str | None:
@@ -39,10 +101,107 @@ def _resolve_edu_level(value: str) -> str | None:
             return EducationLevel.from_id(int(raw)).value
         except ValueError:
             return None
+    aliases = {
+        "undergraduate": "Bachelors",
+        "undergrad": "Bachelors",
+        "bachelor": "Bachelors",
+        "bachelors": "Bachelors",
+        "graduate": "Masters",
+        "masters": "Masters",
+        "master": "Masters",
+        "phd": "Doctorate",
+        "ph.d": "Doctorate",
+        "ph.d.": "Doctorate",
+        "doctorate": "Doctorate",
+        "doctoral": "Doctorate",
+        "postdoctoral": "Postdoctoral",
+        "postdoc": "Postdoctoral",
+        "jd": "JD",
+        "md": "MD",
+    }
+    alias = aliases.get(raw.lower())
+    if alias:
+        return alias
     for level in EducationLevel:
         if level.value.lower() == raw.lower() or level.name.lower() == raw.lower():
             return level.value
     return raw
+
+
+def _profile_interest_contains(author_profile, interest_id: int):
+    """Match interest ids stored as JSON numbers or JSON strings."""
+    interests_json = cast(author_profile.profile_interests_id, JSONB)
+    return or_(
+        interests_json.contains(func.jsonb_build_array(interest_id)),
+        interests_json.contains(func.jsonb_build_array(str(interest_id))),
+    )
+
+
+def _hashtag_match_clause(values: list[str]):
+    clauses = []
+    for value in values:
+        hashtag_id = _try_parse_uuid(value)
+        if hashtag_id is not None:
+            clauses.append(Hashtag.id == hashtag_id)
+        else:
+            clauses.append(Hashtag.tag == _normalize_hashtag(value))
+    if not clauses:
+        return None
+    return or_(*clauses)
+
+
+def _university_match_clause(values: list[str]):
+    clauses = []
+    for value in values:
+        university_id = _try_parse_uuid(value)
+        if university_id is not None:
+            clauses.append(University.id == university_id)
+        else:
+            clauses.append(University.name.ilike(value))
+    if not clauses:
+        return None
+    return or_(*clauses)
+
+
+def _edu_level_match_clause(author_profile, values: list[str]):
+    resolved_levels = []
+    for value in values:
+        resolved = _resolve_edu_level(value)
+        if resolved:
+            resolved_levels.append(resolved)
+    if not resolved_levels:
+        return None
+    return or_(*[author_profile.edu_level.ilike(level) for level in resolved_levels])
+
+
+def _academic_interest_match_clause(author_profile, values: list[str]):
+    clauses = []
+    for value in values:
+        if value.isdigit():
+            # Require a real academic_interests row so edu-level ids don't false-match.
+            clauses.append(
+                exists(
+                    select(1).where(
+                        AcademicInterest.id == int(value),
+                        AcademicInterest.is_active.is_(True),
+                        _profile_interest_contains(author_profile, AcademicInterest.id),
+                    )
+                )
+            )
+            continue
+        # Exact case-insensitive name match to avoid substring false positives.
+        clauses.append(
+            exists(
+                select(1).where(
+                    AcademicInterest.is_active.is_(True),
+                    AcademicInterest.name.ilike(value),
+                    _profile_interest_contains(author_profile, AcademicInterest.id),
+                )
+            )
+        )
+    if not clauses:
+        return None
+    return or_(*clauses)
 
 
 def _build_search_filters(
@@ -50,13 +209,13 @@ def _build_search_filters(
     current_user_id: UUID,
     connected_author_ids: set[UUID],
     query: str | None,
-    hashtag: str | None,
-    academic_interest: str | None,
-    university_name: str | None,
+    hashtag: str | list[str] | None,
+    academic_interest: str | list[str] | None,
+    university_name: str | list[str] | None,
     major: str | None,
     minor: str | None,
     country: str | None,
-    edu_level: str | None,
+    edu_level: str | list[str] | None,
     author_profile,
     author_user,
 ):
@@ -109,12 +268,9 @@ def _build_search_filters(
             )
         )
 
-    if hashtag and hashtag.strip():
-        hashtag_id = _try_parse_uuid(hashtag)
-        if hashtag_id is not None:
-            tag_match = Hashtag.id == hashtag_id
-        else:
-            tag_match = Hashtag.tag == _normalize_hashtag(hashtag)
+    hashtag_values = _split_filter_values(hashtag, split_whitespace=True)
+    hashtag_clause = _hashtag_match_clause(hashtag_values)
+    if hashtag_clause is not None:
         filters.append(
             exists(
                 select(1)
@@ -122,39 +278,20 @@ def _build_search_filters(
                 .join(Hashtag, Hashtag.id == PostHashtag.hashtag_id)
                 .where(
                     PostHashtag.post_id == Post.id,
-                    tag_match,
+                    hashtag_clause,
                 )
             )
         )
 
-    if academic_interest and academic_interest.strip():
-        interest_term = academic_interest.strip()
-        if interest_term.isdigit():
-            interest_id = int(interest_term)
-            filters.append(
-                cast(author_profile.profile_interests_id, JSONB).contains(
-                    func.jsonb_build_array(interest_id)
-                )
-            )
-        else:
-            filters.append(
-                exists(
-                    select(1).where(
-                        AcademicInterest.is_active.is_(True),
-                        AcademicInterest.name.ilike(f"%{interest_term}%"),
-                        cast(author_profile.profile_interests_id, JSONB).contains(
-                            func.jsonb_build_array(AcademicInterest.id)
-                        ),
-                    )
-                )
-            )
+    interest_clause = _academic_interest_match_clause(
+        author_profile, _split_filter_values(academic_interest)
+    )
+    if interest_clause is not None:
+        filters.append(interest_clause)
 
-    if university_name and university_name.strip():
-        university_id = _try_parse_uuid(university_name)
-        if university_id is not None:
-            filters.append(University.id == university_id)
-        else:
-            filters.append(University.name.ilike(f"%{university_name.strip()}%"))
+    university_clause = _university_match_clause(_split_filter_values(university_name))
+    if university_clause is not None:
+        filters.append(university_clause)
 
     if major and major.strip():
         filters.append(author_profile.major.ilike(f"%{major.strip()}%"))
@@ -175,10 +312,9 @@ def _build_search_filters(
                 )
             )
 
-    if edu_level and edu_level.strip():
-        resolved = _resolve_edu_level(edu_level)
-        if resolved is not None:
-            filters.append(author_profile.edu_level.ilike(resolved))
+    edu_clause = _edu_level_match_clause(author_profile, _split_filter_values(edu_level))
+    if edu_clause is not None:
+        filters.append(edu_clause)
 
     return filters
 
@@ -198,13 +334,13 @@ async def count_search_posts(
     current_user_id: UUID,
     *,
     query: str | None = None,
-    hashtag: str | None = None,
-    academic_interest: str | None = None,
-    university_name: str | None = None,
+    hashtag: str | list[str] | None = None,
+    academic_interest: str | list[str] | None = None,
+    university_name: str | list[str] | None = None,
     major: str | None = None,
     minor: str | None = None,
     country: str | None = None,
-    edu_level: str | None = None,
+    edu_level: str | list[str] | None = None,
 ) -> int:
     author_profile = aliased(Profile, name="author_profile")
     author_user = aliased(User, name="author_user")
@@ -241,13 +377,13 @@ async def search_posts_with_details(
     current_user_id: UUID,
     *,
     query: str | None = None,
-    hashtag: str | None = None,
-    academic_interest: str | None = None,
-    university_name: str | None = None,
+    hashtag: str | list[str] | None = None,
+    academic_interest: str | list[str] | None = None,
+    university_name: str | list[str] | None = None,
     major: str | None = None,
     minor: str | None = None,
     country: str | None = None,
-    edu_level: str | None = None,
+    edu_level: str | list[str] | None = None,
     offset: int = 0,
     limit: int | None = None,
 ) -> list[tuple[Post, Profile | None, User | None, Profile | None]]:

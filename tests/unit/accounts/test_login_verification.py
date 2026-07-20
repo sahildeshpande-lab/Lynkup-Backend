@@ -82,14 +82,14 @@ async def test_login_active_user(db_session: AsyncSession):
 
 @pytest.mark.asyncio
 async def test_login_active_user_new_device(db_session: AsyncSession, monkeypatch):
-    # Verified user on a new device still gets OTP but account status stays active.
+    # Verified user on a new device gets OTP and is moved to pending until verified.
     from apps.accounts.services import _hash_password
     from apps.accounts.schemas import LoginRequest
     sent_emails = []
     async def mock_send_otp_email(to_email, otp, otp_purpose):
         sent_emails.append((to_email, otp, otp_purpose))
         return True
-    monkeypatch.setattr("apps.accounts.services.send_otp_email", mock_send_otp_email)
+    monkeypatch.setattr("apps.accounts.services.device_otp_service.send_otp_email", mock_send_otp_email)
 
     uid = str(uuid.uuid4())
     email = f"active_new_{uid[:8]}@example.com"
@@ -120,10 +120,10 @@ async def test_login_active_user_new_device(db_session: AsyncSession, monkeypatc
     assert response.message == "Verification email sent. Please verify your OTP."
     assert response.data["emailSent"] is True
 
-    # Verified users must not be reverted to pending for device OTP.
     refreshed = await db_session.get(User, user.id)
-    assert refreshed.status == UserStatus.active
+    assert refreshed.status == UserStatus.pending
     assert refreshed.email_otp is not None
+    assert len(sent_emails) == 1
 
     # Verify a UserInstallation was created for the new device
     from apps.accounts.db_models import UserInstallation
@@ -196,7 +196,7 @@ async def test_login_after_verify_otp_does_not_revert_to_pending(db_session: Asy
         sent_emails.append((to_email, otp, otp_purpose))
         return True
 
-    monkeypatch.setattr("apps.accounts.services.send_otp_email", mock_send_otp_email)
+    monkeypatch.setattr("apps.accounts.services.device_otp_service.send_otp_email", mock_send_otp_email)
     monkeypatch.setattr(
         "apps.accounts.services.auth_service.send_verification_success_email",
         lambda *args, **kwargs: None,
@@ -269,7 +269,7 @@ async def test_login_pending_user_sends_otp(db_session: AsyncSession, monkeypatc
     async def mock_send_otp_email(to_email, otp, otp_purpose):
         sent_emails.append((to_email, otp, otp_purpose))
         return True
-    monkeypatch.setattr("apps.accounts.services.send_otp_email", mock_send_otp_email)
+    monkeypatch.setattr("apps.accounts.services.device_otp_service.send_otp_email", mock_send_otp_email)
 
     # Create a pending user
     uid = str(uuid.uuid4())
@@ -340,7 +340,7 @@ async def test_logout_sets_pending(db_session: AsyncSession, monkeypatch):
     assert refreshed.status == UserStatus.active
 
 @pytest.mark.asyncio
-async def test_logout_deletes_device_so_next_login_requires_otp(db_session: AsyncSession, monkeypatch):
+async def test_logout_clears_verification_so_next_login_requires_otp(db_session: AsyncSession, monkeypatch):
     from apps.accounts.services import _hash_password
     from apps.accounts.schemas import LoginRequest, LogoutRequest
     from apps.accounts.db_models import UserInstallation
@@ -351,7 +351,7 @@ async def test_logout_deletes_device_so_next_login_requires_otp(db_session: Asyn
         sent_emails.append((to_email, otp, otp_purpose))
         return True
 
-    monkeypatch.setattr("apps.accounts.services.send_otp_email", mock_send_otp_email)
+    monkeypatch.setattr("apps.accounts.services.device_otp_service.send_otp_email", mock_send_otp_email)
     monkeypatch.setattr("apps.accounts.services.revoke_firebase_tokens", lambda *args, **kwargs: None)
 
     uid = str(uuid.uuid4())
@@ -399,7 +399,7 @@ async def test_logout_deletes_device_so_next_login_requires_otp(db_session: Asyn
         db=db_session,
     )
 
-    deleted_installation = (
+    installation = (
         await db_session.execute(
             select(UserInstallation).where(
                 UserInstallation.user_id == user.id,
@@ -407,7 +407,11 @@ async def test_logout_deletes_device_so_next_login_requires_otp(db_session: Asyn
             )
         )
     ).scalar_one_or_none()
-    assert deleted_installation is None
+    assert installation is not None
+    assert installation.is_active is False
+
+    refreshed = await db_session.get(User, user.id)
+    assert refreshed.email_verified_at is None
 
     second_login = await login(
         payload=LoginRequest(
@@ -543,7 +547,7 @@ async def test_verify_email_endpoint(db_session: AsyncSession):
     refreshed = await db_session.get(User, user.id)
     assert refreshed.status == UserStatus.active
     assert refreshed.email_verified_at is not None
-    assert refreshed.email_otp == "true"
+    assert refreshed.email_otp is None
 
 @pytest.mark.asyncio
 async def test_refresh_token_never_expires(db_session: AsyncSession):

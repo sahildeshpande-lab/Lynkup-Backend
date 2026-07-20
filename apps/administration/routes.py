@@ -273,7 +273,7 @@ async def list_processing_posts(
     pageSize: int | None = Query(default=None, ge=1, le=200),
     moderator_id: UUID | None = Query(default=None),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_moderator),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     from apps.feed.services import list_processing_posts_service
     role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
@@ -313,15 +313,13 @@ async def list_reviewed_posts(
         except ValueError as exc:
             raise ApiError("Invalid moderator_id") from exc
 
-    # Post.state is the source of truth. When no status is supplied the service
-    # defaults to state='published' (across all moderators unless moderator_id
-    # is provided).
     data = await list_reviewed_posts_by_state_service(
         db,
         moderator_id=target_moderator_id,
         status=status,
         page=page,
         page_size=pageSize,
+        viewer_user_id=current_user.id,
     )
     return ApiResponse(message="Posts fetched successfully", data=data)
 
@@ -381,5 +379,5 @@ async def admin_publish_or_flag_post(
     return ApiResponse(
         status=True,
         message=_status_messages.get(payload.status, "Post updated successfully"),
-        data=format_post_detail(post)
+        data=format_post_detail(post, viewer_user_id=current_user.id),
     )

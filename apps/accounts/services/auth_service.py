@@ -53,7 +53,30 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     if not user:
         return ApiResponse(status=False, message=" Please complete signup", data=None)
 
-    if not user.password_hash or not PASSWORD_HASHER.verify(payload.password, user.password_hash):
+    # Email/password login must match the account email on the Firebase token and DB.
+    login_email = payload.email.lower().strip()
+    firebase_email = (firebase_user.get("email") or "").lower().strip()
+    if user.email.lower() != login_email:
+        return ApiResponse(status=False, message="Invalid credentials", data=None)
+    if firebase_email and firebase_email != login_email:
+        return ApiResponse(status=False, message="Invalid credentials", data=None)
+
+    # Social accounts have no password_hash — they must use /auth/social.
+    if not user.password_hash:
+        reg_type = (
+            user.registration_type.value
+            if hasattr(user.registration_type, "value")
+            else str(user.registration_type or "social")
+        )
+        if reg_type in ("google", "apple"):
+            return ApiResponse(
+                status=False,
+                message=f"Account already exists. Please login using your registered method: {reg_type}",
+                data=None,
+            )
+        return ApiResponse(status=False, message="Invalid credentials", data=None)
+
+    if not PASSWORD_HASHER.verify(payload.password, user.password_hash):
         return ApiResponse(status=False, message="Invalid credentials", data=None)
 
     if user.status == UserStatus.deleting or user.deleted_at:

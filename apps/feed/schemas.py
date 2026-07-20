@@ -133,6 +133,7 @@ class RepostedPostData(BaseModel):
     is_liked: bool = False
     is_reposted: bool = False
     is_bookmarked: bool = False
+    is_repostable: bool = True
     user_reaction: str | None = None
     reactions: PostReactionsGrouped = Field(default_factory=PostReactionsGrouped)
     is_moderator_reviewed: Optional[bool] = None
@@ -169,6 +170,7 @@ class PostDetailData(BaseModel):
     is_liked: bool = False
     is_reposted: bool = False
     is_bookmarked: bool = False
+    is_repostable: bool = True
     user_reaction: str | None = None
     reactions: PostReactionsGrouped = Field(default_factory=PostReactionsGrouped)
     media: List[PostMediaData] = Field(default_factory=list)

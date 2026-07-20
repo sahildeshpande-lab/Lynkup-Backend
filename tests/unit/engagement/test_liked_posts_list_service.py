@@ -11,11 +11,13 @@ from common.enums import ReactionType
 
 
 def _post_row():
-    post = SimpleNamespace(id=uuid.uuid4(), like_count=1)
+    author_id = uuid.uuid4()
+    post = SimpleNamespace(id=uuid.uuid4(), author_user_id=author_id, like_count=1)
     author_profile = SimpleNamespace(
         first_name="Jane",
         last_name="Doe",
         profile_photo_url=None,
+        user_id=author_id,
     )
     return post, author_profile, None, None
 
@@ -33,6 +35,9 @@ async def test_list_liked_posts_with_pagination(mock_db):
         patch.object(svc, "load_latest_post_reactions", AsyncMock(return_value={})),
         patch.object(svc, "format_post_detail", return_value={"id": rows[0][0].id, "is_liked": True}) as format_post,
         patch.object(svc, "format_user_reaction", return_value="LIKE"),
+        patch.object(svc, "get_user_connections", AsyncMock(return_value=set())),
+        patch.object(svc, "load_profile_details", AsyncMock(return_value={})),
+        patch.object(svc, "load_requested_user_ids", AsyncMock(return_value=set())),
     ):
         fetch_flags.return_value = SimpleNamespace(
             user_reaction_for=lambda _pid: ReactionType.like,
@@ -44,6 +49,8 @@ async def test_list_liked_posts_with_pagination(mock_db):
     fetch_rows.assert_awaited_once_with(db, user_id, offset=0, limit=10)
     format_post.assert_called_once()
     assert format_post.call_args.kwargs["is_liked"] is True
+    assert "is_connected" in format_post.call_args.kwargs
+    assert "profile_details" in format_post.call_args.kwargs
     assert response.status is True
     assert response.data.totalItems == 3
     assert response.data.items[0]["is_liked"] is True
@@ -59,6 +66,9 @@ async def test_list_liked_posts_without_pagination_returns_all(mock_db):
         patch.object(svc, "fetch_user_liked_posts", AsyncMock(return_value=[])) as fetch_rows,
         patch.object(svc, "fetch_post_engagement_flags", AsyncMock()),
         patch.object(svc, "load_latest_post_reactions", AsyncMock(return_value={})),
+        patch.object(svc, "get_user_connections", AsyncMock(return_value=set())),
+        patch.object(svc, "load_profile_details", AsyncMock(return_value={})),
+        patch.object(svc, "load_requested_user_ids", AsyncMock(return_value=set())),
     ):
         response = await svc.list_liked_posts(db, user_id)
 

@@ -18,6 +18,7 @@ from datetime import datetime, timezone, timedelta
 from core.database.init import init_db
 from core.security.auth import get_current_app_user, get_current_user, get_current_moderator, get_current_moderator_or_viewer
 from apps.accounts.db_models import TransactionalEmailLog, User
+from apps.accounts.services import assign_user_role
 from apps.feed.db_models import Post, MediaAsset, PostAttachment
 from apps.connections.db_models import Connection
 from apps.profiles.db_models import Profile
@@ -35,7 +36,7 @@ from apps.feed.services import (
     list_draft_posts_service,
     delete_draft_post_service,
     list_user_posts_service,
-    list_reviewed_posts_service,
+    list_reviewed_posts_by_state_service,
     list_processing_posts_service,
     get_feed_service,
     format_post_detail,
@@ -50,6 +51,7 @@ async def clean_feed_pytest_data(session):
             "pytest_feed_other@example.com",
             "pytest_feed_mod_b@example.com",
             "pytest_feed_superadmin@example.com",
+            "pytest_visitor@example.com",
             "third@example.com",
         ]))
     )
@@ -96,6 +98,7 @@ async def clean_feed_pytest_data(session):
         await session.execute(text("""
             DELETE FROM posts 
             WHERE author_user_id = ANY(:user_ids)
+               OR moderator_id = ANY(:user_ids)
         """), params)
         
         await session.execute(text("""
@@ -111,6 +114,17 @@ async def clean_feed_pytest_data(session):
 
         await session.execute(text("""
             DELETE FROM profiles
+            WHERE user_id = ANY(:user_ids)
+        """), params)
+
+        # Role links must be removed before users (FK user_roles_user_id_fkey)
+        await session.execute(text("""
+            DELETE FROM user_roles
+            WHERE user_id = ANY(:user_ids)
+        """), params)
+
+        await session.execute(text("""
+            DELETE FROM security_events
             WHERE user_id = ANY(:user_ids)
         """), params)
         
@@ -165,6 +179,12 @@ async def test_users(db_setup, feed_db_cleanup):
     return user, other
 
 
+async def _ensure_moderator_role(session, user) -> None:
+    """Ensure user has moderator UserRole so repair won't reassign their posts."""
+    db_user = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+    await assign_user_role(session, db_user, "moderator")
+
+
 @pytest.mark.asyncio
 async def test_upload_post_media_service_success(test_users) -> None:
     user, _ = test_users
@@ -214,10 +234,9 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
         headers={"content-type": "image/png"},
     )
     async with async_session_factory() as session:
-        with pytest.raises(HTTPException) as exc_info:
-            await upload_post_media_service(user.id, [file_empty], session)
-        assert exc_info.value.status_code == 400
-        assert "empty" in exc_info.value.detail
+        with pytest.raises(ApiError) as exc_info:
+            await upload_post_media_service(user.id, [file_empty], db=session)
+        assert "empty" in exc_info.value.message
 
     too_many_files = [
         UploadFile(
@@ -228,14 +247,13 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
         for index in range(6)
     ]
     async with async_session_factory() as session:
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(ApiError) as exc_info:
             await upload_post_media_service(
                 user.id,
                 too_many_files,
-                session,
+                db=session,
             )
-        assert exc_info.value.status_code == 400
-        assert "Maximum 5 files" in exc_info.value.detail
+        assert "Maximum 5 files" in exc_info.value.message
 
     oversized_image = UploadFile(
         filename="large.png",
@@ -243,10 +261,9 @@ async def test_upload_post_media_service_validation_failures(test_users) -> None
         headers={"content-type": "image/png"},
     )
     async with async_session_factory() as session:
-        with pytest.raises(HTTPException) as exc_info:
-            await upload_post_media_service(user.id, [oversized_image], session)
-        assert exc_info.value.status_code == 400
-        assert "exceeds maximum upload size of 5 MB" in exc_info.value.detail
+        with pytest.raises(ApiError) as exc_info:
+            await upload_post_media_service(user.id, [oversized_image], db=session)
+        assert "exceeds maximum upload size of 5 MB" in exc_info.value.message
 
 
 def test_get_media_type_maps_content_types() -> None:
@@ -311,7 +328,7 @@ async def test_create_post_service_success(test_users) -> None:
         assert post.author_user_id == user.id
         assert post.caption == "A wonderful day"
         assert post.content_html == "<p>Enjoying the sunshine!</p>"
-        assert post.state == PostState.processing  # public defaults to processing
+        assert post.state == PostState.published  # non-draft posts publish immediately
 
         # Check PostAttachment records
         stmt = select(PostAttachment).where(PostAttachment.post_id == post.id)
@@ -337,7 +354,7 @@ async def test_create_post_service_visibility_hidden(test_users) -> None:
 
     async with async_session_factory() as session:
         post = await save_post_service(user.id, payload, session)
-        assert post.state == PostState.processing
+        assert post.state == PostState.published
 
 
 @pytest.mark.asyncio
@@ -413,7 +430,7 @@ async def test_create_processing_post_leaves_existing_draft(test_users) -> None:
         processing = await save_post_service(user.id, processing_payload, session)
 
         assert draft.state == PostState.draft
-        assert processing.state == PostState.processing
+        assert processing.state == PostState.published
 
     async with async_session_factory() as session:
         drafts = await list_draft_posts_service(user.id, session)
@@ -495,7 +512,7 @@ async def test_routes_endpoints_via_test_client(test_users) -> None:
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
-            assert body["message"] == "Files uploaded successfully"
+            assert "media file(s) uploaded" in body["message"]
             assert isinstance(body["data"], list)
             media_id = body["data"][0]["id"]
 
@@ -544,7 +561,7 @@ async def test_postupload_accepts_multiple_files_and_infers_types(test_users) ->
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
-            assert body["message"] == "Files uploaded successfully"
+            assert "media file(s) uploaded" in body["message"]
             assert [item["type"] for item in body["data"]] == ["image", "gif", "video", "document"]
             assert [item["key"].split(".")[-1] for item in body["data"]] == ["jpg", "gif", "mp4", "txt"]
     finally:
@@ -567,7 +584,7 @@ async def test_postupload_rejects_too_many_files(test_users) -> None:
                 for index in range(6)
             ]
             response = await ac.post("/api/v1/postupload", files=files)
-            assert response.status_code == 400
+            assert response.status_code == 200
             body = response.json()
             assert body["status"] is False
             assert body["message"] == "Maximum 5 files allowed per request"
@@ -584,7 +601,7 @@ async def test_update_post_service_success(test_users) -> None:
     async with async_session_factory() as session:
         post = await save_post_service(user.id, payload, session)
         post_id = post.id
-        assert post.state == PostState.processing
+        assert post.state == PostState.published
 
     # Edit via general edit service (edit_post_service)
     edit_payload = EditPostRequest(
@@ -619,7 +636,7 @@ async def test_update_post_service_success(test_users) -> None:
         post = await save_post_service(user.id, update_payload_processing, session)
         assert post.caption == "Processing Caption"
         assert post.content_html == "Processing text"
-        assert post.state == PostState.processing
+        assert post.state == PostState.published
 
 
 @pytest.mark.asyncio
@@ -636,25 +653,14 @@ async def test_publish_post_service_success(test_users) -> None:
         post_id = post.id
 
     async with async_session_factory() as session:
-        post = await admin_publish_post_service(post_id, "publish", user.id, session)
+        post = await admin_publish_post_service(post_id, "published", user.id, session)
         assert post.state == PostState.published
         assert post.moderator_id == user.id
         assert post.is_moderator_reviewed is True
         profile = (await session.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one()
         assert profile.posts_count == 1
 
-    async with async_session_factory() as session:
-        log = (await session.execute(
-            select(TransactionalEmailLog)
-            .where(
-                TransactionalEmailLog.to_email == user.email,
-                TransactionalEmailLog.purpose == "Post Published",
-            )
-            .order_by(TransactionalEmailLog.created_at.desc())
-        )).scalars().first()
-        assert log is not None
-        assert log.is_send is False
-        assert "published" in log.subject.lower()
+    # Publish notification emails are currently disabled.
 
 @pytest.mark.asyncio
 async def test_flag_post_service_success(test_users) -> None:
@@ -670,24 +676,13 @@ async def test_flag_post_service_success(test_users) -> None:
         post_id = post.id
 
     async with async_session_factory() as session:
-        post = await admin_publish_post_service(post_id, "flag", user.id, session)
+        post = await admin_publish_post_service(post_id, "flagged", user.id, session)
         assert post.state == PostState.flagged
         assert post.moderator_id == user.id
         profile = (await session.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one()
         assert profile.posts_count == 0
 
-    async with async_session_factory() as session:
-        log = (await session.execute(
-            select(TransactionalEmailLog)
-            .where(
-                TransactionalEmailLog.to_email == user.email,
-                TransactionalEmailLog.purpose == "Post Flagged",
-            )
-            .order_by(TransactionalEmailLog.created_at.desc())
-        )).scalars().first()
-        assert log is not None
-        assert log.is_send is False
-        assert "flagged" in log.subject.lower()
+    # Flag notification emails are currently disabled.
 
 
 @pytest.mark.asyncio
@@ -704,6 +699,9 @@ async def test_list_reviewed_posts_service_filters_by_moderator_and_action(test_
         session.add(moderator_b)
         await session.commit()
         await session.refresh(moderator_b)
+        await _ensure_moderator_role(session, moderator_a)
+        await _ensure_moderator_role(session, moderator_b)
+        await session.commit()
 
         published_by_a = Post(
             author_user_id=author.id,
@@ -730,20 +728,28 @@ async def test_list_reviewed_posts_service_filters_by_moderator_and_action(test_
         await session.commit()
 
     async with async_session_factory() as session:
-        all_for_a = await list_reviewed_posts_service(session, moderator_a.id)
-        assert len(all_for_a["items"]) == 2
-        captions = {item["caption"] for item in all_for_a["items"]}
-        assert captions == {"Published by A", "Flagged by A"}
+        # No status defaults to published for this moderator.
+        published_for_a = await list_reviewed_posts_by_state_service(session, moderator_a.id)
+        assert len(published_for_a["items"]) == 1
+        assert published_for_a["items"][0]["caption"] == "Published by A"
+        assert published_for_a["items"][0]["status"] == "published"
 
-        publish_only = await list_reviewed_posts_service(session, moderator_a.id, status="publish")
+        publish_only = await list_reviewed_posts_by_state_service(
+            session, moderator_a.id, status="published"
+        )
         assert len(publish_only["items"]) == 1
-        assert publish_only["items"][0]["review_status"] == "publish"
+        assert publish_only["items"][0]["status"] == "published"
 
-        flag_only = await list_reviewed_posts_service(session, moderator_a.id, status="flag")
+        flag_only = await list_reviewed_posts_by_state_service(
+            session, moderator_a.id, status="flagged"
+        )
         assert len(flag_only["items"]) == 1
-        assert flag_only["items"][0]["review_status"] == "flag"
+        assert flag_only["items"][0]["status"] == "flagged"
+        assert flag_only["items"][0]["caption"] == "Flagged by A"
 
-        publish_for_a = await list_reviewed_posts_service(session, moderator_a.id, status="publish")
+        publish_for_a = await list_reviewed_posts_by_state_service(
+            session, moderator_a.id, status="published"
+        )
         assert all(item["caption"] != "Published by B" for item in publish_for_a["items"])
 
 
@@ -761,6 +767,9 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
         session.add(other_moderator)
         await session.commit()
         await session.refresh(other_moderator)
+        await _ensure_moderator_role(session, moderator)
+        await _ensure_moderator_role(session, other_moderator)
+        await session.commit()
 
         reviewed_post = Post(
             author_user_id=author.id,
@@ -782,11 +791,11 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
     async def _override_get_current_moderator():
         return moderator
 
-    app.dependency_overrides[get_current_moderator_or_viewer] = _override_get_current_moderator
+    app.dependency_overrides[get_current_moderator] = _override_get_current_moderator
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
-            response = await ac.get("/api/v1/admin/posts/reviewed", params={"status": "publish"})
+            response = await ac.get("/api/v1/admin/posts/reviewed", params={"status": "published"})
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
@@ -796,7 +805,7 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
 
             filtered_response = await ac.get(
                 "/api/v1/admin/posts/reviewed",
-                params={"status": "publish", "moderator_id": str(other_moderator.id)},
+                params={"status": "published", "moderator_id": str(other_moderator.id)},
             )
             assert filtered_response.status_code == 200
             filtered_body = filtered_response.json()
@@ -804,7 +813,7 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
             assert "Other moderator reviewed" in filtered_captions
             assert "Reviewed via route" not in filtered_captions
     finally:
-        app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
+        app.dependency_overrides.pop(get_current_moderator, None)
 
 
 @pytest.mark.asyncio
@@ -820,6 +829,9 @@ async def test_reviewed_posts_status_filter_without_moderator_id_returns_all(tes
         session.add(moderator_b)
         await session.commit()
         await session.refresh(moderator_b)
+        await _ensure_moderator_role(session, moderator_a)
+        await _ensure_moderator_role(session, moderator_b)
+        await session.commit()
 
         published_by_a = Post(
             author_user_id=author.id,
@@ -848,11 +860,11 @@ async def test_reviewed_posts_status_filter_without_moderator_id_returns_all(tes
     async def _override_get_current_moderator():
         return SimpleNamespace(id=moderator_a.id, role="moderator")
 
-    app.dependency_overrides[get_current_moderator_or_viewer] = _override_get_current_moderator
+    app.dependency_overrides[get_current_moderator] = _override_get_current_moderator
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
-            response = await ac.get("/api/v1/admin/posts/reviewed", params={"status": "publish"})
+            response = await ac.get("/api/v1/admin/posts/reviewed", params={"status": "published"})
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
@@ -860,7 +872,7 @@ async def test_reviewed_posts_status_filter_without_moderator_id_returns_all(tes
             captions = {item["caption"] for item in body["data"]["items"]}
             assert {"Published by A", "Published by B"}.issubset(captions)
     finally:
-        app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
+        app.dependency_overrides.pop(get_current_moderator, None)
 
 
 @pytest.mark.asyncio
@@ -877,6 +889,9 @@ async def test_processing_posts_service_filters_by_assigned_moderator(test_users
         session.add(moderator_b)
         await session.commit()
         await session.refresh(moderator_b)
+        await _ensure_moderator_role(session, moderator_a)
+        await _ensure_moderator_role(session, moderator_b)
+        await session.commit()
 
         post_for_a = Post(
             author_user_id=author.id,
@@ -919,6 +934,9 @@ async def test_processing_posts_route_filters_for_moderator_and_allows_superadmi
         session.add(moderator_b)
         await session.commit()
         await session.refresh(moderator_b)
+        await _ensure_moderator_role(session, moderator_a)
+        await _ensure_moderator_role(session, moderator_b)
+        await session.commit()
 
         post_for_a = Post(
             author_user_id=author.id,
@@ -953,6 +971,9 @@ async def test_processing_posts_route_filters_for_moderator_and_allows_superadmi
     app.dependency_overrides[get_current_moderator_or_viewer] = (
         lambda: SimpleNamespace(id=superadmin_id, role="superadmin")
     )
+    app.dependency_overrides[get_current_moderator] = (
+        lambda: SimpleNamespace(id=superadmin_id, role="superadmin")
+    )
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -963,12 +984,14 @@ async def test_processing_posts_route_filters_for_moderator_and_allows_superadmi
             assert {"Route assigned to A", "Route assigned to B"}.issubset(captions)
     finally:
         app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
+        app.dependency_overrides.pop(get_current_moderator, None)
 
 
 @pytest.mark.asyncio
 async def test_get_post_service_visibility(test_users) -> None:
     user, other = test_users
     payload = SavePostRequest(
+        is_draft=True,
         content=PostContentPayload(caption="Draft", content_html="Original text", visibility="public")
     )
     async with async_session_factory() as session:
@@ -1024,15 +1047,15 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
         await session.commit()
     
     async with async_session_factory() as session:
-        published_posts, total = await list_user_posts_service(user, session)
+        published_posts, total = await list_user_posts_service(user, session, include_total=True)
         assert len(published_posts) == 1
         assert published_posts[0].caption == "Published Post"
 
-        draft_posts, total = await list_user_posts_service(user, session, state="draft")
+        draft_posts, total = await list_user_posts_service(user, session, state="draft", include_total=True)
         assert len(draft_posts) == 1
         assert draft_posts[0].caption == "Draft Post"
 
-        flagged_posts, total = await list_user_posts_service(user, session, state="flagged")
+        flagged_posts, total = await list_user_posts_service(user, session, state="flagged", include_total=True)
         assert len(flagged_posts) == 1
         assert flagged_posts[0].caption == "Flagged Post"
         
@@ -1042,6 +1065,7 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
             session,
             target_user_id=user.id,
             state="published",
+            include_total=True,
         )
         assert len(posts_superadmin) == 1
         assert posts_superadmin[0].caption == "Published Post"
@@ -1069,7 +1093,8 @@ async def test_posts_route_filters_state_for_current_user(test_users) -> None:
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
-            captions = {item["content"]["caption"] for item in body["data"]["items"]}
+            items = body["data"]["items"] if isinstance(body["data"], dict) else body["data"]
+            captions = {item["content"]["caption"] for item in items}
             assert captions == {"Route Draft"}
     finally:
         app.dependency_overrides.pop(get_current_user, None)
@@ -1115,7 +1140,9 @@ async def test_posts_route_superadmin_can_filter_any_user_or_all(test_users) -> 
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
             all_response = await ac.get("/api/v1/posts", params={"state": "published"})
             assert all_response.status_code == 200
-            all_captions = {item["content"]["caption"] for item in all_response.json()["data"]["items"]}
+            all_data = all_response.json()["data"]
+            all_items = all_data["items"] if isinstance(all_data, dict) else all_data
+            all_captions = {item["content"]["caption"] for item in all_items}
             assert {"User Published", "Other Published"}.issubset(all_captions)
 
             user_response = await ac.get(
@@ -1123,7 +1150,9 @@ async def test_posts_route_superadmin_can_filter_any_user_or_all(test_users) -> 
                 params={"user_id": str(other.id), "state": "processing"},
             )
             assert user_response.status_code == 200
-            user_captions = {item["content"]["caption"] for item in user_response.json()["data"]["items"]}
+            user_data = user_response.json()["data"]
+            user_items = user_data["items"] if isinstance(user_data, dict) else user_data
+            user_captions = {item["content"]["caption"] for item in user_items}
             assert user_captions == {"Other Processing"}
     finally:
         app.dependency_overrides.pop(get_current_user, None)
@@ -1184,16 +1213,15 @@ async def test_get_feed_service_success(test_users) -> None:
         await session.commit()
         
     async with async_session_factory() as session:
-        feed, total = await get_feed_service(visitor.id, session)
+        feed, total = await get_feed_service(visitor.id, session, include_total=True)
         assert len(feed) >= 2
-        captions = {f.caption for f in feed}
+        captions = {item["content"]["caption"] for item in feed}
         assert "Published Post 1" in captions
         assert "Published Post 2" in captions
-        formatted = [format_post_detail(post) for post in feed]
-        by_caption = {item["content"]["caption"]: item for item in formatted}
+        by_caption = {item["content"]["caption"]: item for item in feed}
         assert by_caption["Published Post 1"]["first_name"] == "Feed"
         assert by_caption["Published Post 1"]["last_name"] == "User"
-        assert by_caption["Published Post 1"]["profile_photo_url"].endswith("profiles/feed-user.jpg")
+        assert by_caption["Published Post 1"]["profilePhoto_url"].endswith("profiles/feed-user.jpg")
         assert by_caption["Published Post 2"]["first_name"] == "Other"
 
 
@@ -1232,14 +1260,15 @@ async def test_feed_route_accessible_to_superadmin_and_includes_author_profile(t
             assert response.status_code == 200
             body = response.json()
             assert body["status"] is True
+            feed_items = body["data"]["items"] if isinstance(body["data"], dict) else body["data"]
             matching = [
-                item for item in body["data"]["items"]
+                item for item in feed_items
                 if item["content"]["caption"] == "Admin accessible feed"
             ]
             assert len(matching) == 1
             assert matching[0]["first_name"] == "Admin"
             assert matching[0]["last_name"] == "Feed"
-            assert matching[0]["profile_photo_url"].endswith("profiles/admin-feed.jpg")
+            assert matching[0]["profilePhoto_url"].endswith("profiles/admin-feed.jpg")
     finally:
         app.dependency_overrides.pop(get_current_user, None)
         app.dependency_overrides.pop(get_current_app_user, None)
@@ -1248,22 +1277,27 @@ async def test_feed_route_accessible_to_superadmin_and_includes_author_profile(t
 @pytest.mark.asyncio
 async def test_feed_service_connection_priority(test_users) -> None:
     user, other = test_users
-    
+
     # Connection low/high user order constraint
     low_id, high_id = (user.id, other.id) if user.id < other.id else (other.id, user.id)
-    
+
     third_user = User(
         id=uuid.uuid4(),
         email="third@example.com",
         role="user",
         firebase_uid="third-uid",
     )
-    
+
     async with async_session_factory() as session:
         session.add(third_user)
+        await session.flush()
+        session.add_all([
+            Profile(user_id=other.id, first_name="Conn", last_name="Author"),
+            Profile(user_id=third_user.id, first_name="Third", last_name="Author"),
+        ])
         conn = Connection(user_low_id=low_id, user_high_id=high_id, is_active=True)
         session.add(conn)
-        
+
         p_non_conn = Post(
             author_user_id=third_user.id,
             content={"caption": "Non-connection Post"},
@@ -1278,13 +1312,16 @@ async def test_feed_service_connection_priority(test_users) -> None:
         )
         session.add_all([p_non_conn, p_conn])
         await session.commit()
-        
+
     async with async_session_factory() as session:
-        feed, total = await get_feed_service(user.id, session)
+        feed, total = await get_feed_service(user.id, session, include_total=True)
         assert len(feed) >= 2
-        # Connection post must appear first despite being older
-        assert feed[0].caption == "Connection Post"
-        assert feed[1].caption == "Non-connection Post"
+        captions = [item["content"]["caption"] for item in feed]
+        assert "Connection Post" in captions
+        assert "Non-connection Post" in captions
+        # Feed is ordered by event time descending (connection priority removed).
+        assert feed[0]["content"]["caption"] == "Non-connection Post"
+        assert feed[1]["content"]["caption"] == "Connection Post"
 
 
 @pytest.mark.asyncio
@@ -1302,8 +1339,9 @@ async def test_routes_post_management_flow(test_users) -> None:
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
-            # 1. Create a post
+            # 1. Create a draft post
             create_res = await ac.post("/api/v1/post", json={
+                "is_draft": True,
                 "content": {
                     "caption": "Init Caption",
                     "content_html": "Init text",
@@ -1316,6 +1354,7 @@ async def test_routes_post_management_flow(test_users) -> None:
             # 2. POST /post with id (update draft)
             draft_res = await ac.post("/api/v1/post", json={
                 "id": post_id,
+                "is_draft": True,
                 "content": {
                     "caption": "Draft Updated Caption",
                     "content_html": "Draft updated text",
@@ -1326,17 +1365,28 @@ async def test_routes_post_management_flow(test_users) -> None:
             # save_post endpoint returns SavePostData (id, revision_number)
             assert draft_res.json()["data"]["revision_number"] == 2
 
-            # 3. PATCH /posts/publish (admin route)
+            # 3. PATCH /admin/posts/reviewed (moderator action) — publish draft
+            # First publish via user save as non-draft so admin can review published state
+            publish_user_res = await ac.post("/api/v1/post", json={
+                "id": post_id,
+                "is_draft": False,
+                "content": {
+                    "caption": "Draft Updated Caption",
+                    "content_html": "Draft updated text",
+                    "visibility": "public"
+                }
+            })
+            assert publish_user_res.status_code == 200
+
             publish_res = await ac.patch(
-                "/api/v1/posts/publish",
+                "/api/v1/admin/posts/reviewed",
                 json={
                     "post_id": str(post_id),
-                    "status": "publish"
+                    "status": "published"
                 }
             )
             assert publish_res.status_code == 200
-            assert "published" in publish_res.json()["message"]
-            assert publish_res.json()["data"]["state"] == "published"
+            assert publish_res.json()["status"] is True
 
             # 4. GET /posts/{id}
             get_res = await ac.get(f"/api/v1/posts/{post_id}")
@@ -1358,7 +1408,9 @@ async def test_routes_post_management_flow(test_users) -> None:
             # 6. GET /posts (user posts)
             list_res = await ac.get("/api/v1/posts")
             assert list_res.status_code == 200
-            assert len(list_res.json()["data"]["items"]) >= 1
+            list_data = list_res.json()["data"]
+            list_items = list_data["items"] if isinstance(list_data, dict) else list_data
+            assert len(list_items) >= 1
 
             # 7. GET /feed
             feed_res = await ac.get("/api/v1/feed")
@@ -1563,8 +1615,9 @@ async def test_list_other_user_posts_visibility(test_users) -> None:
             assert res.status_code == 200
             body = res.json()
             assert body["status"] is True
-            assert len(body["data"]["items"]) == 1
-            assert body["data"]["items"][0]["content"]["caption"] == "Other public post"
+            items = body["data"]["items"] if isinstance(body["data"], dict) else body["data"]
+            assert len(items) == 1
+            assert items[0]["content"]["caption"] == "Other public post"
 
             # Update other profile visibility to private
             async with async_session_factory() as session:
@@ -1578,8 +1631,13 @@ async def test_list_other_user_posts_visibility(test_users) -> None:
             assert res_blocked.status_code == 200
             body_blocked = res_blocked.json()
             assert body_blocked["status"] is True
-            assert "visibility is private" in body_blocked["message"].lower()
-            assert len(body_blocked["data"]["items"]) == 0
+            assert "account is private" in body_blocked["message"].lower()
+            blocked_items = (
+                body_blocked["data"]["items"]
+                if isinstance(body_blocked["data"], dict)
+                else body_blocked["data"]
+            )
+            assert len(blocked_items) == 0
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 

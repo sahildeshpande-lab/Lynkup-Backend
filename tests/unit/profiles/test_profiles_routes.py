@@ -99,7 +99,7 @@ def test_get_me_requires_bearer_token() -> None:
     override = app.dependency_overrides.pop(get_current_user, None)
     try:
         response = client.get("/api/v1/myprofile")
-        assert response.status_code == 200
+        assert response.status_code == 401
         assert response.json()["status"] is False
     finally:
         if override:
@@ -211,6 +211,7 @@ def test_complete_onboarding_returns_success_payload(monkeypatch) -> None:
         profile_photo_key,
         banner_photo_key,
         db,
+        invitation_code=None,
     ):
         assert education_level_id == 2
         return {"user": {"email": user.email}, "onboarded": True}

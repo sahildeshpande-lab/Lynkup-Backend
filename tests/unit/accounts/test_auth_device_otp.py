@@ -16,12 +16,13 @@ from apps.accounts.services.device_otp_service import (
 from common.enums import UserStatus
 
 
-def _user(*, email_verified_at=None, password_hash="hashed"):
+def _user(*, email_verified_at=None, password_hash="hashed", email="user@example.com", registration_type="email"):
     return SimpleNamespace(
         id=uuid.uuid4(),
-        email="user@example.com",
+        email=email,
         firebase_uid="firebase-uid",
         password_hash=password_hash,
+        registration_type=registration_type,
         status=UserStatus.active,
         deleted_at=None,
         email_verified_at=email_verified_at,
@@ -116,7 +117,7 @@ def test_clear_session_email_verification():
 @pytest.mark.asyncio
 async def test_login_sends_otp_when_verification_required(mock_db):
     user = _user(email_verified_at=None)
-    payload = SimpleNamespace(device_id="device-1", password="Secret123")
+    payload = SimpleNamespace(email=user.email, device_id="device-1", password="Secret123")
     db = mock_db()
 
     with (
@@ -133,7 +134,7 @@ async def test_login_sends_otp_when_verification_required(mock_db):
             ]
         )
 
-        response = await auth_svc.login(payload, {"uid": user.firebase_uid}, db)
+        response = await auth_svc.login(payload, {"uid": user.firebase_uid, "email": user.email}, db)
 
     send_otp.assert_awaited_once()
     assert response.status is True
@@ -145,7 +146,7 @@ async def test_login_sends_otp_when_verification_required(mock_db):
 async def test_login_success_without_otp_when_verified_same_device(mock_db):
     verified_at = datetime.now(timezone.utc)
     user = _user(email_verified_at=verified_at)
-    payload = SimpleNamespace(device_id="device-1", password="Secret123")
+    payload = SimpleNamespace(email=user.email, device_id="device-1", password="Secret123")
     installation = _installation()
     db = mock_db()
 
@@ -163,12 +164,42 @@ async def test_login_success_without_otp_when_verified_same_device(mock_db):
             ]
         )
 
-        response = await auth_svc.login(payload, {"uid": user.firebase_uid}, db)
+        response = await auth_svc.login(payload, {"uid": user.firebase_uid, "email": user.email}, db)
 
     send_otp.assert_not_called()
     assert response.status is True
     assert response.message == "Login successful"
     assert response.data["needsOtp"] is False
+
+
+@pytest.mark.asyncio
+async def test_login_rejects_wrong_password(mock_db):
+    user = _user(email_verified_at=datetime.now(timezone.utc))
+    payload = SimpleNamespace(email=user.email, device_id="device-1", password="WrongPass1")
+    db = mock_db()
+
+    with patch.object(auth_svc, "PASSWORD_HASHER") as hasher:
+        hasher.verify.return_value = False
+        db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: user))
+
+        response = await auth_svc.login(payload, {"uid": user.firebase_uid, "email": user.email}, db)
+
+    assert response.status is False
+    assert response.message == "Invalid credentials"
+
+
+@pytest.mark.asyncio
+async def test_login_rejects_social_account_without_password_hash(mock_db):
+    user = _user(password_hash=None, registration_type="google")
+    payload = SimpleNamespace(email=user.email, device_id="device-1", password="Secret123")
+    db = mock_db()
+
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: user))
+
+    response = await auth_svc.login(payload, {"uid": user.firebase_uid, "email": user.email}, db)
+
+    assert response.status is False
+    assert "google" in response.message.lower()
 
 
 @pytest.mark.asyncio

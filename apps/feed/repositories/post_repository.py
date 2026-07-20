@@ -98,7 +98,7 @@ async def fetch_reviewed_posts_for_moderator(
         .outerjoin(ModeratorUser, ModeratorUser.id == Post.moderator_id)
         .outerjoin(ModeratorProfile, ModeratorProfile.user_id == Post.moderator_id)
         .where(*filters)
-        .order_by(Post.created_at.desc())
+        .order_by(Post.created_at.desc(), Post.id.desc())
         .offset(offset)
     )
     if limit is not None:
@@ -153,7 +153,7 @@ async def fetch_posts_by_state(
         select(Post)
         .join(User, User.id == Post.author_user_id)
         .where(*filters)
-        .order_by(Post.created_at.desc())
+        .order_by(Post.created_at.desc(), Post.id.desc())
         .offset(offset)
     )
     if limit is not None:
@@ -195,7 +195,7 @@ async def fetch_posts_by_state_with_details(
         .outerjoin(ModeratorProfile, ModeratorProfile.user_id == Post.moderator_id)
         .where(*filters)
         .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
-        .order_by(Post.created_at.desc())
+        .order_by(Post.created_at.desc(), Post.id.desc())
         .offset(offset)
     )
     if limit is not None:

@@ -3,9 +3,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
-import httpx
 import pytest
-from fastapi import HTTPException, status
 
 from apps.accounts.schemas import ForgotPasswordRequest
 
@@ -29,7 +27,7 @@ async def test_forgot_password_uses_firebase_native_email(monkeypatch, db_scalar
         return True
 
     monkeypatch.setattr(
-        "apps.accounts.services.send_reset_password_email",
+        "apps.accounts.services.password_service.send_reset_password_email",
         mock_send_firebase_password_reset_email,
     )
 
@@ -45,7 +43,7 @@ async def test_forgot_password_uses_firebase_native_email(monkeypatch, db_scalar
 
 
 @pytest.mark.asyncio
-async def test_firebase_password_reset_failure_raises_502(monkeypatch, db_scalar_result):
+async def test_firebase_password_reset_failure_returns_error_response(monkeypatch, db_scalar_result):
     from apps.accounts import services
     from apps.accounts.db_models import User
 
@@ -57,12 +55,15 @@ async def test_firebase_password_reset_failure_raises_502(monkeypatch, db_scalar
     mock_db.execute = AsyncMock(side_effect=[db_scalar_result(user), db_scalar_result(None)])
 
     async def mock_send_reset_password_email(*args, **kwargs):
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to send password reset email")
+        raise RuntimeError("Failed to send password reset email")
 
-    monkeypatch.setattr(services, "send_reset_password_email", mock_send_reset_password_email)
+    monkeypatch.setattr(
+        "apps.accounts.services.password_service.send_reset_password_email",
+        mock_send_reset_password_email,
+    )
 
-    with pytest.raises(HTTPException) as exc_info:
-        await services.forgot_password(ForgotPasswordRequest(email="user@example.com"), mock_db)
+    result = await services.forgot_password(ForgotPasswordRequest(email="user@example.com"), mock_db)
 
-    assert exc_info.value.status_code == status.HTTP_502_BAD_GATEWAY
-    assert exc_info.value.detail == "Failed to send password reset email"
+    assert result.status is False
+    assert result.message == "Failed to send password reset email. Please try again."
+    mock_db.rollback.assert_awaited_once()

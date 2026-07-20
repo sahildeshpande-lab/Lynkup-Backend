@@ -48,6 +48,7 @@ class ReportDetailData(BaseModel):
     updated_at: datetime
     reporter_details: ReportUserDetail | None = None
     moderator_info: ReportUserDetail | None = None
+    report_count: int = 0
 
 
 class ReportResponse(ApiResponse):

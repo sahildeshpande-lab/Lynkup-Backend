@@ -296,6 +296,8 @@ async def search_users(
     current_user: User,
     db: AsyncSession,
     query: Optional[str] = None,
+    university_name: str | list[str] | None = None,
+    edu_level: str | list[str] | None = None,
     page: Optional[int] = None,
     page_size: Optional[int] = None,
 ) -> dict:
@@ -304,6 +306,11 @@ async def search_users(
     from apps.accounts.db_models import User, UserRole, Role
     from apps.profiles.db_models.profile_db_model import Profile
     from apps.profiles.db_models.university_db_model import University
+    from apps.search.repositories.post_search_repository import (
+        _edu_level_match_clause,
+        _split_filter_values,
+        _university_match_clause,
+    )
     from common.enums import UserStatus
     from apps.profiles.services import build_user_base_response
 
@@ -333,6 +340,16 @@ async def search_users(
 
     # Exclude current user
     stmt = stmt.where(User.id != current_user.id)
+
+    structured_filters = []
+    university_clause = _university_match_clause(_split_filter_values(university_name))
+    if university_clause is not None:
+        structured_filters.append(university_clause)
+    edu_clause = _edu_level_match_clause(Profile, _split_filter_values(edu_level))
+    if edu_clause is not None:
+        structured_filters.append(edu_clause)
+    if structured_filters:
+        stmt = stmt.where(and_(*structured_filters))
 
     # Fuzzy search query (pg_trgm)
     if query and query.strip():
@@ -379,6 +396,8 @@ async def search_users(
         User.deleted_at.is_(None)
     )
     count_stmt = count_stmt.where(User.id != current_user.id)
+    if structured_filters:
+        count_stmt = count_stmt.where(and_(*structured_filters))
     if query and query.strip():
         normalized_query = query.strip()
         search_terms = normalized_query.split()
@@ -451,13 +470,13 @@ async def search_posts(
     db: AsyncSession,
     *,
     query: str | None = None,
-    hashtag: str | None = None,
-    academic_interest: str | None = None,
-    university_name: str | None = None,
+    hashtag: str | list[str] | None = None,
+    academic_interest: str | list[str] | None = None,
+    university_name: str | list[str] | None = None,
     major: str | None = None,
     minor: str | None = None,
     country: str | None = None,
-    edu_level: str | None = None,
+    edu_level: str | list[str] | None = None,
     page: int | None = None,
     page_size: int | None = None,
 ) -> dict:
@@ -495,6 +514,7 @@ async def search_posts(
                 is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
                 user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
                 reactions=latest_reactions.get(post.id),
+                viewer_user_id=current_user.id,
             )
             for post, author_profile, mod_user, mod_profile in rows
         ]

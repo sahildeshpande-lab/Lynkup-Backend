@@ -81,6 +81,14 @@ async def create_academic_interest(
 @router.get("/search-user", response_model=ApiResponse)
 async def searchuser(
     query: Optional[str] = Query(None, description="Fuzzy search name, email, university, major, minor, or education level"),
+    university_name: str | None = Query(
+        default=None,
+        description="Filter by university name or id. For multiple, use pipe-separated values (e.g. id1|id2)",
+    ),
+    edu_level: str | None = Query(
+        default=None,
+        description="Filter by education level name or id from /academicsinfo. For multiple, use pipe-separated values",
+    ),
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
     db: AsyncSession = Depends(get_session),
@@ -90,6 +98,8 @@ async def searchuser(
         current_user=current_user,
         db=db,
         query=query,
+        university_name=university_name,
+        edu_level=edu_level,
         page=page,
         page_size=pageSize,
     )
@@ -104,15 +114,15 @@ async def search_posts(
     query: str | None = Query(default=None, description="Search post caption and content"),
     hashtag: str | None = Query(
         default=None,
-        description="Filter by hashtag tag or hashtag id from /academicsinfo",
+        description="Filter by hashtag tag or hashtag id. For multiple, use pipe-separated values (e.g. ai|ml)",
     ),
     academic_interest: str | None = Query(
         default=None,
-        description="Filter by author academic interest name or id from /academicsinfo",
+        description="Filter by author academic interest name or id from /academicsinfo. For multiple, use pipe-separated values",
     ),
     university_name: str | None = Query(
         default=None,
-        description="Filter by author university name or university id",
+        description="Filter by author university name or university id. For multiple, use pipe-separated values",
     ),
     major: str | None = Query(default=None, description="Filter by author major"),
     minor: str | None = Query(default=None, description="Filter by author minor"),
@@ -122,7 +132,7 @@ async def search_posts(
     ),
     edu_level: str | None = Query(
         default=None,
-        description="Filter by author education level name or id from /academicsinfo",
+        description="Filter by author education level name or id from /academicsinfo. For multiple, use pipe-separated values",
     ),
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
