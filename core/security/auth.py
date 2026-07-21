@@ -39,9 +39,12 @@ def _inactive_account_message(status: UserStatus) -> str:
 
 
 def _ensure_active_user(user: User) -> None:
+    """Allow active and pending users; keep 401 for suspended/banned/deleting."""
     if user.status == UserStatus.deleting or user.deleted_at:
         raise ApiError(inactive_account_message(UserStatus.deleting))
-    if user.status != UserStatus.active:
+    if user.status in (UserStatus.suspended, UserStatus.banned):
+        raise ApiError(_inactive_account_message(user.status))
+    if user.status not in (UserStatus.active, UserStatus.pending):
         raise ApiError(_inactive_account_message(user.status))
 
 
@@ -88,7 +91,9 @@ async def get_current_user(
     if user.status == UserStatus.deleting or user.deleted_at:
         raise ApiError(inactive_account_message(UserStatus.deleting))
 
-    if user.status != UserStatus.active:
+    if user.status in (UserStatus.suspended, UserStatus.banned):
+        raise ApiError(_inactive_account_message(user.status))
+    if user.status not in (UserStatus.active, UserStatus.pending):
         raise ApiError(_inactive_account_message(user.status))
 
     return user
@@ -117,7 +122,9 @@ async def get_current_admin(
     if user.status == UserStatus.deleting or user.deleted_at:
         raise ApiError(inactive_account_message(UserStatus.deleting))
 
-    if user.status != UserStatus.active:
+    if user.status in (UserStatus.suspended, UserStatus.banned):
+        raise ApiError(_inactive_account_message(user.status))
+    if user.status not in (UserStatus.active, UserStatus.pending):
         raise ApiError(_inactive_account_message(user.status))
 
     if user.role in ("user",):

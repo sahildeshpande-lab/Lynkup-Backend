@@ -71,7 +71,12 @@ async def check_post_engagement_allowed(
         )
 
     author_status = author.status.value if hasattr(author.status, "value") else str(author.status)
-    if author_status in ("pending", "banned", "suspended", "deleting") or author.is_deleted or author.deleted_at:
+    # Pending authors may receive engagement. Suspended/banned/deleting stay blocked with 401.
+    if (
+        author_status in ("banned", "suspended", "deleting")
+        or author.is_deleted
+        or author.deleted_at
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Post author account is inactive or restricted."

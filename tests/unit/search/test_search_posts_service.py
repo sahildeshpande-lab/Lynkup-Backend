@@ -133,6 +133,29 @@ async def test_search_posts_academic_interest_filter(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_search_posts_multi_academic_interest_filter_uses_or(mock_db):
+    user = _user()
+    db = mock_db()
+    interests = "AI|Machine Learning|NLP"
+
+    with (
+        patch("apps.search.repositories.count_search_posts", AsyncMock(return_value=0)) as count_posts,
+        patch("apps.search.repositories.search_posts_with_details", AsyncMock(return_value=[])) as search_posts_repo,
+    ):
+        await search_posts(
+            user,
+            db,
+            academic_interest=interests,
+            page=1,
+            page_size=20,
+        )
+
+    assert count_posts.await_args.kwargs["academic_interest"] == interests
+    assert search_posts_repo.await_args.kwargs["academic_interest"] == interests
+
+
+
+@pytest.mark.asyncio
 async def test_search_posts_combined_filters(mock_db):
     user = _user()
     db = mock_db()

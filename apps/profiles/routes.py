@@ -93,6 +93,7 @@ async def complete_onboarding(
         user=current_user,
         profile_photo_key=payload.profile_photo_key,
         banner_photo_key=payload.banner_photo_key,
+        country_id=payload.country_id,
         university_id=payload.university_id,
         major=payload.major,
         minor=payload.minor,

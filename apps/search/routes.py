@@ -81,13 +81,20 @@ async def create_academic_interest(
 @router.get("/search-user", response_model=ApiResponse)
 async def searchuser(
     query: Optional[str] = Query(None, description="Fuzzy search name, email, university, major, minor, or education level"),
-    university_name: str | None = Query(
+    university_name: list[str] | None = Query(
         default=None,
-        description="Filter by university name or id. For multiple, use pipe-separated values (e.g. id1|id2)",
+        description=(
+            "Filter by university name or id. Multiple values are OR'd: "
+            "repeat the query param and/or use pipe-separated values "
+            "(e.g. university_name=id1&university_name=id2 or id1|id2)."
+        ),
     ),
-    edu_level: str | None = Query(
+    edu_level: list[str] | None = Query(
         default=None,
-        description="Filter by education level name or id from /academicsinfo. For multiple, use pipe-separated values",
+        description=(
+            "Filter by education level name or id from /academicsinfo. "
+            "Multiple values are OR'd: repeat the query param and/or use pipe-separated values."
+        ),
     ),
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
@@ -111,28 +118,55 @@ async def searchuser(
 async def search_posts(
     db: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user_or_superadmin),
-    query: str | None = Query(default=None, description="Search post caption and content"),
-    hashtag: str | None = Query(
+    query: str | None = Query(
         default=None,
-        description="Filter by hashtag tag or hashtag id. For multiple, use pipe-separated values (e.g. ai|ml)",
+        description=(
+            "Search post caption/content and author first/last name. "
+            "Example: query=Sahil returns posts by authors named Sahil and posts mentioning Sahil."
+        ),
     ),
-    academic_interest: str | None = Query(
+    hashtag: list[str] | None = Query(
         default=None,
-        description="Filter by author academic interest name or id from /academicsinfo. For multiple, use pipe-separated values",
+        description=(
+            "Filter by hashtag tag or hashtag id. Multiple values are OR'd: "
+            "repeat the query param and/or use pipe-separated values "
+            "(e.g. hashtag=ai&hashtag=ml or ai|ml)."
+        ),
     ),
-    university_name: str | None = Query(
+    academic_interest: list[str] | None = Query(
         default=None,
-        description="Filter by author university name or university id. For multiple, use pipe-separated values",
+        description=(
+            "Filter by author profile academic interest name or id from /academicsinfo. "
+            "Multiple values are OR'd: repeat the query param and/or use pipe-separated values "
+            "(e.g. academic_interest=AI&academic_interest=NLP or AI|NLP). "
+            "Returns posts whose author has any of the selected interests."
+        ),
+    ),
+    university_name: list[str] | None = Query(
+        default=None,
+        description=(
+            "Filter by author university name or university id. Multiple values are OR'd: "
+            "repeat the query param and/or use pipe-separated values "
+            "(e.g. university_name=id1&university_name=id2 or id1|id2)."
+        ),
     ),
     major: str | None = Query(default=None, description="Filter by author major"),
     minor: str | None = Query(default=None, description="Filter by author minor"),
-    country: str | None = Query(
+    country: list[str] | None = Query(
         default=None,
-        description="Filter by author country name, iso_code, or country id from /academicsinfo",
+        description=(
+            "Filter by author profile country name, iso_code, or country id from /academicsinfo. "
+            "Multiple values are OR'd: repeat the query param and/or use pipe-separated values "
+            "(e.g. country=India&country=US or India|US)."
+        ),
     ),
-    edu_level: str | None = Query(
+    edu_level: list[str] | None = Query(
         default=None,
-        description="Filter by author education level name or id from /academicsinfo. For multiple, use pipe-separated values",
+        description=(
+            "Filter by author education level name or id from /academicsinfo. "
+            "Multiple values are OR'd: repeat the query param and/or use pipe-separated values "
+            "(e.g. edu_level=1&edu_level=2 or Bachelors|Masters)."
+        ),
     ),
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),

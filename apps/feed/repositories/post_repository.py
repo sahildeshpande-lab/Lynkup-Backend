@@ -30,11 +30,14 @@ def _build_reviewed_posts_filter(
     moderator_id: UUID | None,
     status: Union[ReviewedPostStatus, None],
 ):
+    from common.user_visibility import visible_user_filters
+
     target_state = _REVIEWED_STATUS_TO_STATE.get(status, _DEFAULT_REVIEWED_STATE)
     # Filter by state only. User-published posts (state=published,
     # is_moderator_reviewed=False) must appear so the moderator can act on them.
     # is_moderator_reviewed is informational metadata, not a visibility gate.
-    filters = [Post.state == target_state]
+    # Hide posts from suspended / banned / deleting authors.
+    filters = [Post.state == target_state, *visible_user_filters(User)]
     if moderator_id is not None:
         filters.append(Post.moderator_id == moderator_id)
     return filters
@@ -46,7 +49,12 @@ async def count_reviewed_posts_for_moderator(
     status: Union[ReviewedPostStatus, None] = None,
 ) -> int:
     filters = _build_reviewed_posts_filter(moderator_id, status)
-    stmt = select(func.count(Post.id)).where(*filters)
+    stmt = (
+        select(func.count(Post.id))
+        .select_from(Post)
+        .join(User, User.id == Post.author_user_id)
+        .where(*filters)
+    )
     return int((await db.execute(stmt)).scalar_one())
 
 
@@ -54,6 +62,8 @@ async def count_reviewed_posts_summary_by_state(
     db: AsyncSession,
     moderator_id: UUID | None,
 ) -> dict[str, int]:
+    from common.user_visibility import visible_user_filters
+
     state_to_status = {
         PostState.published: "published",
         PostState.flagged: "flagged",
@@ -62,7 +72,12 @@ async def count_reviewed_posts_summary_by_state(
     }
     stmt = (
         select(Post.state, func.count(Post.id))
-        .where(Post.state.in_(list(state_to_status.keys())))
+        .select_from(Post)
+        .join(User, User.id == Post.author_user_id)
+        .where(
+            Post.state.in_(list(state_to_status.keys())),
+            *visible_user_filters(User),
+        )
     )
     if moderator_id is not None:
         stmt = stmt.where(Post.moderator_id == moderator_id)
@@ -85,20 +100,30 @@ async def fetch_reviewed_posts_for_moderator(
     limit: int | None = None,
 ) -> list[tuple[Post, object | None, object | None, object | None]]:
     from apps.profiles.db_models import Profile
-    from apps.accounts.db_models import User
-    from sqlalchemy.orm import aliased
+    from sqlalchemy.orm import aliased, selectinload
+
+    from apps.feed.db_models import PostAttachment
+    from common.user_visibility import visible_user_filters
+
+    AuthorUser = aliased(User, name="author_user")
     AuthorProfile = aliased(Profile, name="author_profile")
     ModeratorUser = aliased(User, name="moderator_user")
     ModeratorProfile = aliased(Profile, name="moderator_profile")
 
-    filters = _build_reviewed_posts_filter(moderator_id, status)
+    target_state = _REVIEWED_STATUS_TO_STATE.get(status, _DEFAULT_REVIEWED_STATE)
+    filters = [Post.state == target_state, *visible_user_filters(AuthorUser)]
+    if moderator_id is not None:
+        filters.append(Post.moderator_id == moderator_id)
+
     stmt = (
         select(Post, AuthorProfile, ModeratorUser, ModeratorProfile)
+        .join(AuthorUser, AuthorUser.id == Post.author_user_id)
         .outerjoin(AuthorProfile, AuthorProfile.user_id == Post.author_user_id)
         .outerjoin(ModeratorUser, ModeratorUser.id == Post.moderator_id)
         .outerjoin(ModeratorProfile, ModeratorProfile.user_id == Post.moderator_id)
         .where(*filters)
-        .order_by(Post.created_at.desc())
+        .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
+        .order_by(Post.created_at.desc(), Post.id.desc())
         .offset(offset)
     )
     if limit is not None:
@@ -153,7 +178,7 @@ async def fetch_posts_by_state(
         select(Post)
         .join(User, User.id == Post.author_user_id)
         .where(*filters)
-        .order_by(Post.created_at.desc())
+        .order_by(Post.created_at.desc(), Post.id.desc())
         .offset(offset)
     )
     if limit is not None:
@@ -195,7 +220,7 @@ async def fetch_posts_by_state_with_details(
         .outerjoin(ModeratorProfile, ModeratorProfile.user_id == Post.moderator_id)
         .where(*filters)
         .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
-        .order_by(Post.created_at.desc())
+        .order_by(Post.created_at.desc(), Post.id.desc())
         .offset(offset)
     )
     if limit is not None:

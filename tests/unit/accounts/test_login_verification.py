@@ -197,9 +197,13 @@ async def test_login_after_verify_otp_does_not_revert_to_pending(db_session: Asy
         return True
 
     monkeypatch.setattr("apps.accounts.services.device_otp_service.send_otp_email", mock_send_otp_email)
+
+    async def mock_send_verification_success_email(*args, **kwargs):
+        return None
+
     monkeypatch.setattr(
         "apps.accounts.services.auth_service.send_verification_success_email",
-        lambda *args, **kwargs: None,
+        mock_send_verification_success_email,
     )
 
     uid = str(uuid.uuid4())
@@ -548,6 +552,79 @@ async def test_verify_email_endpoint(db_session: AsyncSession):
     assert refreshed.status == UserStatus.active
     assert refreshed.email_verified_at is not None
     assert refreshed.email_otp is None
+
+
+@pytest.mark.asyncio
+async def test_verify_otp_skips_success_email_when_onboarding_completed(db_session: AsyncSession, monkeypatch):
+    from apps.accounts.services import verify_otp
+    from apps.accounts.schemas import OtpVerifyRequest
+
+    sent_emails = []
+
+    async def mock_send_verification_success_email(*args, **kwargs):
+        sent_emails.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(
+        "apps.accounts.services.auth_service.send_verification_success_email",
+        mock_send_verification_success_email,
+    )
+
+    uid = str(uuid.uuid4())
+    email = f"completed_{uid[:8]}@example.com"
+    otp = "5678"
+    user = User(
+        firebase_uid=uid,
+        email=email,
+        status=UserStatus.pending,
+        onboarding_status="completed",
+        email_otp=otp,
+        email_otp_created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    db_session.add(user)
+    await db_session.commit()
+
+    response = await verify_otp(
+        payload=OtpVerifyRequest(email=email, otp=otp, firebaseId="valid-id-token"),
+        firebase_user={"uid": uid, "email": email},
+        db=db_session,
+    )
+
+    assert response.status is True
+    assert sent_emails == []
+
+
+@pytest.mark.asyncio
+async def test_verify_email_returns_no_template_when_onboarding_completed(db_session: AsyncSession):
+    from apps.accounts.services import verify_email
+
+    uid = str(uuid.uuid4())
+    email = f"completed_link_{uid[:8]}@example.com"
+    otp = "verify_done_123"
+    user = User(
+        firebase_uid=uid,
+        email=email,
+        status=UserStatus.pending,
+        email_otp=otp,
+        email_otp_created_at=datetime.now(timezone.utc),
+        onboarding_status="completed",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    db_session.add(user)
+    await db_session.flush()
+    await db_session.commit()
+
+    response = await verify_email(token=otp, db=db_session)
+
+    body = response.body.decode()
+    assert response.status_code == 200
+    assert body == ""
+    assert "Email Verified Successfully" not in body
+    assert "You can now proceed with onboarding" not in body
+
 
 @pytest.mark.asyncio
 async def test_refresh_token_never_expires(db_session: AsyncSession):

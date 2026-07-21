@@ -422,7 +422,7 @@ def _render_email_layout(title: str, body_html: str, hero_text: str | None = Non
         {
             "title": title,
             "hero_text": hero_text
-            or "Connecting and empowering university students to achieve their educational goals.",
+            or "Our misison is to connect and empower university students to achieve their educational goals",
             "body_html": body_html,
             "logo_url": _resolve_logo_url(),
         },
@@ -435,7 +435,7 @@ def _paragraphs(text: str) -> str:
 
 
 _VERIFICATION_HERO_TEXT = (
-    "Connecting and empowering university students to achieve their educational goals."
+    "Our misison is to connect and empower university students to achieve their educational goals."
 )
 
 

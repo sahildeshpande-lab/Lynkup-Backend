@@ -113,6 +113,7 @@ async def create_academic_interest(
     db: AsyncSession,
 ) -> dict:
     from apps.profiles.db_models.education_level_db_model import EducationLevel
+    from apps.profiles.services.interest_service import _find_existing_academic_interest
     from common.exceptions import ApiError
     from sqlalchemy.exc import IntegrityError
 
@@ -127,13 +128,8 @@ async def create_academic_interest(
     if education_level is None:
         raise ApiError("Education level not found")
 
-    existing = (
-        await db.execute(
-            select(AcademicInterest).where(
-                func.lower(AcademicInterest.name) == name.lower()
-            )
-        )
-    ).scalar_one_or_none()
+    # Reject exact matches (any casing) and near-duplicates with minor spelling variations.
+    existing = await _find_existing_academic_interest(name, db)
     if existing is not None:
         raise ApiError("Academic interest already exists")
 
@@ -342,7 +338,10 @@ async def search_users(
     stmt = stmt.where(User.id != current_user.id)
 
     structured_filters = []
-    university_clause = _university_match_clause(_split_filter_values(university_name))
+    university_clause = _university_match_clause(
+        _split_filter_values(university_name),
+        university_id_column=Profile.university_id,
+    )
     if university_clause is not None:
         structured_filters.append(university_clause)
     edu_clause = _edu_level_match_clause(Profile, _split_filter_values(edu_level))
@@ -475,7 +474,7 @@ async def search_posts(
     university_name: str | list[str] | None = None,
     major: str | None = None,
     minor: str | None = None,
-    country: str | None = None,
+    country: str | list[str] | None = None,
     edu_level: str | list[str] | None = None,
     page: int | None = None,
     page_size: int | None = None,
@@ -514,6 +513,7 @@ async def search_posts(
                 is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
                 user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
                 reactions=latest_reactions.get(post.id),
+                viewer_user_id=current_user.id,
             )
             for post, author_profile, mod_user, mod_profile in rows
         ]

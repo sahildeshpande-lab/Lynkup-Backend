@@ -46,6 +46,14 @@ async def toggle_repost(
         )
 
     author_id = getattr(post, "author_user_id", None)
+
+    # Align with is_repostable=false: authors cannot repost their own content.
+    if is_reposted and author_id is not None and user_id == author_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot repost your own post",
+        )
+
     if author_id is not None:
         from common.user_visibility import check_post_engagement_allowed
         await check_post_engagement_allowed(db, user_id, author_id)

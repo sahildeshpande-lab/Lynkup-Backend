@@ -12,14 +12,16 @@ from apps.report.schemas import (
     ReportListResponse,
     ReportResponse,
     ReportReviewRequest,
+    ReportedEntityListResponse,
 )
 from apps.report.services import (
     create_report_service,
     get_report_details_admin_service,
-    list_reports_admin_service,
+    get_reported_entities,
+    get_reports,
     review_report_admin_service,
 )
-from common.enums import ReportEntityType, ReportStatus
+from common.enums import ReportEntityType
 from common.pagination import PaginationParams
 from common.schemas import ApiResponse
 from core.database.session import get_session
@@ -47,22 +49,25 @@ async def create_report_route(
     "/admin/reports",
     response_model=ReportListResponse,
     status_code=status.HTTP_200_OK,
-    summary="Get reports list",
-    description="List and filter reports. Admin/moderator only.",
+    summary="List reports for an entity",
+    description=(
+        "Return individual report records for a specific entity. "
+        "Admin/moderator only."
+    ),
 )
 async def list_reports_admin_route(
+    entity_type: ReportEntityType = Query(...),
+    entity_id: UUID = Query(...),
+    moderator_id: UUID | None = Query(None),
     current_user=Depends(get_current_moderator),
     db: AsyncSession = Depends(get_session),
     pagination: PaginationParams = Depends(),
-    report_status: ReportStatus | None = Query(None, alias="status"),
-    entity_type: ReportEntityType | None = Query(None),
-    moderator_id: UUID | None = Query(None),
 ) -> ReportListResponse:
     _ = current_user
-    return await list_reports_admin_service(
+    return await get_reports(
         db,
-        status=report_status,
         entity_type=entity_type,
+        entity_id=entity_id,
         moderator_id=moderator_id,
         page=pagination.page,
         page_size=pagination.pageSize,
@@ -70,10 +75,37 @@ async def list_reports_admin_route(
 
 
 @router.get(
+    "/admin/reports/details",
+    response_model=ReportedEntityListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List reported entities",
+    description=(
+        "Return one row per reported entity for the moderation dashboard. "
+        "Admin/moderator only."
+    ),
+)
+async def get_reported_entities_route(
+    entity_type: ReportEntityType = Query(...),
+    moderator_id: UUID | None = Query(None),
+    current_user=Depends(get_current_moderator),
+    db: AsyncSession = Depends(get_session),
+    pagination: PaginationParams = Depends(),
+) -> ReportedEntityListResponse:
+    return await get_reported_entities(
+        db,
+        entity_type=entity_type,
+        moderator_id=moderator_id,
+        page=pagination.page,
+        page_size=pagination.pageSize,
+        viewer_user_id=current_user.id,
+    )
+
+
+@router.get(
     "/admin/reports/{report_id}",
     response_model=ReportResponse,
     status_code=status.HTTP_200_OK,
-    summary="Get report details",
+    summary="Get report by ID",
     description="Retrieve details of a report by its ID. Admin/moderator only.",
 )
 async def get_report_details_admin_route(

@@ -1,224 +1,112 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="light dark">
-    <meta name="supported-color-schemes" content="light dark">
-    <title>{{title}}</title>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{title}}</title>
+<style>
+body,table,td,a{-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%}
+table,td{mso-table-lspace:0pt;mso-table-rspace:0pt}
+table{border-collapse:collapse!important}
+img{display:block;border:0}
+body{margin:0;padding:0;background:#E0E5ED}
+</style>
+</head>
+<body>
+<table width="100%" bgcolor="#E0E5ED" cellpadding="0" cellspacing="0">
+<tr><td align="center" style="padding:24px 12px;">
+<table width="620" cellpadding="0" cellspacing="0" style="background:#fff;max-width:620px;">
+<tr><td height="5" style="background:linear-gradient(90deg,#00A74F,#4473BD);font-size:0;"></td></tr>
 
-    <!--[if mso]>
-    <noscript>
-      <xml>
-        <o:OfficeDocumentSettings>
-          <o:PixelsPerInch>96</o:PixelsPerInch>
-        </o:OfficeDocumentSettings>
-      </xml>
-    </noscript>
-    <![endif]-->
-
-    <style>
-      :root {
-        color-scheme: light dark;
-        supported-color-schemes: light dark;
-      }
-
-      /* Reset & Client-specific Adjustments */
-      body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
-      table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
-      img { -ms-interpolation-mode: bicubic; border: 0; display: block; }
-      table { border-collapse: collapse !important; }
-      body {
-        height: 100% !important;
-        margin: 0 !important;
-        padding: 0 !important;
-        width: 100% !important;
-        background-color: #F3F4F6;
-      }
-      a[x-apple-data-detectors] { color: inherit !important; text-decoration: none !important; }
-
-      /* Responsive Styles */
-      @media screen and (max-width: 620px) {
-        .email-container { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; }
-        .header-pad { padding: 20px !important; }
-        .hero-pad { padding: 24px 20px !important; }
-        .content-pad { padding: 30px 20px !important; }
-        .footer-pad { padding: 24px 20px !important; }
-        .otp-font { font-size: 28px !important; letter-spacing: 8px !important; }
-      }
-
-      /* Dark mode: follow device system theme */
-      @media (prefers-color-scheme: dark) {
-        body,
-        .email-bg {
-          background-color: #000000 !important;
-        }
-        .email-container {
-          background-color: #000000 !important;
-          border-color: #1F2937 !important;
-          box-shadow: none !important;
-        }
-        .header-pad {
-          background-color: #000000 !important;
-          border-bottom-color: #1F2937 !important;
-        }
-        .tagline-text {
-          color: #94A3B8 !important;
-        }
-        .brand-fallback {
-          color: #34D399 !important;
-        }
-        .hero-pad {
-          background-color: #0B1220 !important;
-        }
-        .hero-text {
-          color: #F8FAFC !important;
-        }
-        .content-pad {
-          background-color: #000000 !important;
-          color: #E2E8F0 !important;
-        }
-        .footer-pad {
-          background-color: #0A0A0A !important;
-          border-top-color: #1F2937 !important;
-        }
-        .footer-text {
-          color: #94A3B8 !important;
-        }
-        .body-text {
-          color: #CBD5E1 !important;
-        }
-        .muted-text {
-          color: #94A3B8 !important;
-        }
-        .otp-card {
-          background-color: #111827 !important;
-          border-color: #4473BD !important;
-        }
-        .otp-label {
-          color: #93C5FD !important;
-        }
-        .otp-digits {
-          color: #F8FAFC !important;
-        }
-      }
-
-      /* Outlook.com / some webmail dark mode helpers */
-      [data-ogsc] body,
-      [data-ogsc] .email-bg {
-        background-color: #000000 !important;
-      }
-      [data-ogsc] .email-container,
-      [data-ogsc] .header-pad,
-      [data-ogsc] .content-pad {
-        background-color: #000000 !important;
-      }
-      [data-ogsc] .footer-pad {
-        background-color: #0A0A0A !important;
-      }
-      [data-ogsc] .body-text,
-      [data-ogsc] .content-pad {
-        color: #E2E8F0 !important;
-      }
-      [data-ogsc] .muted-text,
-      [data-ogsc] .footer-text,
-      [data-ogsc] .tagline-text {
-        color: #94A3B8 !important;
-      }
-    </style>
-  </head>
-
-  <body style="margin: 0; padding: 0; background-color: #F3F4F6;">
-
-    <!-- Background Table -->
-    <table class="email-bg" role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #F3F4F6;">
+<tr>
+<td style="padding:14px 24px;border-bottom:1px solid #EFEFEF;background:#fff;">
+<table width="100%">
+<!-- Header Section -->
+<tr>
+  <td class="header-pad" style="background-color:#ffffff;padding:14px 24px;border-bottom:1px solid #EFEFEF;">
+    <table width="100%" cellspacing="0" cellpadding="0" role="presentation">
       <tr>
-        <td align="center" style="padding: 40px 12px;">
 
-          <!--[if mso]>
-          <table role="presentation" align="center" border="0" cellspacing="0" cellpadding="0" width="600">
-            <tr>
-              <td>
-          <![endif]-->
+        <!-- Left: Logo + Tagline -->
+        <td valign="middle">
+          <img
+            src="{{logo_url}}"
+            alt="KampuLynk Logo"
+            width="48"
+            height="48"
+            style="display:block;border:0;border-radius:8px;width:48px;height:48px;"
+          >
 
-          <!-- Main Email Container -->
-          <table class="email-container" role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border: 1px solid #E5E7EB;">
-
-            <!-- Top Gradient Strip -->
-            <tr>
-              <td height="6" style="background: linear-gradient(90deg, #00A74F 0%, #4473BD 100%); background-color: #00A74F; font-size: 0; line-height: 0; mso-line-height-rule: exactly;">
-                &nbsp;
-              </td>
-            </tr>
-
-            <!-- Header Section -->
-            <tr>
-              <td class="header-pad" style="background-color: #ffffff; padding: 24px 32px; border-bottom: 1px solid #F1F5F9;">
-                <table width="100%" cellspacing="0" cellpadding="0" role="presentation">
-                  <tr>
-                    <td valign="middle">
-                      <img
-                        src="{{logo_url}}"
-                        alt="KampuLynk Logo"
-                        width="48"
-                        height="48"
-                        style="display: block; border: 0; outline: none; text-decoration: none; border-radius: 8px; width: 48px; height: 48px;"
-                      >
-                      <div class="tagline-text" style="font-size: 12px; color: #64748B; margin-top: 8px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; letter-spacing: 0.3px;">
-                        Connect. Collaborate. Achieve.
-                      </div>
-                    
-                  </td>
-                    <td align="right" valign="middle" style="font-size: 20px; font-family: Arial, Helvetica, sans-serif; white-space: nowrap; padding-left: 16px;">
-                      <span style="background: linear-gradient(180deg, #00A74F 0%, #4473BD 100%); -webkit-background-clip: text; background-clip: text; color: transparent;">KampuLynk</span>
-                    </td>
-                  </tr>
-                </table>
-              </td>
-            </tr>
-
-            <!-- Hero Banner -->
-            <tr>
-              <td class="hero-pad" style="background-color: #0F172A; padding: 32px;">
-                <p class="hero-text" style="margin: 0; font-size: 18px; font-weight: 500; color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; text-align: center;">
-                  {{hero_text}}
-                </p>
-              </td>
-            </tr>
-
-            <!-- Main Content Area -->
-            <tr>
-              <td class="content-pad" style="background-color: #ffffff; padding: 40px 32px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 16px; color: #334155; line-height: 1.6;">
-                {{body_html}}
-              </td>
-            </tr>
-
-            <!-- Footer Section -->
-            <tr>
-              <td class="footer-pad" style="background-color: #F8FAFC; padding: 24px 32px; border-top: 1px solid #E2E8F0;">
-                <p class="footer-text" style="margin: 0 0 12px; font-size: 12px; color: #94A3B8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; text-align: center;">
-                  This is an automated security notification sent by KampuLynk.
-                </p>
-
-                <div style="padding-top: 12px;">
-                  <p class="footer-text" style="margin: 0; font-size: 12px; color: #94A3B8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; text-align: center;">
-                    &#169; KampuLynk. All rights reserved.
-                  </p>
-                </div>
-              </td>
-            </tr>
-
-          </table>
-
-          <!--[if mso]>
-              </td>
-            </tr>
-          </table>
-          <![endif]-->
-
+          <div
+            style="
+              margin-top:6px;
+              font-size:12px;
+              color:#64748B;
+              font-family:Arial, Helvetica, sans-serif;
+              letter-spacing:0.3px;
+            "
+          >
+            Connect. Collaborate. Achieve.
+          </div>
         </td>
+
+        <!-- Right: Brand Name -->
+       
+       
+        <td align="right"
+    valign="middle"
+    style="
+        white-space: nowrap;
+        padding-left: 16px;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 22px;
+        font-weight: 700;
+        line-height: 1;
+    ">
+    <span style="color:#0F82C8;">Kampu</span><span style="color:#10B14B;">Lynk</span>
+</td>
+
       </tr>
     </table>
+  </td>
+</tr>
+</table>
+</td>
+</tr>
 
-  </body>
+<tr>
+<td style="background:#071A35;padding:30px 28px;">
+<p style="margin:0;font:18px Arial,Helvetica,sans-serif;color:#fff;line-height:1.7;text-align:center;">
+Our mission is to connect and empower university students to achieve their educational goals.
+</p>
+</td>
+</tr>
+
+<tr>
+<td style="background:#edecec;padding:30px 25px;font:16px Arial,Helvetica,sans-serif;color:#333;line-height:1.7;">
+{{body_html}}
+<hr style="border:none;border-top:1px solid #D1D5DB;margin:24px 0;">
+<p style="margin:0;color:#333;">
+Use this one-time password (OTP) to verify your email address.
+</p>
+</td>
+</tr>
+
+<tr>
+<td style="background:#071A35;padding:24px 28px;">
+<p style="margin:0 0 14px;font:12px Arial,Helvetica,sans-serif;color:#94A3B8;line-height:1.7;">
+This is an automated security notification sent by KampuLynk.
+</p>
+<div style="border-top:1px solid #1E3A5F;padding-top:14px;">
+<p style="margin:0;font:11px Arial,Helvetica,sans-serif;color:#475569;">
+&#169; KampuLynk. All rights reserved.
+</p>
+</div>
+</td>
+</tr>
+
+</table>
+</td></tr>
+</table>
+</body>
 </html>

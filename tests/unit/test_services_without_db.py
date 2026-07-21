@@ -137,6 +137,23 @@ async def test_create_academic_interest(mock_db, scalar_result):
 
 
 @pytest.mark.asyncio
+async def test_create_academic_interest_rejects_case_and_spelling_duplicates(
+    mock_db, scalar_result
+):
+    from common.exceptions import ApiError
+
+    education_level = SimpleNamespace(id=1, name="Bachelors", is_active=True)
+    existing = SimpleNamespace(id=3, name="Artificial Intelligence")
+    db = mock_db(scalar_result(education_level), scalar_result(existing))
+
+    with pytest.raises(ApiError, match="Academic interest already exists"):
+        await create_academic_interest("artificial intelligence", 1, db)
+
+    db.add.assert_not_called()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_completeness_score_paths(monkeypatch, mock_db, scalar_result):
     user_id = uuid4()
     user = SimpleNamespace(id=user_id, email="student@example.test")

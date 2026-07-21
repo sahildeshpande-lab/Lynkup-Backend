@@ -169,8 +169,8 @@ def test_search_users_route(monkeypatch) -> None:
         university_name=None,
         edu_level=None,
     ):
-        assert university_name == "Kampu University|State University"
-        assert edu_level == "1"
+        assert university_name == ["Kampu University|State University"]
+        assert edu_level == ["1"]
         return {
             "items": [
                 {

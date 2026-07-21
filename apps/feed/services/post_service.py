@@ -71,6 +71,7 @@ def format_post_detail(
     user_reaction: str | None = None,
     reactions=None,
     reposted_data: dict | None = None,
+    viewer_user_id: UUID | None = None,
 ) -> dict:
     """
     Format a Post model and its attachments into a dictionary matching PostDetailData schema.
@@ -79,6 +80,11 @@ def format_post_detail(
 
     content = post.content or {}
     state_value = post.state.value if hasattr(post.state, "value") else str(post.state)
+    is_repostable = (
+        True
+        if viewer_user_id is None
+        else viewer_user_id != post.author_user_id
+    )
     data = {
         "id": post.id,
         "author_user_id": post.author_user_id,
@@ -99,6 +105,7 @@ def format_post_detail(
         "is_liked": is_liked,
         "is_reposted": is_reposted,
         "is_bookmarked": is_bookmarked,
+        "is_repostable": is_repostable,
         "user_reaction": user_reaction,
         "reactions": (
             reactions.model_dump()
@@ -155,6 +162,7 @@ def format_repost_item(
     reactions=None,
     moderator_user=None,
     moderator_profile=None,
+    viewer_user_id: UUID | None = None,
 ) -> dict:
     """
     Format a repost as a common post object for the reposter, with the original
@@ -174,6 +182,7 @@ def format_repost_item(
         user_reaction=user_reaction,
         reactions=reactions,
         reposted_data=None,
+        viewer_user_id=viewer_user_id,
     )
 
     rp_photo = None
@@ -188,9 +197,17 @@ def format_repost_item(
         else PostReactionsGrouped().model_dump()
     )
 
+    reposter_user_id = getattr(reposter_profile, "user_id", None)
+    # Outer card author is the reposter; nested uses the original author.
+    is_repostable = (
+        True
+        if viewer_user_id is None
+        else viewer_user_id != original_post.author_user_id
+    )
+
     data = {
         "id": repost_id,
-        "author_user_id": getattr(reposter_profile, "user_id", None),
+        "author_user_id": reposter_user_id,
         "first_name": getattr(reposter_profile, "first_name", None) if reposter_profile else None,
         "last_name": getattr(reposter_profile, "last_name", None) if reposter_profile else None,
         "profilePhoto_url": rp_photo,
@@ -211,6 +228,7 @@ def format_repost_item(
         "is_liked": is_liked,
         "is_reposted": True,
         "is_bookmarked": is_bookmarked,
+        "is_repostable": is_repostable,
         "user_reaction": user_reaction,
         "reactions": reactions_payload,
         "is_moderator_reviewed": original_post.is_moderator_reviewed,
@@ -1167,6 +1185,31 @@ async def list_user_posts_items_service(
     )
     latest_reactions = await load_latest_post_reactions(db, all_post_ids, per_type_limit=3)
 
+    from apps.connections.services.recommendation_service import get_user_connections
+    from apps.feed.services.profile_enrichment import (
+        load_profile_details,
+        load_requested_user_ids,
+    )
+
+    profiles_by_user_id: dict = {}
+    for post, author_profile, *_ in rows:
+        if author_profile is not None:
+            profiles_by_user_id[post.author_user_id] = author_profile
+    for _repost, post, author_profile, reposter_profile in repost_items:
+        if author_profile is not None:
+            profiles_by_user_id[post.author_user_id] = author_profile
+        reposter_user_id = getattr(reposter_profile, "user_id", None)
+        if reposter_profile is not None and reposter_user_id is not None:
+            profiles_by_user_id[reposter_user_id] = reposter_profile
+
+    connection_ids = await get_user_connections(db, current_user.id)
+    profile_details = await load_profile_details(db, profiles_by_user_id)
+    requested_user_ids = await load_requested_user_ids(
+        db,
+        current_user.id,
+        set(profiles_by_user_id),
+    )
+
     # Format authored posts (reposted_data is null)
     items = []
     for post, author_profile, mod_user, mod_profile in rows:
@@ -1176,12 +1219,16 @@ async def list_user_posts_items_service(
                 author_profile=author_profile,
                 moderator_user=mod_user,
                 moderator_profile=mod_profile,
+                is_connected=post.author_user_id in connection_ids,
+                is_requested=post.author_user_id in requested_user_ids,
+                profile_details=profile_details.get(post.author_user_id),
                 is_liked=engagement_flags.user_reaction_for(post.id) is not None,
                 is_reposted=post.id in engagement_flags.reposted_post_ids,
                 is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
                 user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
                 reactions=latest_reactions.get(post.id),
                 reposted_data=None,
+                viewer_user_id=current_user.id,
             )
         )
 
@@ -1190,6 +1237,7 @@ async def list_user_posts_items_service(
         # Skip if this post is already in the authored list
         if post.id in post_ids:
             continue
+        reposter_user_id = getattr(reposter_profile, "user_id", None)
         items.append(
             format_repost_item(
                 post,
@@ -1197,13 +1245,34 @@ async def list_user_posts_items_service(
                 reposter_profile=reposter_profile,
                 repost_id=repost.id,
                 reposted_at=repost.created_at,
+                original_author_is_connected=post.author_user_id in connection_ids,
+                original_author_is_requested=post.author_user_id in requested_user_ids,
+                reposter_is_connected=(
+                    reposter_user_id in connection_ids if reposter_user_id else False
+                ),
+                reposter_is_requested=(
+                    reposter_user_id in requested_user_ids if reposter_user_id else False
+                ),
+                original_author_details=profile_details.get(post.author_user_id),
+                reposter_details=(
+                    profile_details.get(reposter_user_id) if reposter_user_id else None
+                ),
                 is_liked=engagement_flags.user_reaction_for(post.id) is not None,
                 viewer_has_reposted=post.id in engagement_flags.reposted_post_ids,
                 is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
                 user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
                 reactions=latest_reactions.get(post.id),
+                viewer_user_id=current_user.id,
             )
         )
+
+    items.sort(
+        key=lambda item: (
+            item.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
+            str(item.get("id") or ""),
+        ),
+        reverse=True,
+    )
 
     total_items = total_items + len([ri for ri in repost_items if ri[1].id not in post_ids])
     return items, total_items
@@ -1233,8 +1302,15 @@ def _format_reviewed_post_item(
     moderator_profile=None,
     *,
     reactions=None,
+    report_count: int = 0,
+    viewer_user_id: UUID | None = None,
 ) -> dict:
     content = post.content or {}
+    is_repostable = (
+        True
+        if viewer_user_id is None
+        else viewer_user_id != post.author_user_id
+    )
 
     return {
         "id": post.id,
@@ -1249,6 +1325,8 @@ def _format_reviewed_post_item(
         "repost_count": getattr(post, "repost_count", 0) or 0,
         "share_count": getattr(post, "share_count", 0) or 0,
         "comment_count": getattr(post, "comment_count", 0) or 0,
+        "report_count": report_count,
+        "is_repostable": is_repostable,
         "moderator_id": post.moderator_id,
         "moderator_name": _resolve_moderator_name(moderator_user, moderator_profile),
         "profilePhoto_url": (
@@ -1345,6 +1423,7 @@ async def list_reviewed_posts_by_state_service(
     status: Literal["published", "flagged", "rejected", "reinstate"] | None = None,
     page: int | None = None,
     page_size: int | None = None,
+    viewer_user_id: UUID | None = None,
 ) -> dict:
     """List reviewed posts filtered by ``Post.state``.
 
@@ -1383,9 +1462,16 @@ async def list_reviewed_posts_by_state_service(
         limit=limit,
     )
     from apps.engagement.services.post_reaction_formatters import load_latest_post_reactions
+    from apps.report.repositories.report_repository import count_reports_by_entity_ids
+    from common.enums import ReportEntityType
 
     post_ids = [post.id for post, *_ in posts]
     latest_reactions = await load_latest_post_reactions(db, post_ids, per_type_limit=3)
+    report_counts = await count_reports_by_entity_ids(
+        db,
+        ReportEntityType.post,
+        post_ids,
+    )
     formatted = [
         _format_reviewed_post_item(
             post,
@@ -1393,6 +1479,8 @@ async def list_reviewed_posts_by_state_service(
             mod_user,
             mod_profile,
             reactions=latest_reactions.get(post.id),
+            report_count=report_counts.get(post.id, 0),
+            viewer_user_id=viewer_user_id,
         )
         for post, profile, mod_user, mod_profile in posts
     ]

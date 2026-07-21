@@ -4,6 +4,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from apps.connections.services.recommendation_service import get_user_connections
 from apps.engagement.repositories.bookmark_repository import (
     count_user_bookmarks,
     fetch_user_bookmarked_posts,
@@ -12,6 +13,10 @@ from apps.engagement.repositories.engagement_repository import fetch_post_engage
 from apps.engagement.schemas import BookmarkListData, BookmarkListResponse
 from apps.engagement.services.post_reaction_formatters import load_latest_post_reactions
 from apps.engagement.services.reaction_service import format_user_reaction
+from apps.feed.services.profile_enrichment import (
+    load_profile_details,
+    load_requested_user_ids,
+)
 from apps.feed.services.post_service import format_post_detail
 from common.pagination import build_paginated_response
 from common.responses import success_response
@@ -28,17 +33,35 @@ async def list_bookmarked_posts(
         post_ids = [post.id for post, *_ in rows]
         engagement_flags = await fetch_post_engagement_flags(db, user_id, post_ids)
         latest_reactions = await load_latest_post_reactions(db, post_ids, per_type_limit=3)
+
+        profiles_by_user_id = {
+            post.author_user_id: author_profile
+            for post, author_profile, *_ in rows
+            if author_profile is not None
+        }
+        connection_ids = await get_user_connections(db, user_id)
+        profile_details = await load_profile_details(db, profiles_by_user_id)
+        requested_user_ids = await load_requested_user_ids(
+            db,
+            user_id,
+            set(profiles_by_user_id),
+        )
+
         return [
             format_post_detail(
                 post,
                 author_profile=author_profile,
                 moderator_user=mod_user,
                 moderator_profile=mod_profile,
+                is_connected=post.author_user_id in connection_ids,
+                is_requested=post.author_user_id in requested_user_ids,
+                profile_details=profile_details.get(post.author_user_id),
                 is_liked=engagement_flags.user_reaction_for(post.id) is not None,
                 is_reposted=post.id in engagement_flags.reposted_post_ids,
                 is_bookmarked=True,
                 user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
                 reactions=latest_reactions.get(post.id),
+                viewer_user_id=user_id,
             )
             for post, author_profile, mod_user, mod_profile in rows
         ]

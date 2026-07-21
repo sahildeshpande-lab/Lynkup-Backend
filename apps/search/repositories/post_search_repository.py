@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from uuid import UUID
 
-from sqlalchemy import and_, cast, exists, false, func, or_, select
+from sqlalchemy import and_, cast, exists, false, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
@@ -125,15 +125,32 @@ def _resolve_edu_level(value: str) -> str | None:
     for level in EducationLevel:
         if level.value.lower() == raw.lower() or level.name.lower() == raw.lower():
             return level.value
-    return raw
+    return None
 
 
-def _profile_interest_contains(author_profile, interest_id: int):
-    """Match interest ids stored as JSON numbers or JSON strings."""
-    interests_json = cast(author_profile.profile_interests_id, JSONB)
+def _escape_like_exact(value: str) -> str:
+    """Escape LIKE wildcards so interest names match exactly (case-insensitive)."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
+def _profile_interest_contains(author_profile, interest_id):
+    """Match interest ids stored as JSON numbers or JSON strings.
+
+    ``interest_id`` may be a Python int or an ``AcademicInterest.id`` column.
+    """
+    from sqlalchemy import String
+
+    interests_json = func.coalesce(
+        cast(author_profile.profile_interests_id, JSONB),
+        cast(text("'[]'"), JSONB),
+    )
     return or_(
         interests_json.contains(func.jsonb_build_array(interest_id)),
-        interests_json.contains(func.jsonb_build_array(str(interest_id))),
+        interests_json.contains(func.jsonb_build_array(cast(interest_id, String))),
     )
 
 
@@ -150,58 +167,144 @@ def _hashtag_match_clause(values: list[str]):
     return or_(*clauses)
 
 
-def _university_match_clause(values: list[str]):
-    clauses = []
+def _university_match_clause(
+    values: list[str],
+    *,
+    university_id_column=None,
+):
+    """Match authors/users at ANY of the selected universities (OR).
+
+    UUID values match ``university_id_column`` (preferred) or ``University.id``.
+    Non-UUID values match ``University.name`` exactly (case-insensitive).
+    """
+    id_values: list[UUID] = []
+    name_values: list[str] = []
     for value in values:
-        university_id = _try_parse_uuid(value)
+        cleaned = value.strip()
+        if not cleaned:
+            continue
+        university_id = _try_parse_uuid(cleaned)
         if university_id is not None:
-            clauses.append(University.id == university_id)
+            id_values.append(university_id)
         else:
-            clauses.append(University.name.ilike(value))
+            name_values.append(cleaned)
+
+    clauses = []
+    if id_values:
+        id_column = university_id_column if university_id_column is not None else University.id
+        clauses.append(id_column.in_(id_values))
+    for name in name_values:
+        clauses.append(
+            University.name.ilike(_escape_like_exact(name), escape="\\")
+        )
+    if not clauses:
+        return None
+    return or_(*clauses)
+
+
+def _country_match_clause(
+    values: list[str],
+    *,
+    country_id_column=None,
+):
+    """Match authors whose profile country is ANY of the selected values (OR).
+
+    UUID values match ``country_id_column`` (preferred) or ``Country.id``.
+    Non-UUID values match country name (exact, case-insensitive) or iso_code.
+    """
+    id_values: list[UUID] = []
+    name_or_code_values: list[str] = []
+    for value in values:
+        cleaned = value.strip()
+        if not cleaned:
+            continue
+        country_id = _try_parse_uuid(cleaned)
+        if country_id is not None:
+            id_values.append(country_id)
+        else:
+            name_or_code_values.append(cleaned)
+
+    clauses = []
+    if id_values:
+        id_column = country_id_column if country_id_column is not None else Country.id
+        clauses.append(id_column.in_(id_values))
+    for term in name_or_code_values:
+        escaped = _escape_like_exact(term)
+        clauses.append(
+            or_(
+                func.lower(func.trim(Country.name)) == term.lower(),
+                Country.iso_code.ilike(escaped, escape="\\"),
+            )
+        )
     if not clauses:
         return None
     return or_(*clauses)
 
 
 def _edu_level_match_clause(author_profile, values: list[str]):
-    resolved_levels = []
-    for value in values:
-        resolved = _resolve_edu_level(value)
-        if resolved:
-            resolved_levels.append(resolved)
-    if not resolved_levels:
+    """Match posts whose author has ANY of the selected education levels (OR).
+
+    Selecting Bachelors|Masters returns authors with either level.
+    Unknown filter values do not match any posts (fail closed).
+    """
+    cleaned = [value.strip() for value in values if value and str(value).strip()]
+    if not cleaned:
         return None
-    return or_(*[author_profile.edu_level.ilike(level) for level in resolved_levels])
+
+    resolved_levels: list[str] = []
+    seen: set[str] = set()
+    for value in cleaned:
+        resolved = _resolve_edu_level(value)
+        if not resolved:
+            continue
+        key = resolved.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved_levels.append(resolved)
+
+    if not resolved_levels:
+        return false()
+
+    return or_(
+        *[
+            func.lower(func.trim(author_profile.edu_level)) == level.lower()
+            for level in resolved_levels
+        ]
+    )
 
 
 def _academic_interest_match_clause(author_profile, values: list[str]):
-    clauses = []
-    for value in values:
-        if value.isdigit():
-            # Require a real academic_interests row so edu-level ids don't false-match.
-            clauses.append(
-                exists(
-                    select(1).where(
-                        AcademicInterest.id == int(value),
-                        AcademicInterest.is_active.is_(True),
-                        _profile_interest_contains(author_profile, AcademicInterest.id),
-                    )
-                )
-            )
-            continue
-        # Exact case-insensitive name match to avoid substring false positives.
-        clauses.append(
-            exists(
-                select(1).where(
-                    AcademicInterest.is_active.is_(True),
-                    AcademicInterest.name.ilike(value),
-                    _profile_interest_contains(author_profile, AcademicInterest.id),
-                )
-            )
-        )
-    if not clauses:
+    """Match posts whose author has ANY of the selected academic interests (OR).
+
+    Selecting A|B|C returns posts from authors who have A, or B, or C.
+    Interests with no matching authors simply contribute no rows; others still match.
+    """
+    cleaned = [value.strip() for value in values if value and value.strip()]
+    if not cleaned:
         return None
-    return or_(*clauses)
+
+    interest_id_values = [int(value) for value in cleaned if value.isdigit()]
+    interest_name_values = [value for value in cleaned if not value.isdigit()]
+
+    interest_predicates = []
+    if interest_id_values:
+        interest_predicates.append(AcademicInterest.id.in_(interest_id_values))
+    for name in interest_name_values:
+        interest_predicates.append(
+            AcademicInterest.name.ilike(_escape_like_exact(name), escape="\\")
+        )
+    if not interest_predicates:
+        return None
+
+    # Single EXISTS: interest row matches ANY selected filter AND is on the author profile.
+    return exists(
+        select(1).where(
+            AcademicInterest.is_active.is_(True),
+            or_(*interest_predicates),
+            _profile_interest_contains(author_profile, AcademicInterest.id),
+        )
+    )
 
 
 def _build_search_filters(
@@ -214,7 +317,7 @@ def _build_search_filters(
     university_name: str | list[str] | None,
     major: str | None,
     minor: str | None,
-    country: str | None,
+    country: str | list[str] | None,
     edu_level: str | list[str] | None,
     author_profile,
     author_user,
@@ -261,10 +364,18 @@ def _build_search_filters(
 
     if query and query.strip():
         term = query.strip()
+        author_full_name = func.concat(
+            func.coalesce(author_profile.first_name, ""),
+            " ",
+            func.coalesce(author_profile.last_name, ""),
+        )
         filters.append(
             or_(
                 Post.content["caption"].astext.ilike(f"%{term}%"),
                 Post.content["content_html"].astext.ilike(f"%{term}%"),
+                author_profile.first_name.ilike(f"%{term}%"),
+                author_profile.last_name.ilike(f"%{term}%"),
+                author_full_name.ilike(f"%{term}%"),
             )
         )
 
@@ -283,13 +394,17 @@ def _build_search_filters(
             )
         )
 
+    # Author-profile academic interests (OR across selected interests).
     interest_clause = _academic_interest_match_clause(
         author_profile, _split_filter_values(academic_interest)
     )
     if interest_clause is not None:
         filters.append(interest_clause)
 
-    university_clause = _university_match_clause(_split_filter_values(university_name))
+    university_clause = _university_match_clause(
+        _split_filter_values(university_name),
+        university_id_column=author_profile.university_id,
+    )
     if university_clause is not None:
         filters.append(university_clause)
 
@@ -299,18 +414,13 @@ def _build_search_filters(
     if minor and minor.strip():
         filters.append(author_profile.minor.ilike(f"%{minor.strip()}%"))
 
-    if country and country.strip():
-        country_term = country.strip()
-        country_id = _try_parse_uuid(country_term)
-        if country_id is not None:
-            filters.append(Country.id == country_id)
-        else:
-            filters.append(
-                or_(
-                    Country.name.ilike(f"%{country_term}%"),
-                    Country.iso_code.ilike(country_term),
-                )
-            )
+    # Author-profile country (OR across selected countries).
+    country_clause = _country_match_clause(
+        _split_filter_values(country),
+        country_id_column=author_profile.country_id,
+    )
+    if country_clause is not None:
+        filters.append(country_clause)
 
     edu_clause = _edu_level_match_clause(author_profile, _split_filter_values(edu_level))
     if edu_clause is not None:
@@ -339,7 +449,7 @@ async def count_search_posts(
     university_name: str | list[str] | None = None,
     major: str | None = None,
     minor: str | None = None,
-    country: str | None = None,
+    country: str | list[str] | None = None,
     edu_level: str | list[str] | None = None,
 ) -> int:
     author_profile = aliased(Profile, name="author_profile")
@@ -382,7 +492,7 @@ async def search_posts_with_details(
     university_name: str | list[str] | None = None,
     major: str | None = None,
     minor: str | None = None,
-    country: str | None = None,
+    country: str | list[str] | None = None,
     edu_level: str | list[str] | None = None,
     offset: int = 0,
     limit: int | None = None,

@@ -199,8 +199,25 @@ async def test_login_rejects_social_account_without_password_hash(mock_db):
     response = await auth_svc.login(payload, {"uid": user.firebase_uid, "email": user.email}, db)
 
     assert response.status is False
-    assert "google" in response.message.lower()
+    assert response.message == (
+        "This account uses Google Sign-In. Use Google or reset your password."
+    )
 
+
+@pytest.mark.asyncio
+async def test_login_rejects_apple_account_without_password_hash(mock_db):
+    user = _user(password_hash=None, registration_type="apple")
+    payload = SimpleNamespace(email=user.email, device_id="device-1", password="Secret123")
+    db = mock_db()
+
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: user))
+
+    response = await auth_svc.login(payload, {"uid": user.firebase_uid, "email": user.email}, db)
+
+    assert response.status is False
+    assert response.message == (
+        "This account uses Apple Sign-In. Use Apple or reset your password."
+    )
 
 @pytest.mark.asyncio
 async def test_logout_clears_email_verification(mock_db):

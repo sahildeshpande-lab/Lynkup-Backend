@@ -165,3 +165,25 @@ async def test_repost_non_published_post_fails(mock_db):
             await svc.toggle_repost(db, uuid.uuid4(), post.id, is_reposted=True)
 
     assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_repost_own_post_fails(mock_db):
+    author_id = uuid.uuid4()
+    post = _post()
+    post.author_user_id = author_id
+    db = mock_db()
+
+    with (
+        patch.object(svc, "get_post_for_update", AsyncMock(return_value=post)),
+        patch.object(svc, "get_profile_id_for_user", AsyncMock()) as get_profile,
+        patch.object(svc, "create_repost", AsyncMock()) as create_repost,
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await svc.toggle_repost(db, author_id, post.id, is_reposted=True)
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "You cannot repost your own post"
+    get_profile.assert_not_called()
+    create_repost.assert_not_called()
+    db.commit.assert_not_called()

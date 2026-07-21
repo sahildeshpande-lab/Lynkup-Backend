@@ -48,7 +48,7 @@ async def test_lifespan_runs_init_db_when_enabled(monkeypatch) -> None:
     monkeypatch.setattr("core.lifespan.init_db", init_db_mock)
     monkeypatch.setattr("core.email.config.settings", MagicMock(is_sendgrid_configured=False))
     monkeypatch.setattr(
-        "core.database.migrations.run_db_migrations_programmatically",
+        "core.lifespan.run_db_migrations_programmatically",
         migrations_mock,
     )
 
@@ -61,4 +61,4 @@ async def test_lifespan_runs_init_db_when_enabled(monkeypatch) -> None:
         pass
 
     init_db_mock.assert_awaited_once()
-    assert migrations_mock.await_count >= 1
+

@@ -76,10 +76,14 @@ def test_enums_and_bearer_token_helpers():
 
     active_user = SimpleNamespace(status=UserStatus.active, deleted_at=None)
     security_auth._ensure_active_user(active_user)
+    pending_user = SimpleNamespace(status=UserStatus.pending, deleted_at=None)
+    security_auth._ensure_active_user(pending_user)
     with pytest.raises(ApiError, match="Account doesn't exist"):
         security_auth._ensure_active_user(SimpleNamespace(status=UserStatus.active, deleted_at=datetime.now()))
     with pytest.raises(ApiError, match="Your account is banned"):
         security_auth._ensure_active_user(SimpleNamespace(status=UserStatus.banned, deleted_at=None))
+    with pytest.raises(ApiError, match="Your account is suspended"):
+        security_auth._ensure_active_user(SimpleNamespace(status=UserStatus.suspended, deleted_at=None))
 
 
 @pytest.mark.asyncio

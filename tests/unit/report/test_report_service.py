@@ -224,25 +224,75 @@ async def test_create_report_invalid_entity(mock_db, scalar_result):
 
 
 @pytest.mark.asyncio
-async def test_list_reports_admin_success(mock_db, scalar_result):
+async def test_get_reports_for_entity_success(mock_db):
     report_obj = _report()
     reporter_user = _user()
     reporter_profile = SimpleNamespace(first_name="John", last_name="Doe")
-
     rows = [(report_obj, reporter_user, reporter_profile, None, None)]
     db = mock_db()
 
-    with patch("apps.report.services.report_service.get_reports", AsyncMock(return_value=rows)), \
-         patch("apps.report.services.report_service.count_reports", AsyncMock(return_value=1)):
-        response = await svc.list_reports_admin_service(
+    with patch(
+        "apps.report.services.report_service.fetch_report_rows",
+        AsyncMock(return_value=rows),
+    ), patch(
+        "apps.report.services.report_service.count_report_rows",
+        AsyncMock(return_value=1),
+    ):
+        response = await svc.get_reports(
             db,
-            status=ReportStatus.under_review,
+            entity_type=ReportEntityType.post,
+            entity_id=report_obj.entity_id,
         )
 
     assert response.status is True
     assert len(response.data.items) == 1
+    assert response.data.items[0].who_reported_id == report_obj.reported_id
     assert response.data.items[0].reason == "Spam"
     assert response.data.items[0].reporter_details.first_name == "John"
+
+
+@pytest.mark.asyncio
+async def test_get_reported_entities_success(mock_db):
+    entity_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    queue_row = {
+        "entity_type": ReportEntityType.post,
+        "entity_id": entity_id,
+        "report_count": 3,
+        "status": ReportStatus.under_review,
+        "moderator_id": uuid.uuid4(),
+        "latest_reported_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }
+    entity_payload = {"id": entity_id, "caption": "Hello"}
+    db = mock_db()
+    viewer_id = uuid.uuid4()
+
+    with patch(
+        "apps.report.services.report_service.fetch_reported_entity_rows",
+        AsyncMock(return_value=[queue_row]),
+    ), patch(
+        "apps.report.services.report_service.count_reported_entities",
+        AsyncMock(return_value=1),
+    ), patch(
+        "apps.report.services.report_service._load_entities_for_queue",
+        AsyncMock(return_value={entity_id: entity_payload}),
+    ):
+        response = await svc.get_reported_entities(
+            db,
+            entity_type=ReportEntityType.post,
+            page=1,
+            page_size=20,
+            viewer_user_id=viewer_id,
+        )
+
+    assert response.status is True
+    assert response.message == "Reported entities fetched successfully."
+    assert response.data.totalItems == 1
+    assert response.data.items[0].report_count == 3
+    assert response.data.items[0].entity["caption"] == "Hello"
+    assert response.data.items[0].status == ReportStatus.under_review
 
 
 @pytest.mark.asyncio
@@ -260,7 +310,8 @@ async def test_review_report_admin_success(mock_db, scalar_result):
     payload = ReportReviewRequest(report_id=report_obj.id, status=ReportStatus.actioned, admin_comment="Resolved")
 
     with patch("apps.report.services.report_service.get_report_by_id", AsyncMock(side_effect=[row, updated_row])), \
-         patch("apps.report.services.report_service.update_report", AsyncMock(return_value=report_obj)):
+         patch("apps.report.services.report_service.update_report", AsyncMock(return_value=report_obj)), \
+         patch("apps.report.services.report_service.count_reports_by_entity_keys", AsyncMock(return_value={(report_obj.entity_type, report_obj.entity_id): 1})):
         response = await svc.review_report_admin_service(
             db,
             current_admin_id=admin_user.id,

@@ -11,12 +11,17 @@ from core.database.session import get_session
 from core.security.auth import get_current_app_user, get_current_moderator
 from apps.accounts.db_models import User
 from common.schemas import ApiResponse
-from apps.report.schemas import ReportListResponse, ReportResponse
+from apps.report.schemas import (
+    ReportListResponse,
+    ReportResponse,
+    ReportedEntityListResponse,
+)
 
 client = TestClient(app)
 
 _MOCK_USER_ID = uuid.uuid4()
 _MOCK_ADMIN_ID = uuid.uuid4()
+_MOCK_ENTITY_ID = uuid.uuid4()
 
 
 class _NoopSession:
@@ -77,17 +82,56 @@ def test_get_reports_admin_success():
         "totalItems": 0,
         "totalPages": 0,
     }
-    mock_response = ReportListResponse(status=True, message="Success", data=mock_data)
+    mock_response = ReportListResponse(
+        status=True,
+        message="Reports retrieved successfully.",
+        data=mock_data,
+    )
 
-    with patch("apps.report.routes.list_reports_admin_service", AsyncMock(return_value=mock_response)) as list_svc:
-        response = client.get("/api/v1/admin/reports")
+    with patch("apps.report.routes.get_reports", AsyncMock(return_value=mock_response)) as list_svc:
+        response = client.get(
+            "/api/v1/admin/reports",
+            params={
+                "entity_type": "post",
+                "entity_id": str(_MOCK_ENTITY_ID),
+            },
+        )
 
     assert response.status_code == status.HTTP_200_OK
     assert response.json()["status"] is True
     list_svc.assert_awaited_once()
 
 
-def test_get_report_details_admin_success():
+def test_get_reported_entities_admin_success():
+    mock_data = {
+        "items": [],
+        "page": 1,
+        "pageSize": 20,
+        "totalItems": 0,
+        "totalPages": 0,
+    }
+    mock_response = ReportedEntityListResponse(
+        status=True,
+        message="Reported entities fetched successfully.",
+        data=mock_data,
+    )
+
+    with patch(
+        "apps.report.routes.get_reported_entities",
+        AsyncMock(return_value=mock_response),
+    ) as detail_svc:
+        response = client.get(
+            "/api/v1/admin/reports/details",
+            params={"entity_type": "post"},
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["status"] is True
+    assert response.json()["message"] == "Reported entities fetched successfully."
+    detail_svc.assert_awaited_once()
+
+
+def test_get_report_by_id_admin_success():
     report_id = uuid.uuid4()
     mock_data = {
         "id": str(report_id),
@@ -101,7 +145,10 @@ def test_get_report_details_admin_success():
     }
     mock_response = ReportResponse(status=True, message="Success", data=mock_data)
 
-    with patch("apps.report.routes.get_report_details_admin_service", AsyncMock(return_value=mock_response)) as detail_svc:
+    with patch(
+        "apps.report.routes.get_report_details_admin_service",
+        AsyncMock(return_value=mock_response),
+    ) as detail_svc:
         response = client.get(f"/api/v1/admin/reports/{report_id}")
 
     assert response.status_code == status.HTTP_200_OK
@@ -147,7 +194,13 @@ def test_admin_routes_unauthorized():
 
     app.dependency_overrides[get_current_moderator] = _mock_unauthorized_moderator
     try:
-        response = client.get("/api/v1/admin/reports")
+        response = client.get(
+            "/api/v1/admin/reports",
+            params={
+                "entity_type": "post",
+                "entity_id": str(_MOCK_ENTITY_ID),
+            },
+        )
         assert response.status_code == status.HTTP_403_FORBIDDEN
         assert "Insufficient permissions" in response.json()["message"]
     finally:

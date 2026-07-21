@@ -39,6 +39,7 @@ class ReportUserRequest(BaseModel):
 class OnboardingRequest(BaseModel):
     profile_photo_key: Optional[str] = Field(None, description="S3 storage key returned by POST /uploads/image")
     banner_photo_key : Optional[str] = Field(None, description="S3 storage key returned by POST /uploads/image")
+    country_id: str
     university_id: str
     major: str
     minor: Optional[str] = None
