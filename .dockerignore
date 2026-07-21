@@ -1,0 +1,14 @@
+.git
+.idea
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.env
+.venv/
+venv/
+tests/
+docs/
+localsetup/

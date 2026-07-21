@@ -109,12 +109,13 @@ async def test_auto_provision_new_user(db_session: AsyncSession):
     assert any(e.event_type == SecurityEventType.LOGIN_SUCCESS for e in events)
 
 @pytest.mark.asyncio
-async def test_deleted_account_raises_403(db_session: AsyncSession):
+async def test_deleted_account_raises_api_error(db_session: AsyncSession):
+    from common.exceptions import ApiError
+
     uid = str(uuid.uuid4())
     email = f"del_{uid[:8]}@example.com"
     user = User(
         firebase_uid=uid,
-        
         email=email,
         status="active",
         onboarding_status="not_started",
@@ -126,13 +127,15 @@ async def test_deleted_account_raises_403(db_session: AsyncSession):
     await db_session.flush()
     await db_session.commit()
     firebase_claims = {"uid": uid, "email": email, "name": f"Deleted {uid[:8]}"}
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(ApiError) as exc:
         await get_current_user(firebase_user=firebase_claims, db=db_session)
-    assert exc.value.status_code == 403
-    assert "Account deleted" in exc.value.detail
+    assert "Account doesn't exist" in exc.value.message
+
 
 @pytest.mark.asyncio
-async def test_inactive_account_raises_401(db_session: AsyncSession):
+async def test_inactive_account_raises_api_error(db_session: AsyncSession):
+    from common.exceptions import ApiError
+
     uid = str(uuid.uuid4())
     email = f"inactive_{uid[:8]}@example.com"
     user = User(
@@ -147,10 +150,9 @@ async def test_inactive_account_raises_401(db_session: AsyncSession):
     await db_session.flush()
     await db_session.commit()
     firebase_claims = {"uid": uid, "email": email, "name": f"Inactive {uid[:8]}"}
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(ApiError) as exc:
         await get_current_user(firebase_user=firebase_claims, db=db_session)
-    assert exc.value.status_code == 401
-    assert "Account is suspended" in exc.value.detail
+    assert "Your account is suspended" in exc.value.message
 
 @pytest.mark.asyncio
 async def test_login_throttle_prevents_unnecessary_update(db_session: AsyncSession):
@@ -187,10 +189,14 @@ async def test_forgot_password_rate_limit(db_session: AsyncSession, monkeypatch)
     from apps.accounts.schemas import ForgotPasswordRequest
     from apps.accounts.db_models import PasswordResetToken
 
-    # Mock email service
+    # Mock email service — must return True so forgot_password commits the token
     async def mock_send(*args, **kwargs):
-        pass
-    monkeypatch.setattr("apps.accounts.services.send_reset_password_email", mock_send)
+        return True
+
+    monkeypatch.setattr(
+        "apps.accounts.services.password_service.send_reset_password_email",
+        mock_send,
+    )
 
     uid = str(uuid.uuid4())
     email = f"forgot_{uid[:8]}@example.com"

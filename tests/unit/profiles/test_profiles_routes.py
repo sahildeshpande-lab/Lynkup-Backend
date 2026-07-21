@@ -99,7 +99,7 @@ def test_get_me_requires_bearer_token() -> None:
     override = app.dependency_overrides.pop(get_current_user, None)
     try:
         response = client.get("/api/v1/myprofile")
-        assert response.status_code == 200
+        assert response.status_code == 401
         assert response.json()["status"] is False
     finally:
         if override:
@@ -205,14 +205,17 @@ def test_complete_onboarding_returns_success_payload(monkeypatch) -> None:
         bio,
         major,
         minor,
+        country_id,
         university_id,
         education_level_id,
         academic_interests,
         profile_photo_key,
         banner_photo_key,
         db,
+        invitation_code=None,
     ):
         assert education_level_id == 2
+        assert country_id == "22222222-2222-2222-2222-222222222222"
         return {"user": {"email": user.email}, "onboarded": True}
 
     monkeypatch.setattr(profiles_services, "complete_onboarding", _mock_complete_onboarding)
@@ -222,6 +225,7 @@ def test_complete_onboarding_returns_success_payload(monkeypatch) -> None:
         json={
             "profile_photo_key": "profiles/test.png",
             "banner_photo_key": None,
+            "country_id": "22222222-2222-2222-2222-222222222222",
             "university_id": "11111111-1111-1111-1111-111111111111",
             "major": "Computer Science",
             "minor": "Math",

@@ -49,6 +49,7 @@ async def _search_universities(_params, _db) -> dict:
                  "name": "Kampu University",
                  "country": "United States",
                  "slug": "kampu-university",
+                 "website": None,
                  "major": [{"name": "Computer Science"}],
                  "minor": [{"name": "Psychology"}],
                  "academic_program": [{"name": "Undergraduate"}],
@@ -87,14 +88,20 @@ def test_university_search_returns_matches(monkeypatch) -> None:
 
 async def _get_academics_info(query, page, page_size, db) -> dict:
     return {
-        "interests": {
-            "items": [{"id": "int-1", "name": "Math"}],
-            "page": page,
-            "pageSize": page_size,
-            "totalItems": 1,
-            "totalPages": 1,
-        },
-        "educationLevels": [{"id": "1", "name": "Bachelors"}, {"id": "2", "name": "Masters"}],
+        "educationLevels": [
+            {
+                "id": "1",
+                "name": "Bachelors",
+                "interests": [{"id": "5", "name": "Chemistry"}],
+            },
+            {
+                "id": "2",
+                "name": "Masters",
+                "interests": [{"id": "1", "name": "Artificial Intelligence"}],
+            },
+        ],
+        "countries": {"items": [], "page": 1, "pageSize": 20, "totalItems": 0, "totalPages": 0},
+        "hashtags": {"items": [], "page": 1, "pageSize": 20, "totalItems": 0, "totalPages": 0},
     }
 
 
@@ -107,14 +114,63 @@ def test_get_academics_info_returns_success(monkeypatch) -> None:
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Academics info fetched successfully"
-    assert "interests" in body["data"]
+    assert "interests" not in body["data"]
     assert "educationLevels" in body["data"]
-    assert body["data"]["interests"]["items"][0]["name"] == "Math"
-    assert {"id": "1", "name": "Bachelors"} in body["data"]["educationLevels"]
+    assert body["data"]["educationLevels"][0] == {
+        "id": "1",
+        "name": "Bachelors",
+        "interests": [{"id": "5", "name": "Chemistry"}],
+    }
+    assert body["data"]["educationLevels"][1]["interests"][0]["name"] == "Artificial Intelligence"
+
+
+def test_create_academic_interest_returns_created(monkeypatch) -> None:
+    async def _create_academic_interest(name, education_level_id, db) -> dict:
+        assert name == "Data Science"
+        assert education_level_id == 1
+        return {
+            "id": "7",
+            "name": name,
+            "educationLevelId": str(education_level_id),
+            "isActive": True,
+        }
+
+    monkeypatch.setattr(
+        search_routes.services,
+        "create_academic_interest",
+        _create_academic_interest,
+    )
+
+    response = client.post(
+        "/api/v1/academic-interests",
+        json={"name": "  Data   Science  ", "educationLevelId": 1},
+    )
+
+    assert response.status_code == 201
+    assert response.json() == {
+        "status": True,
+        "message": "Academic interest created successfully",
+        "data": {
+            "id": "7",
+            "name": "Data Science",
+            "educationLevelId": "1",
+            "isActive": True,
+        },
+    }
 
 
 def test_search_users_route(monkeypatch) -> None:
-    async def _mock_search_users(current_user, db, query, page, page_size):
+    async def _mock_search_users(
+        current_user,
+        db,
+        query,
+        page,
+        page_size,
+        university_name=None,
+        edu_level=None,
+    ):
+        assert university_name == ["Kampu University|State University"]
+        assert edu_level == ["1"]
         return {
             "items": [
                 {
@@ -138,6 +194,8 @@ def test_search_users_route(monkeypatch) -> None:
         "/api/v1/search-user",
         params={
             "query": "John Kampu CS Math Bachelors",
+            "university_name": "Kampu University|State University",
+            "edu_level": "1",
             "page": 1,
             "pageSize": 10,
         },

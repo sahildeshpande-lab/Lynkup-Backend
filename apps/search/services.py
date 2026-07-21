@@ -55,6 +55,7 @@ async def search_universities(params: UniversitySearchParams, db: AsyncSession) 
             "name": university.name,
             "country": country_name or "Unknown",
             "slug": university.slug,
+            "website": university.website,
             "major": university.major,
             "minor": university.minor,
             "academic_program": university.academic_program,
@@ -68,11 +69,10 @@ async def search_universities(params: UniversitySearchParams, db: AsyncSession) 
 
 async def get_academic_interests(
     query: Optional[str],
-    page: int,
-    page_size: int,
+    page: int | None,
+    page_size: int | None,
     db: AsyncSession,
 ) -> dict:
-    # Build count and select queries
     count_stmt = select(func.count()).select_from(AcademicInterest).where(AcademicInterest.is_active == True)
     stmt = select(AcademicInterest).where(AcademicInterest.is_active == True).order_by(AcademicInterest.name.asc())
 
@@ -86,16 +86,16 @@ async def get_academic_interests(
                 AcademicInterest.name.ilike(f"%{clean_query}%")
             ).order_by(similarity_score.desc(), AcademicInterest.name.asc())
 
-    # Execute count query
     total_items = int((await db.execute(count_stmt)).scalar_one())
+    if page is not None and page_size is not None:
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+        resolved_page = page
+        resolved_page_size = page_size
+    else:
+        resolved_page = 1
+        resolved_page_size = total_items if total_items > 0 else 1
 
-    # Execute select query with offset and limit
-    offset = (page - 1) * page_size
-    stmt = stmt.offset(offset).limit(page_size)
-    result = await db.execute(stmt)
-    orm_items = result.scalars().all()
-
-    # Format items into serializable list of dicts matching response schema
+    orm_items = list((await db.execute(stmt)).scalars().all())
     items = [
         {
             "id": str(item.id),
@@ -103,29 +103,188 @@ async def get_academic_interests(
         }
         for item in orm_items
     ]
-
-    # Build paginated response using common/pagination helper
-    paginated = build_paginated_response(items, page, page_size, total_items)
+    paginated = build_paginated_response(items, resolved_page, resolved_page_size, total_items)
     return paginated.model_dump()
+
+
+async def create_academic_interest(
+    name: str,
+    education_level_id: int,
+    db: AsyncSession,
+) -> dict:
+    from apps.profiles.db_models.education_level_db_model import EducationLevel
+    from apps.profiles.services.interest_service import _find_existing_academic_interest
+    from common.exceptions import ApiError
+    from sqlalchemy.exc import IntegrityError
+
+    education_level = (
+        await db.execute(
+            select(EducationLevel).where(
+                EducationLevel.id == education_level_id,
+                EducationLevel.is_active == True,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+    if education_level is None:
+        raise ApiError("Education level not found")
+
+    # Reject exact matches (any casing) and near-duplicates with minor spelling variations.
+    existing = await _find_existing_academic_interest(name, db)
+    if existing is not None:
+        raise ApiError("Academic interest already exists")
+
+    interest = AcademicInterest(
+        name=name,
+        education_level_id=education_level_id,
+        is_active=True,
+    )
+    db.add(interest)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise ApiError("Academic interest already exists") from None
+    await db.refresh(interest)
+
+    return {
+        "id": str(interest.id),
+        "name": interest.name,
+        "educationLevelId": str(interest.education_level_id),
+        "isActive": interest.is_active,
+    }
+
+
+async def _get_education_levels_with_interests(
+    db: AsyncSession,
+    *,
+    query: Optional[str],
+) -> list[dict]:
+    """Return education levels with nested academic interests."""
+    from apps.profiles.db_models.education_level_db_model import EducationLevel
+
+    levels = list(
+        (
+            await db.execute(
+                select(EducationLevel)
+                .where(EducationLevel.is_active == True)  # noqa: E712
+                .order_by(EducationLevel.id.asc())
+            )
+        ).scalars().all()
+    )
+
+    interests_stmt = (
+        select(AcademicInterest)
+        .where(AcademicInterest.is_active == True)  # noqa: E712
+        .order_by(AcademicInterest.name.asc())
+    )
+    clean_query = (query or "").strip()
+    if clean_query:
+        similarity_score = func.similarity(AcademicInterest.name, clean_query)
+        interests_stmt = (
+            select(AcademicInterest)
+            .where(
+                AcademicInterest.is_active == True,  # noqa: E712
+                AcademicInterest.name.ilike(f"%{clean_query}%"),
+            )
+            .order_by(similarity_score.desc(), AcademicInterest.name.asc())
+        )
+
+    interests = list((await db.execute(interests_stmt)).scalars().all())
+    interests_by_level: dict[int, list[dict]] = {}
+    for interest in interests:
+        interests_by_level.setdefault(interest.education_level_id, []).append(
+            {
+                "id": str(interest.id),
+                "name": interest.name,
+            }
+        )
+
+    return [
+        {
+            "id": str(level.id),
+            "name": level.name,
+            "interests": interests_by_level.get(level.id, []),
+        }
+        for level in levels
+    ]
+
+
+async def _get_allowed_countries(
+    db: AsyncSession,
+    *,
+    page: int | None,
+    page_size: int | None,
+) -> dict:
+    """Return all countries from the countries table."""
+    count_stmt = select(func.count()).select_from(Country)
+    stmt = select(Country).order_by(Country.name.asc())
+    total_items = int((await db.execute(count_stmt)).scalar_one())
+
+    if page is not None and page_size is not None:
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+        resolved_page = page
+        resolved_page_size = page_size
+    else:
+        resolved_page = 1
+        resolved_page_size = total_items if total_items > 0 else 1
+
+    rows = list((await db.execute(stmt)).scalars().all())
+    items = [
+        {
+            "id": str(country.id),
+            "name": country.name,
+            "iso_code": country.iso_code,
+        }
+        for country in rows
+    ]
+    return build_paginated_response(items, resolved_page, resolved_page_size, total_items).model_dump()
+
+
+async def _get_post_hashtags(
+    db: AsyncSession,
+    *,
+    page: int | None,
+    page_size: int | None,
+) -> dict:
+    """All hashtags from the hashtags table, ordered alphabetically."""
+    from apps.feed.db_models import Hashtag
+
+    count_stmt = select(func.count()).select_from(Hashtag)
+    total_items = int((await db.execute(count_stmt)).scalar_one())
+
+    stmt = select(Hashtag.id, Hashtag.tag).order_by(Hashtag.tag.asc())
+    if page is not None and page_size is not None:
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+        resolved_page = page
+        resolved_page_size = page_size
+    else:
+        resolved_page = 1
+        resolved_page_size = total_items if total_items > 0 else 1
+
+    rows = list((await db.execute(stmt)).all())
+    items = [
+        {
+            "id": str(row.id),
+            "tag": row.tag,
+        }
+        for row in rows
+    ]
+    return build_paginated_response(items, resolved_page, resolved_page_size, total_items).model_dump()
 
 
 async def get_academics_info(
     query: Optional[str],
-    page: int,
-    page_size: int,
+    page: int | None,
+    page_size: int | None,
     db: AsyncSession,
 ) -> dict:
-    from common.enums import EducationLevel
-    edu_levels = [{"id": str(level.id), "name": level.value} for level in EducationLevel]
-    interests_data = await get_academic_interests(
-        query=query,
-        page=page,
-        page_size=page_size,
-        db=db,
-    )
+    education_levels = await _get_education_levels_with_interests(db, query=query)
+    countries_data = await _get_allowed_countries(db, page=page, page_size=page_size)
+    hashtags_data = await _get_post_hashtags(db, page=page, page_size=page_size)
     return {
-        "educationLevels": edu_levels,
-        "interests": interests_data,
+        "educationLevels": education_levels,
+        "countries": countries_data,
+        "hashtags": hashtags_data,
     }
 
 
@@ -133,6 +292,8 @@ async def search_users(
     current_user: User,
     db: AsyncSession,
     query: Optional[str] = None,
+    university_name: str | list[str] | None = None,
+    edu_level: str | list[str] | None = None,
     page: Optional[int] = None,
     page_size: Optional[int] = None,
 ) -> dict:
@@ -141,6 +302,11 @@ async def search_users(
     from apps.accounts.db_models import User, UserRole, Role
     from apps.profiles.db_models.profile_db_model import Profile
     from apps.profiles.db_models.university_db_model import University
+    from apps.search.repositories.post_search_repository import (
+        _edu_level_match_clause,
+        _split_filter_values,
+        _university_match_clause,
+    )
     from common.enums import UserStatus
     from apps.profiles.services import build_user_base_response
 
@@ -170,6 +336,19 @@ async def search_users(
 
     # Exclude current user
     stmt = stmt.where(User.id != current_user.id)
+
+    structured_filters = []
+    university_clause = _university_match_clause(
+        _split_filter_values(university_name),
+        university_id_column=Profile.university_id,
+    )
+    if university_clause is not None:
+        structured_filters.append(university_clause)
+    edu_clause = _edu_level_match_clause(Profile, _split_filter_values(edu_level))
+    if edu_clause is not None:
+        structured_filters.append(edu_clause)
+    if structured_filters:
+        stmt = stmt.where(and_(*structured_filters))
 
     # Fuzzy search query (pg_trgm)
     if query and query.strip():
@@ -216,6 +395,8 @@ async def search_users(
         User.deleted_at.is_(None)
     )
     count_stmt = count_stmt.where(User.id != current_user.id)
+    if structured_filters:
+        count_stmt = count_stmt.where(and_(*structured_filters))
     if query and query.strip():
         normalized_query = query.strip()
         search_terms = normalized_query.split()
@@ -274,10 +455,96 @@ async def search_users(
             apply_relationship_flags(user_data, flags_map, user.id)
             items.append(user_data)
 
-        return {
-            "items": items,
-            "page": 1,
-            "pageSize": len(items),
-            "totalItems": len(items),
-            "totalPages": 1
-        }
+    return {
+        "items": items,
+        "page": 1,
+        "pageSize": len(items),
+        "totalItems": len(items),
+        "totalPages": 1
+    }
+
+
+async def search_posts(
+    current_user: User,
+    db: AsyncSession,
+    *,
+    query: str | None = None,
+    hashtag: str | list[str] | None = None,
+    academic_interest: str | list[str] | None = None,
+    university_name: str | list[str] | None = None,
+    major: str | None = None,
+    minor: str | None = None,
+    country: str | list[str] | None = None,
+    edu_level: str | list[str] | None = None,
+    page: int | None = None,
+    page_size: int | None = None,
+) -> dict:
+    from apps.engagement.repositories import fetch_post_engagement_flags
+    from apps.engagement.services.reaction_service import format_user_reaction
+    from apps.feed.services.post_service import format_post_detail
+    from apps.search.repositories import count_search_posts, search_posts_with_details
+    from common.pagination import build_paginated_response
+
+    search_kwargs = {
+        "query": query,
+        "hashtag": hashtag,
+        "academic_interest": academic_interest,
+        "university_name": university_name,
+        "major": major,
+        "minor": minor,
+        "country": country,
+        "edu_level": edu_level,
+    }
+
+    async def _format_items(rows):
+        from apps.engagement.services.post_reaction_formatters import load_latest_post_reactions
+
+        post_ids = [post.id for post, *_ in rows]
+        engagement_flags = await fetch_post_engagement_flags(db, current_user.id, post_ids)
+        latest_reactions = await load_latest_post_reactions(db, post_ids, per_type_limit=3)
+        items = [
+            format_post_detail(
+                post,
+                author_profile=author_profile,
+                moderator_user=mod_user,
+                moderator_profile=mod_profile,
+                is_liked=engagement_flags.user_reaction_for(post.id) is not None,
+                is_reposted=post.id in engagement_flags.reposted_post_ids,
+                is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,
+                user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
+                reactions=latest_reactions.get(post.id),
+                viewer_user_id=current_user.id,
+            )
+            for post, author_profile, mod_user, mod_profile in rows
+        ]
+        for item in items:
+            item["reaction_count"] = item["like_count"]
+        return items
+
+    if page is not None and page_size is not None:
+        total = await count_search_posts(db, current_user.id, **search_kwargs)
+        rows = await search_posts_with_details(
+            db,
+            current_user.id,
+            **search_kwargs,
+            offset=(page - 1) * page_size,
+            limit=page_size,
+        )
+        items = await _format_items(rows)
+        return build_paginated_response(items, page, page_size, total).model_dump()
+
+    rows = await search_posts_with_details(
+        db,
+        current_user.id,
+        **search_kwargs,
+        offset=0,
+        limit=None,
+    )
+    items = await _format_items(rows)
+    return {
+        "items": items,
+        "page": 1,
+        "pageSize": len(items),
+        "totalItems": len(items),
+        "totalPages": 1 if items else 0,
+    }

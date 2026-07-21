@@ -14,12 +14,14 @@ async def complete_onboarding(
     bio: str | None ,
     major: str,
     minor: str | None,
+    country_id: str,
     university_id: str,
     education_level_id: int,
     academic_interests: list[str],
     profile_photo_key: str | None ,
     banner_photo_key :str | None ,
     db: AsyncSession,
+    invitation_code: str | None = None,
 ) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
     from sqlmodel import select
@@ -91,6 +93,24 @@ async def complete_onboarding(
         db.add(profile)
         await db.flush()
 
+    if country_id:
+        try:
+            country_uuid = UUID(str(country_id))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid country_id",
+            ) from exc
+        from apps.profiles.db_models.country_db_model import Country
+        country = (await db.execute(select(Country).where(Country.id == country_uuid))).scalar_one_or_none()
+        if not country:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid country_id",
+            )
+        profile.country_id = country_uuid
+    profile_data["countryId"] = str(profile.country_id) if profile.country_id else None
+
     if university_id:
         try:
             profile.university_id = UUID(str(university_id))
@@ -129,6 +149,20 @@ async def complete_onboarding(
     db.add(user)
     db.add(profile)
     await db.flush()
+
+    if invitation_code:
+        from apps.invitations.services import redeem_invitation
+
+        invitation = await redeem_invitation(
+            db,
+            code=invitation_code,
+            redeemed_by_user_id=user.id,
+            commit=False,
+        )
+        user.referred_by_user_id = invitation.inviter_user_id
+        db.add(user)
+        await db.flush()
+
     profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
     await db.commit()

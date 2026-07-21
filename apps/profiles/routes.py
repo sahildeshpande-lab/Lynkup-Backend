@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import inspect
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database.session import get_session
-from core.security.auth import get_bearer_token, get_current_user
-from core.auth.dependencies import require_recent_auth
+from core.security.auth import get_bearer_token, get_current_user, get_current_app_user
 from apps.accounts.db_models import User
 from .schemas import (
     ApiResponse,
@@ -35,9 +35,14 @@ async def get_my_profile(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
+    service = services.get_my_profile_service
+    if "target_user_id" in inspect.signature(service).parameters:
+        data = await service(current_user, db, target_user_id=user_id)
+    else:
+        data = await service(current_user, db)
     return ApiResponse(
         message="Profile retrieved successfully",
-        data=await services.get_my_profile_service(current_user, db, target_user_id=user_id)
+        data=data,
     )
 
 
@@ -68,9 +73,9 @@ async def update_profile(
     )
 
 
-@router.delete("/users/me/deletion", response_model=ApiResponse, dependencies=[Depends(require_recent_auth)])
+@router.delete("/users/me/deletion", response_model=ApiResponse)
 async def delete_me(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     data = await services.delete_user_me(current_user, db)
@@ -88,12 +93,14 @@ async def complete_onboarding(
         user=current_user,
         profile_photo_key=payload.profile_photo_key,
         banner_photo_key=payload.banner_photo_key,
+        country_id=payload.country_id,
         university_id=payload.university_id,
         major=payload.major,
         minor=payload.minor,
         education_level_id=payload.education_level_id,
         bio=payload.bio,
         academic_interests=payload.academic_interests,
+        invitation_code=payload.invitation_code,
         db=db,
     )
     return ApiResponse(message="onboarding completed", data=data)
@@ -116,6 +123,5 @@ async def update_profile_visibility(
 @router.get("/users/{email}", response_model=ApiResponse)
 def get_public_profile(email: str) -> ApiResponse:
     return ApiResponse(message="public profile fetched", data=services.get_public_profile(email))
-
 
 

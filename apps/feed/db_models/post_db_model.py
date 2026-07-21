@@ -48,6 +48,10 @@ class Post(SQLModel, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    like_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
+    repost_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
+    share_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
+    comment_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
 
     attachments: List["PostAttachment"] = Relationship(
         sa_relationship=relationship("PostAttachment", back_populates="post", cascade="all, delete-orphan", lazy="selectin")
@@ -63,6 +67,15 @@ class Post(SQLModel, table=True):
     )
     reactions: List["PostReaction"] = Relationship(
         sa_relationship=relationship("PostReaction", back_populates="post", cascade="all, delete-orphan", lazy="selectin")
+    )
+    bookmarks: List["Bookmark"] = Relationship(
+        sa_relationship=relationship("Bookmark", back_populates="post", cascade="all, delete-orphan", lazy="selectin")
+    )
+    share_events: List["ShareEvent"] = Relationship(
+        sa_relationship=relationship("ShareEvent", back_populates="post", cascade="all, delete-orphan", lazy="selectin")
+    )
+    comments: List["Comment"] = Relationship(
+        sa_relationship=relationship("Comment", back_populates="post", cascade="all, delete-orphan", lazy="selectin")
     )
     link_previews: List["LinkPreview"] = Relationship(
         sa_relationship=relationship("LinkPreview", back_populates="post", cascade="all, delete-orphan", lazy="selectin")

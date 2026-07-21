@@ -21,7 +21,7 @@ class EmailSettings(BaseSettings):
         alias="SENDGRID_FROM_EMAIL",
     )
     base_url: str = Field(default="http://localhost:8000", alias="BASE_URL")
-    logo_url: str = Field(default="/static/images/logo.png", alias="LOGO_URL")
+    logo_url: str = Field(default="https://kampulynk-dev-spaces.sfo3.digitaloceanspaces.com/logo/logo.png",alias="LOGO_URL")
     otp_expire_minutes: int = Field(default=10, alias="OTP_EXPIRE_MINUTES")
     password_reset_token_expire_minutes: int = Field(
         default=60,

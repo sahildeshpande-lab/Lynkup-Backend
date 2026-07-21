@@ -9,12 +9,15 @@ from apps.accounts.schemas import LogoutRequest
 
 
 @pytest.mark.asyncio
-async def test_logout_deletes_current_installation(db_scalar_result, db_scalars_result, monkeypatch):
+async def test_logout_deactivates_current_installation(db_scalar_result, db_scalars_result, monkeypatch):
     from apps.accounts.services import logout
 
     user = MagicMock()
     user.id = uuid4()
     user.firebase_uid = None
+    user.email_verified_at = "verified"
+    user.email_otp = "1234"
+    user.email_otp_created_at = "now"
     installation = MagicMock()
     installation.is_active = True
     installation.last_active_at = None
@@ -40,6 +43,8 @@ async def test_logout_deletes_current_installation(db_scalar_result, db_scalars_
     )
 
     assert result is None
-    mock_db.delete.assert_awaited_once_with(installation)
-    mock_db.add.assert_not_called()
+    mock_db.delete.assert_not_called()
+    assert installation.is_active is False
+    assert user.email_verified_at is None
+    mock_db.add.assert_called()
     mock_db.commit.assert_awaited_once()

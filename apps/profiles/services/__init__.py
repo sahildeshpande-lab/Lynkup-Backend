@@ -7,7 +7,7 @@ from . import response_service as _service_module_0
 from .response_service import _normalize_name_part, _compose_full_name, build_user_base_response
 
 from . import interest_service as _service_module_1
-from .interest_service import _resolve_academic_interest_ids
+from .interest_service import _find_existing_academic_interest, _resolve_academic_interest_ids
 
 from . import completeness_service as _service_module_2
 from .completeness_service import get_completeness_weights, calculate_completeness_score, update_completeness_weights
@@ -42,6 +42,7 @@ __all__ = [
     "_normalize_name_part",
     "_compose_full_name",
     "build_user_base_response",
+    "_find_existing_academic_interest",
     "_resolve_academic_interest_ids",
     "get_completeness_weights",
     "calculate_completeness_score",

@@ -1,17 +1,17 @@
-<!-- Section Heading -->
-<h2 style="margin: 0 0 10px; font-size: 18px; font-weight: 700; color: #071A35; font-family: Arial, Helvetica, sans-serif;">
-  {{header}}
-</h2>
-
-<!-- Body Text -->
-<p style="margin: 0 0 24px; font-size: 14px; color: {{text_secondary}}; font-family: Arial, Helvetica, sans-serif; line-height: 1.6;">
-  {{body_text}}
+<p class="body-text" style="margin: 0 0 24px; color: #475569;">
+  Hello,<br><br>
+  Use the one-time password (OTP) below to verify your email address and securely access your account.
 </p>
 
-<!-- OTP Display Box (rendered dynamically in Python) -->
-{{otp_display}}
+<!-- Dynamic OTP Display -->
+<div style="margin: 0 0 24px;">
+  {{otp_display}}
+</div>
 
-<!-- Expiry Warning -->
-<p style="margin: 20px 0 0; font-size: 13px; color: {{text_secondary}}; font-family: Arial, Helvetica, sans-serif; line-height: 1.5;">
+<p class="muted-text" style="margin: 0 0 16px; font-size: 14px; color: #64748B;">
   This code expires in {{otp_expire_minutes}} minutes. Please do not share it with anyone.
+</p>
+
+<p class="muted-text" style="margin: 0; font-size: 14px; color: #64748B;">
+  If you did not request this code, please ignore this email or contact support if you have concerns.
 </p>

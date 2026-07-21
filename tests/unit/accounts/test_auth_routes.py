@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from fastapi.testclient import TestClient
 
@@ -9,6 +10,12 @@ from apps.accounts import routes as auth_routes
 from apps.accounts.schemas import ApiResponse, AuthSessionResponse, AuthUserResponse
 
 client = TestClient(app)
+
+_SOCIAL_AUTH_PAYLOAD = {
+    "loginType": "google",
+    "firebaseId": "google_test_token",
+    "device_id": "test-device-001",
+}
 
 
 class _NoopSession:
@@ -204,10 +211,6 @@ async def _mock_forgot_password(payload, db) -> ApiResponse:
     return ApiResponse(status=True, message="Password reset link sent successfully")
 
 
-async def _mock_reset_password(payload, db) -> ApiResponse:
-    return ApiResponse(status=True, message="Password reset successful")
-
-
 def test_forgot_password_route(monkeypatch) -> None:
     monkeypatch.setattr(auth_routes.services, "forgot_password", _mock_forgot_password)
 
@@ -220,24 +223,6 @@ def test_forgot_password_route(monkeypatch) -> None:
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Password reset link sent successfully"
-
-
-def test_reset_password_route(monkeypatch) -> None:
-    monkeypatch.setattr(auth_routes.services, "reset_password", _mock_reset_password)
-
-    response = client.post(
-        "/api/v1/auth/reset-password",
-        json={
-            "token": "token-123",
-            "new_password": "NewPassword@123",
-            "firebaseId": "valid-firebase-id-token",
-        },
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] is True
-    assert body["message"] == "Password reset successful"
 
 
 def test_login_route_uses_login_request_schema(monkeypatch) -> None:
@@ -328,10 +313,6 @@ async def _mock_forgot_password(payload, db) -> ApiResponse:
     return ApiResponse(status=True, message="Password reset link sent successfully")
 
 
-async def _mock_reset_password(payload, db) -> ApiResponse:
-    return ApiResponse(status=True, message="Password reset successful")
-
-
 def test_forgot_password_route(monkeypatch) -> None:
     monkeypatch.setattr(auth_routes.services, "forgot_password", _mock_forgot_password)
 
@@ -346,24 +327,6 @@ def test_forgot_password_route(monkeypatch) -> None:
     assert body["message"] == "Password reset link sent successfully"
 
 
-def test_reset_password_route(monkeypatch) -> None:
-    monkeypatch.setattr(auth_routes.services, "reset_password", _mock_reset_password)
-
-    response = client.post(
-        "/api/v1/auth/reset-password",
-        json={
-            "token": "token-123",
-            "new_password": "NewPassword@123",
-            "firebaseId": "valid-firebase-id-token",
-        },
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] is True
-    assert body["message"] == "Password reset successful"
-
-
 def test_social_auth_route_login_success(monkeypatch) -> None:
     async def _mock_social_auth(payload, db):
         return {
@@ -375,16 +338,20 @@ def test_social_auth_route_login_success(monkeypatch) -> None:
                 "lastName": "Doe",
                 "email": "jane@example.com",
                 "role": "user",
+                "university_details": {
+                    "id": uuid.uuid4(),
+                    "university_name": "Test University",
+                },
                 "createdAt": datetime.now().isoformat(),
                 "updatedAt": datetime.now().isoformat(),
             },
-        }, False
+        }, False, "Login successful"
 
     monkeypatch.setattr(auth_routes, "social_auth_service", _mock_social_auth)
 
     response = client.post(
         "/api/v1/auth/social",
-        json={"provider": "google", "idToken": "google_test_token"},
+        json=_SOCIAL_AUTH_PAYLOAD,
     )
     assert response.status_code == 200
     body = response.json()
@@ -392,6 +359,7 @@ def test_social_auth_route_login_success(monkeypatch) -> None:
     assert body["message"] == "Login successful"
     assert body["data"]["accessToken"] == "access_token_123"
     assert body["data"]["user"]["email"] == "jane@example.com"
+    assert isinstance(body["data"]["user"]["university_details"]["id"], str)
 
 
 def test_social_auth_route_signup_success(monkeypatch) -> None:
@@ -408,13 +376,13 @@ def test_social_auth_route_signup_success(monkeypatch) -> None:
                 "createdAt": datetime.now().isoformat(),
                 "updatedAt": datetime.now().isoformat(),
             },
-        }, True
+        }, True, "Signup successful"
 
     monkeypatch.setattr(auth_routes, "social_auth_service", _mock_social_auth)
 
     response = client.post(
         "/api/v1/auth/social",
-        json={"provider": "google", "idToken": "google_test_token"},
+        json=_SOCIAL_AUTH_PAYLOAD,
     )
 
     assert response.status_code == 200
@@ -434,7 +402,7 @@ def test_social_auth_route_conflict(monkeypatch) -> None:
 
     response = client.post(
         "/api/v1/auth/social",
-        json={"provider": "google", "idToken": "google_test_token"},
+        json=_SOCIAL_AUTH_PAYLOAD,
     )
 
     assert response.status_code == 200
@@ -444,9 +412,11 @@ def test_social_auth_route_conflict(monkeypatch) -> None:
     assert body["data"] is None
 
 
-def test_social_auth_route_profile_photo_url(monkeypatch) -> None:
+def test_social_auth_route_passes_optional_fields(monkeypatch) -> None:
     async def _mock_social_auth(payload, db):
-        assert payload.profilePhotoUrl == "profiles/photo.png"
+        assert payload.device_id == "test-device-001"
+        assert payload.loginType == "google"
+        assert payload.fullName == "Jane Doe"
         return {
             "accessToken": "access_token_123",
             "refreshToken": "refresh_token_123",
@@ -459,17 +429,13 @@ def test_social_auth_route_profile_photo_url(monkeypatch) -> None:
                 "createdAt": datetime.now().isoformat(),
                 "updatedAt": datetime.now().isoformat(),
             },
-        }, True
+        }, True, "Signup successful"
 
     monkeypatch.setattr(auth_routes, "social_auth_service", _mock_social_auth)
 
     response = client.post(
         "/api/v1/auth/social",
-        json={
-            "provider": "google",
-            "idToken": "google_test_token",
-            "profilePhotoUrl": "profiles/photo.png"
-        }
+        json={**_SOCIAL_AUTH_PAYLOAD, "fullName": "Jane Doe"},
     )
 
     assert response.status_code == 200

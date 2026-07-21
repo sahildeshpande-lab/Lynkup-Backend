@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import logging
 from html import escape
 from pathlib import Path
@@ -45,8 +46,8 @@ async def _log_transactional_email(
     *,
     content: str | None = None,
     is_send: bool | None = None,
-    sent_at: datetime | None = None,
-    error_message: str | None = None,
+    # sent_at: datetime | None = None,
+    # error_message: str | None = None,
 ) -> None:
     """Create one transactional email log entry.
 
@@ -70,8 +71,8 @@ async def _log_transactional_email(
                 purpose=purpose,
                 subject=subject,
                 is_send=send_status,
-                sent_at=sent_at,
-                error_message=error_message,
+                # sent_at=sent_at,
+                # error_message=error_message,
                 attachment=attachment,
                 updated_at=datetime.now(timezone.utc),
             )
@@ -104,13 +105,10 @@ async def _deliver_email_via_sendgrid(to_email: str, subject: str, html_body: st
             subject=subject,
             html_content=html_body,
         )
+        if f"cid:{_LOGO_CID}" in html_body:
+            _attach_inline_logo(message)
         client = SendGridAPIClient(api_key)
         response = client.send(message)
-
-
-        print("STATUS:", response.status_code)
-        print("BODY:", response.body)
-        print("HEADERS:", response.headers)
         success = 200 <= response.status_code < 300
         if not success:
             message = f"SendGrid rejected email with status {getattr(response, 'status_code', None)}"
@@ -118,24 +116,22 @@ async def _deliver_email_via_sendgrid(to_email: str, subject: str, html_body: st
             return False, message
         return True, None
     except Exception as exc:
-            logger.exception("SendGrid exception")
-            return False, str(exc)
-        # message = str(exc)
-        # exc_name = type(exc).__name__
-        # if "UnauthorizedError" in exc_name or "401" in message or "Unauthorized" in message:
-        #     logger.warning(
-        #         "SendGrid API Key is unauthorized or invalid (401). "
-        #         "Simulating email delivery. Email details:\n"
-        #         "To: %s\n"
-        #         "Subject: %s\n"
-        #         "Body:\n%s\n",
-        #         to_email,
-        #         subject,
-        #         html_body,
-        #     )
-        #     return True, None
-        # logger.exception("Email send failed while delivering to %s", to_email)
-        # return False, message
+        message = str(exc)
+        exc_name = type(exc).__name__
+        if "UnauthorizedError" in exc_name or "401" in message or "Unauthorized" in message:
+            logger.warning(
+                "SendGrid API Key is unauthorized or invalid (401). "
+                "Simulating email delivery. Email details:\n"
+                "To: %s\n"
+                "Subject: %s\n"
+                "Body:\n%s\n",
+                to_email,
+                subject,
+                html_body,
+            )
+            return True, None
+        logger.exception("Email send failed while delivering to %s", to_email)
+        return False, message
 
 
 async def _actually_send_email_via_sendgrid(to_email: str, subject: str, html_body: str, from_email: str) -> bool:
@@ -176,8 +172,8 @@ async def _send_and_log_email(
                 db_log = (await session.execute(stmt)).scalars().first()
                 if db_log:
                     db_log.is_send = success
-                    db_log.sent_at = datetime.now(timezone.utc) if success else None
-                    db_log.error_message = error_message
+                    # db_log.sent_at = datetime.now(timezone.utc) if success else None
+                    # db_log.error_message = error_message
                     db_log.updated_at = datetime.now(timezone.utc)
                     session.add(db_log)
                     await session.commit()
@@ -194,8 +190,8 @@ async def _send_and_log_email(
                     purpose=purpose,
                     subject=subject,
                     is_send=success,
-                    sent_at=datetime.now(timezone.utc) if success else None,
-                    error_message=error_message,
+                    # sent_at=datetime.now(timezone.utc) if success else None,
+                    # error_message=error_message,
                     updated_at=datetime.now(timezone.utc),
                 )
                 session.add(log_entry)
@@ -370,14 +366,67 @@ def _render_template(template_name: str, context: dict[str, object], raw_keys: s
     return rendered
 
 
-def _render_email_layout(title: str, body_html: str) -> str:
-    base_url = email_settings.base_url.rstrip("/")
-    logo_path = email_settings.logo_url
-    logo_url = f"{base_url}{logo_path}"
+_DEFAULT_LOGO_URL = "https://kampulynk-dev-spaces.sfo3.digitaloceanspaces.com/logo/logo.png"
+_LOGO_CID = "kampulynk-logo"
+_LOGO_FILE = Path(__file__).resolve().parents[1] / "static" / "email" / "kampulynk-logo.png"
+
+
+def _resolve_logo_url(*, prefer_cid: bool = True) -> str:
+    """Return logo src for HTML.
+
+    Prefer cid: when the bundled logo file exists so SendGrid can embed it
+    inline (remote Spaces URLs are often blocked or fail to load in clients).
+    """
+    if prefer_cid and _LOGO_FILE.is_file():
+        return f"cid:{_LOGO_CID}"
+
+    logo_url = (email_settings.logo_url or os.getenv("LOGO_URL") or "").strip()
+    if logo_url.startswith(("http://", "https://")):
+        return logo_url
+    return _DEFAULT_LOGO_URL
+
+
+def _attach_inline_logo(message) -> None:
+    """Attach bundled logo as inline CID image when HTML references it."""
+    if not _LOGO_FILE.is_file():
+        return
+    try:
+        import base64
+
+        from sendgrid.helpers.mail import (
+            Attachment,
+            ContentId,
+            Disposition,
+            FileContent,
+            FileName,
+            FileType,
+        )
+    except Exception:
+        logger.exception("Could not import SendGrid attachment helpers for logo")
+        return
+
+    encoded = base64.b64encode(_LOGO_FILE.read_bytes()).decode("ascii")
+    attachment = Attachment(
+        FileContent(encoded),
+        FileName("kampulynk-logo.png"),
+        FileType("image/png"),
+        Disposition("inline"),
+        ContentId(_LOGO_CID),
+    )
+    message.add_attachment(attachment)
+
+
+def _render_email_layout(title: str, body_html: str, hero_text: str | None = None) -> str:
     return _render_template(
         "layouts/base_email.html",
-        {"title": title, "body_html": body_html, "logo_url": logo_url},
-        raw_keys={"body_html"},
+        {
+            "title": title,
+            "hero_text": hero_text
+            or "Our misison is to connect and empower university students to achieve their educational goals",
+            "body_html": body_html,
+            "logo_url": _resolve_logo_url(),
+        },
+        raw_keys={"body_html", "logo_url"},
     )
 
 
@@ -385,14 +434,18 @@ def _paragraphs(text: str) -> str:
     return "".join(f'<p style="margin:0 0 14px;">{escape(part)}</p>' for part in text.splitlines() if part.strip())
 
 
-def _otp_template_details(otp_purpose: str) -> tuple[str, str, str]:
+_VERIFICATION_HERO_TEXT = (
+    "Our misison is to connect and empower university students to achieve their educational goals."
+)
+
+
+def _otp_template_details(otp_purpose: str) -> tuple[str, str]:
+    """Return (subject_title, hero_text)."""
     match otp_purpose:
-        case "email_verification":
-            return ("Email Verification", "Email Verification", "To verify your email use this one time OTP")
         case "password_reset":
-            return ("Temporary Password", "Your Temporary Password", "Use this as one-time password to set your password")
-        case _:
-            return ("Email Verification", "Email Verification", "To verify your email use this one time OTP")
+            return ("Temporary Password", "Temporary Password")
+        case "email_verification" | _:
+            return ("Email Verification", _VERIFICATION_HERO_TEXT)
 
 
 def _build_otp_display_html(otp: str, brand_blue: str) -> str:
@@ -403,8 +456,9 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
     return (
         '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 8px 0 4px;">'
         "<tr>"
-        '<td align="center" style="padding: 28px 20px; background-color: #F8FAFC; border: 1.5px dashed #CBD5E1;">'
-        f'<span class="otp-font" style="font-size: 32px; font-weight: 700; color: #071A35; letter-spacing: 10px; font-family: \'Courier New\', Courier, monospace; display: inline-block; padding-left: 10px;">{spaced}</span>'
+        f'<td class="otp-card" align="center" style="padding: 28px 20px; background-color: #F8FAFC; border: 2px dashed {brand_blue}; border-radius: 12px;">'
+        f'<div class="otp-label" style="font-size: 10px; font-weight: 600; color: {brand_blue}; letter-spacing: 1.5px; text-transform: uppercase; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; margin-bottom: 12px;"></div>'
+        f'<span class="otp-font otp-digits" style="font-size: 30px; font-weight: 700; color: #0F172A; letter-spacing: 12px; font-family: \'Courier New\', Courier, monospace; display: inline-block; padding-left: 12px;">{spaced}</span>'
         "</td>"
         "</tr>"
         "</table>"
@@ -412,19 +466,21 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
 
 
 def build_otp_email_html(otp: str, otp_purpose: str = "email_verification") -> str:
-    title, header, body_text = _otp_template_details(otp_purpose)
+    title, hero_text = _otp_template_details(otp_purpose)
     otp_expire_minutes = email_settings.otp_expire_minutes
-    
+
     brand_blue = str(BRAND_COLORS.get("brand_blue", "#0B5FA5"))
     otp_display_html = _build_otp_display_html(otp, brand_blue)
 
-    raw_keys = {"otp_display"}
     body_html = _render_template(
         "auth/otp_email.html",
-        {"otp": otp, "header": header, "body_text": body_text, "otp_display": otp_display_html,"otp_expire_minutes":otp_expire_minutes},
-        raw_keys=raw_keys,
+        {
+            "otp_display": otp_display_html,
+            "otp_expire_minutes": otp_expire_minutes,
+        },
+        raw_keys={"otp_display"},
     )
-    return _render_email_layout(title, body_html)
+    return _render_email_layout(title, body_html, hero_text=hero_text)
 
 
 def _notification_template_name(notification_type: str) -> str:
@@ -506,11 +562,11 @@ async def send_otp_email(
     background_tasks: BackgroundTasks | None = None,
 ) -> bool:
     """Send OTP in the background. Users are actively waiting for this."""
-    title, _, _ = _otp_template_details(otp_purpose)
+    title, _ = _otp_template_details(otp_purpose)
     purpose = f"OTP: {otp_purpose}"
     subject = f"KampuLynk {title}"
     html_content = build_otp_email_html(otp, otp_purpose)
-    
+
     send_email_in_background(background_tasks, to_email, subject, html_content, purpose)
     return True
 
@@ -541,12 +597,15 @@ async def send_lynkup_response_email(to_email: str, response_status: str, full_n
     return await _queue_email(to_email, subject, html_content, purpose=purpose)
 
 
+_NEGATIVE_REVIEW_STATUSES = ("flag", "flagged", "reject", "rejected")
+
+
 def build_post_review_email_html(
     full_name: str | None = None,
-    review_status: str = "publish",
+    review_status: str = "published",
 ) -> str:
     greeting = f"Hi {full_name}," if full_name else "Hi,"
-    if review_status == "flag":
+    if review_status in _NEGATIVE_REVIEW_STATUSES:
         title = "Please Review Your Post"
         body = "A moderator has flagged your post. Please review your post and make the necessary updates before submitting it again."
     else:
@@ -567,7 +626,7 @@ async def send_post_review_email(
     full_name: str | None = None,
 ) -> bool:
     """Queue post review result email for cron delivery."""
-    if review_status == "flag":
+    if review_status in _NEGATIVE_REVIEW_STATUSES:
         subject = "KampuLynk Post Flagged"
         purpose = "Post Flagged"
     else:
@@ -649,17 +708,24 @@ async def send_reset_password_email(
     reset_link: str,
     background_tasks: BackgroundTasks | None = None,
 ) -> bool:
-    """Send password reset link in the background. Users are actively waiting for this."""
+    """Send password reset link. Delivers immediately when no BackgroundTasks is provided."""
     subject = "Reset Your Password"
     password_reset_expire_minutes = email_settings.password_reset_token_expire_minutes
     body_html = _render_template(
         "auth/password_reset_email.html",
-        {"reset_link": reset_link, "subject": subject , "password_reset_expire_minutes":password_reset_expire_minutes} ,
+        {"reset_link": reset_link, "subject": subject, "password_reset_expire_minutes": password_reset_expire_minutes},
         raw_keys={"reset_link"},
     )
     html_content = _render_email_layout(subject, body_html)
-    send_email_in_background(background_tasks, to_email, subject, html_content, "forget password")
-    return True
+    purpose = "forget password"
+
+    if background_tasks:
+        send_email_in_background(background_tasks, to_email, subject, html_content, purpose)
+        logger.info("Password reset email queued via BackgroundTasks for %s", to_email)
+        return True
+
+    logger.info("Password reset email sending immediately to %s", to_email)
+    return await _send_and_log_email(to_email, subject, html_content, purpose)
 
 
 def build_profile_updated_email_html(full_name: str | None = None) -> str:

@@ -18,6 +18,7 @@ from .schemas import (
     AdminUserStatusRequest,
     ApiResponse,
     AdminLoginRequest,
+    AdminSignupRequest,
     ChangePasswordRequest,
     AdminForgotPasswordRequest,
     AdminResetPasswordRequest,
@@ -25,6 +26,7 @@ from .schemas import (
 )
 from apps.accounts.schemas import EmailSignupRequest, RefreshTokenRequest, AdminAuthResponse
 from apps.profiles.schemas import CompletenessWeightsUpdateRequest, UpdateProfileRequest
+from apps.invitations.schemas import SoftDeleteInvitationRequest
 
 
 router = APIRouter(tags=["4] Admin Management"])
@@ -37,6 +39,15 @@ async def admin_signin(
     db: AsyncSession = Depends(get_session),
 ) -> AdminAuthResponse:
     return await services.admin_signin(payload, db)
+
+
+@router.post("/auth/admin/signup", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
+async def admin_signup(
+    payload: AdminSignupRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+) -> ApiResponse:
+    return await services.admin_signup(payload, db)
 
 @router.get("/me",response_model=ApiResponse)
 async def admin_me(
@@ -150,18 +161,9 @@ async def create_user_by_admin(
 async def get_user_by_admin(
     userId: UUID,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_moderator_or_viewer),
+    current_user=Depends(get_current_superadmin),
 ) -> ApiResponse:
     return ApiResponse(message="user fetched", data=await services.admin_get_user(userId, db))
-
-
-# @router.delete("/users/{userId:uuid}", response_model=ApiResponse)
-# async def delete_user_by_admin(
-#     userId: UUID,
-#     db: AsyncSession = Depends(get_session),
-#     current_user=Depends(get_current_superadmin),
-# ) -> ApiResponse:
-#     return ApiResponse(message="user deleted", data=await services.admin_delete_user(str(userId), db))
 
 
 @router.delete("/users/", response_model=ApiResponse)
@@ -170,7 +172,10 @@ async def delete_users_by_admin(
     db: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_superadmin),
 ) -> ApiResponse:
-    return ApiResponse(message="users deletion scheduled", data=await services.admin_delete_users(payload.userIds, db))
+    data = await services.admin_delete_users(payload.userIds, payload.role, db)
+    if not data["deleted_users"]:
+        return ApiResponse(status=True, message="No user found", data=data)
+    return ApiResponse(message="users deletion scheduled", data=data)
 
 
 @router.patch("/users/{userId}/status", response_model=ApiResponse)
@@ -202,6 +207,34 @@ async def edit_profile(
         current_user.id,
         payload,
         db,
+    )
+
+
+@router.post("/admin/onboarding", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
+async def admin_onboarding(
+    university_id: str = Form(...),
+    major: str = Form(...),
+    minor: str | None = Form(default=None),
+    education_level_id: int = Form(...),
+    Bio: str = Form(...),
+    academic_interests: str = Form(...),
+    profile_photo: UploadFile | None = File(default=None),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
+) -> ApiResponse:
+    return ApiResponse(
+        message="onboarding completed",
+        data=await services.admin_complete_onboarding(
+            current_user.id,
+            Bio,
+            major,
+            minor,
+            university_id,
+            education_level_id,
+            academic_interests,
+            profile_photo,
+            db,
+        ),
     )
 
 
@@ -256,9 +289,9 @@ async def list_processing_posts(
 
 @router.get("/admin/posts/reviewed", response_model=ApiResponse)
 async def list_reviewed_posts(
-    status: Literal["publish", "flag"] | None = Query(
+    status: Literal["published", "flagged", "rejected", "reinstate"] | None = Query(
         default=None,
-        description="Filter reviewed posts by moderator status",
+        description="Filter reviewed posts by status: published, flagged, rejected, reinstate",
     ),
     moderator_id: str | None = Query(
         default=None,
@@ -267,9 +300,9 @@ async def list_reviewed_posts(
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_moderator_or_viewer),
+    current_user=Depends(get_current_moderator),
 ) -> ApiResponse:
-    from apps.feed.services import list_reviewed_posts_service
+    from apps.feed.services import list_reviewed_posts_by_state_service
     from common.exceptions import ApiError
 
     _ = current_user
@@ -280,24 +313,55 @@ async def list_reviewed_posts(
         except ValueError as exc:
             raise ApiError("Invalid moderator_id") from exc
 
-    data = await list_reviewed_posts_service(
+    data = await list_reviewed_posts_by_state_service(
         db,
         moderator_id=target_moderator_id,
         status=status,
         page=page,
         page_size=pageSize,
+        viewer_user_id=current_user.id,
     )
     return ApiResponse(message="Posts fetched successfully", data=data)
 
 
-@router.patch("/posts/publish", response_model=ApiResponse)
+
+@router.get("/admin/invitations", response_model=ApiResponse)
+async def admin_list_invitations(
+    page: int | None = Query(default=None, ge=1),
+    pageSize: int | None = Query(default=None, ge=1, le=200),
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_admin),
+) -> ApiResponse:
+    """List all invitation codes (including expired, deactivated, converted, soft-deleted)."""
+    from apps.invitations.services import get_all_invitations
+
+    return await get_all_invitations(db, page=page, page_size=pageSize)
+
+
+@router.delete("/admin/invitations", response_model=ApiResponse)
+async def admin_soft_delete_invitation(
+    payload: SoftDeleteInvitationRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_admin),
+) -> ApiResponse:
+    """Soft-delete an invitation code. Preserves the row for audit history."""
+    from apps.invitations.services import soft_delete_invitation
+
+    return await soft_delete_invitation(
+        db,
+        code=payload.code,
+        admin_user_id=current_user.id,
+    )
+
+
+@router.patch("/admin/posts/reviewed", response_model=ApiResponse)
 async def admin_publish_or_flag_post(
     payload: AdminPublishPostRequest,
     db: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_moderator),
 ) -> ApiResponse:
     """
-    Publish or flag a post by moderator.
+    Moderate a post by setting its state: published, flagged, rejected, or reinstate.
     """
     from apps.feed.services import admin_publish_post_service, format_post_detail
     post = await admin_publish_post_service(
@@ -306,9 +370,14 @@ async def admin_publish_or_flag_post(
         admin_user_id=current_user.id,
         db=db
     )
+    _status_messages = {
+        "published": "Post published successfully",
+        "flagged": "Post flagged successfully",
+        "rejected": "Post rejected successfully",
+        "reinstate": "Post reinstated successfully",
+    }
     return ApiResponse(
         status=True,
-        message=f"Post {payload.status}ed successfully",
-        data=format_post_detail(post)
+        message=_status_messages.get(payload.status, "Post updated successfully"),
+        data=format_post_detail(post, viewer_user_id=current_user.id),
     )
-

@@ -12,6 +12,17 @@ class UserStatus(str, Enum):
     
     deleting = "deleting"
 
+
+def inactive_account_message(status: UserStatus | str | None) -> str:
+    status_value = status.value if hasattr(status, "value") else str(status or "").lower()
+    messages = {
+        UserStatus.banned.value: "Your account is banned ",
+        UserStatus.suspended.value: "Your account is suspended",
+        UserStatus.deleting.value: "Account doesn't exist ",
+        UserStatus.pending.value: "Your account is pending",
+    }
+    return messages.get(status_value, "Your account is not active")
+
 class AdminUserStatus(str, Enum):
     active = "active"
     suspended = "suspended"
@@ -69,6 +80,8 @@ class PostState(str, Enum):
     processing = "processing"
     published = "published"
     flagged = "flagged"
+    rejected = "rejected"
+    reinstate = "reinstate"
     hidden = "hidden"
     deleted = "deleted"
 
@@ -93,10 +106,28 @@ class MediaType(str, Enum):
 
 class ReactionType(str, Enum):
     like = "like"
-    love = "love"
     celebrate = "celebrate"
     insightful = "insightful"
+    support = "support"
     curious = "curious"
+
+
+class InvitationStatus(str, Enum):
+    active = "ACTIVE"
+    expired = "EXPIRED"
+    deactivated = "DEACTIVATED"
+
+
+class ReportEntityType(str, Enum):
+    user = "user"
+    post = "post"
+    comment = "comment"
+
+
+class ReportStatus(str, Enum):
+    under_review = "under_review"
+    rejected = "rejected"
+    actioned = "actioned"
 
 
 from typing import Literal

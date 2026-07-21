@@ -1,24 +1,31 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 
-from core.security.auth import get_current_app_user
 from apps.accounts.routes import router as accounts_router
 from apps.administration.routes import router as admin_router
+from apps.health_check.routes import router as health_check_router
 from apps.profiles.routes import router as profiles_router
 from apps.search.routes import router as search_router
 from apps.uploads.routes import router as uploads_router
 from apps.connections.routes import router as connections_router
 from apps.feed.routes import router as feed_router
+from apps.engagement.routes import router as engagement_router
 from apps.moderation.routes import router as moderation_router
+from apps.invitations.routes import router as invitations_router
+from apps.report.routes import router as report_router
 
 
 def build_router() -> APIRouter:
     router = APIRouter(prefix="/api/v1")
+    router.include_router(health_check_router)
     router.include_router(accounts_router)
     router.include_router(admin_router)
     router.include_router(moderation_router)
-    router.include_router(profiles_router, dependencies=[Depends(get_current_app_user)])
-    router.include_router(search_router, dependencies=[Depends(get_current_app_user)])
+    router.include_router(profiles_router)
+    router.include_router(search_router)
     router.include_router(uploads_router)
-    router.include_router(connections_router, dependencies=[Depends(get_current_app_user)])
+    router.include_router(connections_router)
+    router.include_router(engagement_router)
+    router.include_router(report_router)
     router.include_router(feed_router)
+    router.include_router(invitations_router)
     return router

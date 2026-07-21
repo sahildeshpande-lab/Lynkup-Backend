@@ -53,6 +53,10 @@ def get_media_type(content_type: str) -> str:
     return MediaType.other.value
 
 
+def _media_type_value(media_type: MediaType | str) -> str:
+    return media_type.value if hasattr(media_type, "value") else str(media_type)
+
+
 def _validate_upload_file(file: UploadFile, content: bytes, media_type: str) -> None:
     filename = file.filename or "uploaded file"
     if not content:
@@ -102,9 +106,10 @@ async def _build_media_asset(
     user_id: UUID,
     file: UploadFile,
     content: bytes,
+    media_type: MediaType | str | None = None,
 ) -> MediaAsset:
     content_type = file.content_type or ""
-    media_type = MediaType(get_media_type(content_type))
+    resolved_media_type = MediaType(_media_type_value(media_type)) if media_type is not None else MediaType(get_media_type(content_type))
 
     file_uuid = uuid.uuid4()
 
@@ -122,7 +127,7 @@ async def _build_media_asset(
     return MediaAsset(
         owner_user_id=user_id,
         key=key,
-        type=media_type,
+        type=resolved_media_type,
         original_filename=file.filename,
         mime_type=content_type,
         file_size=len(content),
@@ -142,7 +147,8 @@ def _media_asset_to_response(media_asset: MediaAsset) -> dict:
 async def upload_post_media_service(
     user_id: UUID,
     files: list[UploadFile],
-    db: AsyncSession,
+    media_types: list[MediaType | str] | None = None,
+    db: AsyncSession | None = None,
 ) -> list[dict]:
     """
     Validate uploaded files, save them using the storage utility,
@@ -153,22 +159,31 @@ async def upload_post_media_service(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="At least one file is required",
         )
+    if db is None:
+        raise ApiError("Database session is required")
     if len(files) > MAX_MEDIA_COUNT:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Maximum {MAX_MEDIA_COUNT} files allowed per request",
-        )
+        raise ApiError(f"Maximum {MAX_MEDIA_COUNT} files allowed per request")
+    if media_types is not None and len(media_types) != len(files):
+        raise ApiError("Each file must have a corresponding type")
 
     media_assets: list[MediaAsset] = []
-    for file in files:
+    for index, file in enumerate(files):
         content = await file.read()
-        media_type = get_media_type(file.content_type or "")
-        _validate_upload_file(file, content, media_type)
+        inferred_media_type = get_media_type(file.content_type or "")
+        requested_media_type = media_types[index] if media_types is not None else inferred_media_type
+        media_type = _media_type_value(requested_media_type)
+        if media_types is not None and media_type != inferred_media_type:
+            raise ApiError("Invalid file type for uploaded media")
+        try:
+            _validate_upload_file(file, content, media_type)
+        except HTTPException as exc:
+            raise ApiError(str(exc.detail)) from exc
 
         media_asset = await _build_media_asset(
             user_id=user_id,
             file=file,
             content=content,
+            media_type=media_type,
         )
         db.add(media_asset)
         media_assets.append(media_asset)

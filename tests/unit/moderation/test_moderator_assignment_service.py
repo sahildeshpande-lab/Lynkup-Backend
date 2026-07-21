@@ -122,7 +122,7 @@ async def test_save_post_assigns_moderators_round_robin(db_ready, monkeypatch) -
             await session.execute(select(User).where(User.id == author.id))
         ).scalar_one()
         post_one = await save_post_service(author_db.id, payload, session)
-        assert post_one.state == PostState.processing
+        assert post_one.state == PostState.published
         assert post_one.moderator_id == mod_a.id
 
     async with async_session_factory() as session:
@@ -141,12 +141,16 @@ async def test_save_post_assigns_moderators_round_robin(db_ready, monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_save_post_without_moderators_raises(db_ready, monkeypatch) -> None:
+async def test_save_post_without_moderators_soft_fails(db_ready, monkeypatch) -> None:
     async def _no_moderators(_db):
         return []
 
     monkeypatch.setattr(
         "apps.moderation.services.moderator_assignment_service._fetch_active_moderator_ids",
+        _no_moderators,
+    )
+    monkeypatch.setattr(
+        "apps.feed.services.post_service._fetch_active_moderator_ids",
         _no_moderators,
     )
 
@@ -165,5 +169,7 @@ async def test_save_post_without_moderators_raises(db_ready, monkeypatch) -> Non
         author_db = (
             await session.execute(select(User).where(User.id == author.id))
         ).scalar_one()
-        with pytest.raises(ApiError, match="No active moderators"):
-            await save_post_service(author_db.id, payload, session)
+        # Soft-fail: post is still created/published when no moderators are available.
+        post = await save_post_service(author_db.id, payload, session)
+        assert post.state == PostState.published
+        assert post.moderator_id is None

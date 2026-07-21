@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 from apps.accounts.db_models import User
 from ..schemas import ChangePasswordRequest, AdminForgotPasswordRequest, AdminResetPasswordRequest
 from apps.accounts.schemas import ApiResponse
-from sqlalchemy.orm import selectinload
+
 PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 
 async def admin_forgot_password(payload: AdminForgotPasswordRequest, db: AsyncSession) -> ApiResponse:
@@ -63,44 +63,54 @@ async def admin_forgot_password(payload: AdminForgotPasswordRequest, db: AsyncSe
 async def admin_reset_password(payload: AdminResetPasswordRequest, db: AsyncSession) -> ApiResponse:
     from apps.accounts.db_models import PasswordResetToken
     import uuid
-    now=datetime.now(timezone.utc)
 
-    if not payload.token:
-        return ApiResponse(status=False, message="Token is required", data=None)
+    now = datetime.now(timezone.utc)
 
-    if payload.token  :
-        try:
-            # Check if it is a valid UUID string
-            token_uuid = uuid.UUID(payload.token)
-        except ValueError:
-            return ApiResponse(status=False, message="Invalid token format", data=None)
+    try:
+        token_uuid = uuid.UUID(payload.token)
+    except ValueError:
+        return ApiResponse(status=False, message="Invalid token format", data=None)
 
-        stmt = select(PasswordResetToken).where(
-            PasswordResetToken.token == str(token_uuid),
-            PasswordResetToken.used_at == None
+    stmt = select(PasswordResetToken).where(
+        PasswordResetToken.token == str(token_uuid),
+        PasswordResetToken.used_at == None,
+    )
+    reset_token = (await db.execute(stmt)).scalar_one_or_none()
+    if not reset_token:
+        return ApiResponse(status=False, message="Invalid reset password link", data=None)
+
+    if reset_token.expires_at.replace(tzinfo=timezone.utc) < now:
+        return ApiResponse(status=False, message="Your reset password link has expired.", data=None)
+
+    user = (
+        await db.execute(
+            select(User).options(selectinload(User.roles)).where(User.id == reset_token.user_id)
         )
-        reset_token = (await db.execute(stmt)).scalar_one_or_none()
-        if not reset_token:
-            return ApiResponse(status=False, message="Invalid reset password link", data=None)
+    ).scalar_one_or_none()
+    if not user:
+        return ApiResponse(status=False, message="User not found", data=None)
 
-        now = datetime.now(timezone.utc)
-        if reset_token.expires_at.replace(tzinfo=timezone.utc) < now:
-            return ApiResponse(status=False, message="Your reset password link has expired.", data=None)
+    if user.firebase_uid:
+        from core.auth.services import update_firebase_password
 
-        user = (await db.execute(select(User).options(selectinload(User.roles)).where(User.id == reset_token.user_id))).scalar_one_or_none()
-        if not user or user.role == "user":
-            return ApiResponse(status=False, message="User not found", data=None)
+        try:
+            update_firebase_password(user.firebase_uid, payload.new_password)
+        except Exception as exc:
+            return ApiResponse(
+                status=False,
+                message=f"Failed to update password in firebase: {str(exc)}",
+                data=None,
+            )
 
-        user.password_hash = PASSWORD_HASHER.hash(payload.new_password)
-        user.updated_at = now
-        db.add(user)
+    user.password_hash = PASSWORD_HASHER.hash(payload.new_password)
+    user.updated_at = now
+    db.add(user)
 
-        # Invalidate token
-        reset_token.used_at = now
-        db.add(reset_token)
-        await db.commit()
+    reset_token.used_at = now
+    db.add(reset_token)
+    await db.commit()
 
-        return ApiResponse(status=True, message="Password reset successful", data=None)
+    return ApiResponse(status=True, message="Password reset successful", data=None)
 
 async def change_password(
     payload: ChangePasswordRequest,

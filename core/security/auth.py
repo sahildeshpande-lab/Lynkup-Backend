@@ -12,7 +12,7 @@ from core.auth.config import settings as auth_settings
 from core.database.session import get_session
 from apps.accounts.db_models import User
 from apps.accounts.services import complete_firebase_registration, AccountExistsException
-from common.enums import UserStatus
+from common.enums import UserStatus, inactive_account_message
 from common.exceptions import ApiError
 import jwt
 
@@ -35,18 +35,16 @@ def get_bearer_token(
 
 
 def _inactive_account_message(status: UserStatus) -> str:
-    messages = {
-        UserStatus.pending: "Account is pending",
-        UserStatus.suspended: "Account is suspended",
-        UserStatus.banned: "Account is banned",
-    }
-    return messages.get(status, "Account is not active")
+    return inactive_account_message(status)
 
 
 def _ensure_active_user(user: User) -> None:
-    if user.deleted_at:
-        raise ApiError("Account deleted")
-    if user.status != UserStatus.active:
+    """Allow active and pending users; keep 401 for suspended/banned/deleting."""
+    if user.status == UserStatus.deleting or user.deleted_at:
+        raise ApiError(inactive_account_message(UserStatus.deleting))
+    if user.status in (UserStatus.suspended, UserStatus.banned):
+        raise ApiError(_inactive_account_message(user.status))
+    if user.status not in (UserStatus.active, UserStatus.pending):
         raise ApiError(_inactive_account_message(user.status))
 
 
@@ -90,10 +88,12 @@ async def get_current_user(
         except AccountExistsException as exc:
             raise ApiError(f"User already registered via {exc.registration_type}")
 
-    if user.deleted_at:
-        raise ApiError("Account deleted")
+    if user.status == UserStatus.deleting or user.deleted_at:
+        raise ApiError(inactive_account_message(UserStatus.deleting))
 
-    if user.status != UserStatus.active:
+    if user.status in (UserStatus.suspended, UserStatus.banned):
+        raise ApiError(_inactive_account_message(user.status))
+    if user.status not in (UserStatus.active, UserStatus.pending):
         raise ApiError(_inactive_account_message(user.status))
 
     return user
@@ -119,10 +119,12 @@ async def get_current_admin(
     if user is None:
         raise ApiError("User not found")
 
-    if user.deleted_at:
-        raise ApiError("Account deleted")
+    if user.status == UserStatus.deleting or user.deleted_at:
+        raise ApiError(inactive_account_message(UserStatus.deleting))
 
-    if user.status != UserStatus.active:
+    if user.status in (UserStatus.suspended, UserStatus.banned):
+        raise ApiError(_inactive_account_message(user.status))
+    if user.status not in (UserStatus.active, UserStatus.pending):
         raise ApiError(_inactive_account_message(user.status))
 
     if user.role in ("user",):
@@ -135,6 +137,14 @@ async def get_current_app_user(
     user: User = Depends(get_current_user),
 ) -> User:
     if user.role != "user":
+        raise ApiError("Insufficient permissions")
+    return user
+
+
+async def get_current_user_or_superadmin(
+    user: User = Depends(get_current_user),
+) -> User:
+    if user.role not in ("user", "superadmin"):
         raise ApiError("Insufficient permissions")
     return user
 

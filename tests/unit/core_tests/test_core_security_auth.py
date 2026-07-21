@@ -111,7 +111,7 @@ async def test_get_current_user_db_states() -> None:
         async with async_session_factory() as session:
             with pytest.raises(ApiError) as exc:
                 await get_current_user(creds_access, session)
-            assert exc.value.message == "Account deleted"
+            assert exc.value.message == "Account doesn't exist "
 
         # 3. User suspended state (not active)
         async with async_session_factory() as session:
@@ -125,7 +125,7 @@ async def test_get_current_user_db_states() -> None:
         async with async_session_factory() as session:
             with pytest.raises(ApiError) as exc:
                 await get_current_user(creds_access, session)
-            assert exc.value.message == "Account is suspended"
+            assert exc.value.message == "Your account is suspended"
 
     finally:
         await engine.dispose()
@@ -324,7 +324,7 @@ async def test_get_current_user_firebase_paths(monkeypatch) -> None:
         async with async_session_factory() as session:
             with pytest.raises(ApiError) as exc:
                 await get_current_user(creds, session)
-            assert exc.value.message == "Account is banned"
+            assert exc.value.message == "Your account is banned "
 
     finally:
         await engine.dispose()

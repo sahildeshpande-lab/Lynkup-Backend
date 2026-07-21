@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, UploadFile, File, Query
+from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 
 from core.database.session import get_session
 from core.security.auth import get_current_app_user, get_current_user
 from apps.accounts.db_models import User
+from common.enums import MediaType
 from common.responses import success_response
 from apps.feed.schemas import ApiResponse, PostUploadResponse, SavePostRequest, DeletePostRequest, EditPostRequest
 from apps.feed.services import (
@@ -18,7 +19,7 @@ from apps.feed.services import (
     delete_post_service,
     list_draft_posts_service,
     delete_draft_post_service,
-    list_user_posts_service,
+    list_user_posts_items_service,
     get_profile_visibility_block_message,
     get_feed_service,
     format_post_detail,
@@ -33,16 +34,18 @@ async def upload_post_media(
         ...,
         description="Upload one or more media files using repeated form field name 'files'.",
     ),
+    types: list[MediaType] | None = Form(default=None),
     current_user: User = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     data = await upload_post_media_service(
         user_id=current_user.id,
         files=files,
+        media_types=types,
         db=db,
     )
     return success_response(
-        "Files uploaded successfully",
+        f"{len(data)} media file(s) uploaded",
         data,
         response_cls=ApiResponse,
     )
@@ -81,7 +84,11 @@ async def get_post(
         user_id=current_user.id,
         db=db
     )
-    return success_response("Post retrieved successfully", format_post_detail(post), response_cls=ApiResponse)
+    return success_response(
+        "Post retrieved successfully",
+        format_post_detail(post, viewer_user_id=current_user.id),
+        response_cls=ApiResponse,
+    )
 
 
 @router.patch("/posts", response_model=ApiResponse)
@@ -95,7 +102,11 @@ async def edit_post(
         payload=payload,
         db=db
     )
-    return success_response("Post updated successfully", format_post_detail(post), response_cls=ApiResponse)
+    return success_response(
+        "Post updated successfully",
+        format_post_detail(post, viewer_user_id=current_user.id),
+        response_cls=ApiResponse,
+    )
 
 
 @router.delete("/posts", response_model=ApiResponse)
@@ -131,26 +142,32 @@ async def list_user_posts(
         db=db,
     )
     if block_message:
-        from common.pagination import build_paginated_response
         return success_response(
-            block_message,
-            build_paginated_response([], 1, 1, 0),
+            "Account is private",
+            [],
             response_cls=ApiResponse,
         )
 
-    posts, total_items = await list_user_posts_service(
+    posts, total_items = await list_user_posts_items_service(
         current_user=current_user,
         target_user_id=user_id,
         state=state,
         page=page,
         page_size=pageSize,
-        db=db
+        db=db,
     )
+    formatted_posts = posts
+    if page is None and pageSize is None:
+        return success_response(
+            "User posts retrieved successfully",
+            formatted_posts,
+            response_cls=ApiResponse,
+        )
     from common.pagination import build_paginated_response
     p = page or 1
     ps = pageSize if pageSize is not None else (total_items if total_items > 0 else 1)
     paginated = build_paginated_response(
-        [format_post_detail(post) for post in posts],
+        formatted_posts,
         p,
         ps,
         total_items
@@ -173,7 +190,7 @@ async def list_draft_posts(
     )
     return success_response(
         "Draft posts retrieved successfully",
-        [format_post_detail(p) for p in posts],
+        [format_post_detail(p, viewer_user_id=current_user.id) for p in posts],
         response_cls=ApiResponse,
     )
 
@@ -194,22 +211,35 @@ async def delete_draft_post(
 
 @router.get("/feed", response_model=ApiResponse)
 async def get_feed(
+    response: Response,
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
+    cursor: str | None = Query(default=None),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    posts, total_items = await get_feed_service(
+    formatted_posts, total_items, next_cursor = await get_feed_service(
         current_user_id=current_user.id,
         page=page,
         page_size=pageSize,
-        db=db
+        cursor=cursor,
+        db=db,
+        include_total=True,
     )
+    if next_cursor:
+        # Keep JSON body identical; expose keyset cursor out-of-band for clients that want it.
+        response.headers["X-Next-Cursor"] = next_cursor
+    if page is None and pageSize is None and cursor is None:
+        return success_response(
+            "Feed retrieved successfully",
+            formatted_posts,
+            response_cls=ApiResponse,
+        )
     from common.pagination import build_paginated_response
     p = page or 1
     ps = pageSize if pageSize is not None else (total_items if total_items > 0 else 1)
     paginated = build_paginated_response(
-        [format_post_detail(post) for post in posts],
+        formatted_posts,
         p,
         ps,
         total_items

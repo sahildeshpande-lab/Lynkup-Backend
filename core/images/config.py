@@ -16,6 +16,8 @@ class ImageStorageSettings(BaseSettings):
     S3_ENDPOINT: str | None = Field(default=None, alias="S3_ENDPOINT")
     S3_FILE_ENDPOINT: str | None = Field(default=None, alias="S3_FILE_ENDPOINT")
     S3_CDN_ENDPOINT: str | None = Field(default=None, alias="S3_CDN_ENDPOINT")
+    base_url: str | None = Field(default=None, alias="BASE_URL")
+    base_url_img: str | None = Field(default=None, alias="BASE_URL_IMG")
 
     # Legacy fallback fields
     aws_access_key_id: str | None = Field(default=None, alias="AWS_ACCESS_KEY_ID")
@@ -117,7 +119,32 @@ def generate_download_url(file_name: str, expiration: int = 3600) -> str:
     if not file_name:
         return ""
     # If it is a full HTTP URL or static path already, return it
-    if file_name.startswith("http://") or file_name.startswith("https://") or file_name.startswith("/static/"):
+    if file_name.startswith("http://") or file_name.startswith("https://"):
+        return file_name
+    if settings.effective_bucket:
+        try:
+            response = s3_client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": settings.effective_bucket, "Key": file_name},
+                ExpiresIn=expiration
+            )
+            return response
+        except ClientError as e:
+            print(f"Error generating S3 download URL: {e}")
+            return ""
+    if settings.base_url_img:
+        endpoint = settings.base_url_img.rstrip("/")
+        clean_key = file_name.lstrip("/")
+        if not clean_key.startswith("static/uploads/"):
+            clean_key = f"static/uploads/{clean_key}"
+        return f"{endpoint}/{clean_key}"
+    if settings.base_url:
+        endpoint = settings.base_url.rstrip("/")
+        clean_path = file_name.lstrip("/")
+        if not clean_path.startswith("static/uploads/"):
+            clean_path = f"static/uploads/{clean_path}"
+        return f"{endpoint}/{clean_path}"
+    if file_name.startswith("/static/"):
         return file_name
     if settings.S3_FILE_ENDPOINT:
         endpoint = settings.S3_FILE_ENDPOINT.rstrip("/")
@@ -125,16 +152,7 @@ def generate_download_url(file_name: str, expiration: int = 3600) -> str:
         return f"{endpoint}/{clean_key}"
     if not settings.effective_bucket:
         return f"/static/uploads/{file_name}"
-    try:
-        response = s3_client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": settings.effective_bucket, "Key": file_name},
-            ExpiresIn=expiration
-        )
-        return response
-    except ClientError as e:
-        print(f"Error generating S3 download URL: {e}")
-        return ""
+    return ""
 
 
 def delete_file(file_name: str) -> None:
@@ -220,7 +238,7 @@ async def upload_image_to_s3(image_data: str, prefix: str = "profiles") -> str:
             header, encoded = normalized.split(",", 1)
             content_type = header.split(";")[0].split(":")[1]
             ext = content_type.split("/")[-1] if "/" in content_type else "png"
-            file_bytes = base64.b64decode(encoded)
+            file_bytes = base64.b64decode(encoded, validate=True)
             file_name = f"{prefix}/{uuid.uuid4()}.{ext}"
             
             save_image(file_name, file_bytes, content_type)
@@ -231,4 +249,3 @@ async def upload_image_to_s3(image_data: str, prefix: str = "profiles") -> str:
 
     # Otherwise, return it as is
     return normalized
-

@@ -116,13 +116,16 @@ async def test_admin_create_user_via_signup_removed_uses_admin_create_user(monke
         async def _mock_temp_password_email(*_args, **_kwargs):
             return True
 
-        def _mock_create_firebase_user(email, password, display_name=None):
+        def _mock_create_firebase_user(*, email, password, display_name=None):
             class MockFirebaseUser:
-                uid = "mock-firebase-uid"
+                uid = f"mock-firebase-uid-{email}"
             return MockFirebaseUser()
 
         monkeypatch.setattr("core.email_service.send_temporary_password_email", _mock_temp_password_email)
-        monkeypatch.setattr("core.auth.services.create_firebase_user", _mock_create_firebase_user)
+        monkeypatch.setattr(
+            "apps.administration.services.user_management_service.create_firebase_user",
+            _mock_create_firebase_user,
+        )
 
         email = f"user_admin_create_{uuid.uuid4()}@example.com"
         payload = AdminUserCreateRequest(
@@ -193,8 +196,14 @@ async def test_admin_create_user_creates_firebase_account(monkeypatch) -> None:
         async def _mock_temp_password_email(*_args, **_kwargs):
             return True
 
-        monkeypatch.setattr("core.auth.services.create_firebase_user", _mock_create_firebase_user)
-        monkeypatch.setattr("core.auth.services.delete_firebase_user", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            "apps.administration.services.user_management_service.create_firebase_user",
+            _mock_create_firebase_user,
+        )
+        monkeypatch.setattr(
+            "apps.administration.services.user_management_service.delete_firebase_user",
+            lambda *_args, **_kwargs: None,
+        )
         monkeypatch.setattr("core.email_service.send_temporary_password_email", _mock_temp_password_email)
 
         email = f"firebase_admin_create_{uuid.uuid4()}@example.com"
@@ -330,7 +339,19 @@ async def test_export_users() -> None:
             stmt_interest = select(AcademicInterest).where(AcademicInterest.name == "Artificial Intelligence")
             interest = (await session.execute(stmt_interest)).scalar_one_or_none()
             if not interest:
-                interest = AcademicInterest(name="Artificial Intelligence", is_active=True)
+                from apps.profiles.db_models.education_level_db_model import EducationLevel
+
+                level = (
+                    await session.execute(select(EducationLevel).where(EducationLevel.id == 2))
+                ).scalar_one_or_none()
+                if level is None:
+                    session.add(EducationLevel(id=2, name="Masters", is_active=True))
+                    await session.flush()
+                interest = AcademicInterest(
+                    name="Artificial Intelligence",
+                    education_level_id=2,
+                    is_active=True,
+                )
                 session.add(interest)
                 await session.flush()
 
@@ -393,14 +414,16 @@ async def test_export_users() -> None:
             # Verify names are displayed instead of IDs
             item1 = next(item for item in res_all["items"] if item["email"] == email1)
             assert item1["university"] == "Stanford University"
-            assert item1["country"] == "United States"
-            assert item1["county"] == "United States"
+            assert item1["country"] == str(country.id)
+            assert item1["country_details"]["id"] == country.id
+            assert item1["country_details"]["country_name"] == "United States"
             assert "Artificial Intelligence" in item1["academicInterests"]
 
             item2 = next(item for item in res_all["items"] if item["email"] == email2)
             assert item2["university"] is None
             assert item2["country"] is None
-            assert item2["county"] == ""
+            assert item2["country_details"]["id"] is None
+            assert item2["country_details"]["country_name"] is None
             assert len(item2["academicInterests"]) == 0
 
             # Test paginated case
@@ -435,7 +458,7 @@ async def test_admin_actions(monkeypatch) -> None:
             
         # Test delete user
         async with async_session_factory() as session:
-            del_res = await admin_delete_user(str(user.id), session)
+            del_res = await admin_delete_user(str(user.id), "user", session)
             assert del_res["deleted"] is True
             assert del_res["status"] == "deleting"
             assert "user" in del_res

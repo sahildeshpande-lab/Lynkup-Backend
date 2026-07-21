@@ -6,17 +6,23 @@ from sqlmodel import SQLModel
 from apps.accounts.db_models import *
 from apps.profiles.db_models import *
 from apps.feed.db_models import *
+from apps.invitations.db_models import *
+from apps.engagement.db_models import *
+from apps.report.db_models import *
+from core.database import models as _models  # noqa: F401
 
 from alembic import context
+from core.database.config import settings as db_settings
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+config.set_main_option("sqlalchemy.url", db_settings.database_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+if config.config_file_name is not None and config.attributes.get("configure_logger", True):
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
@@ -61,6 +67,16 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
+    existing_connection = config.attributes.get("connection")
+    if existing_connection is not None:
+        context.configure(
+            connection=existing_connection, target_metadata=target_metadata
+        )
+
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +28,13 @@ class AuthSettings(BaseSettings):
     resend_otp_cooldown_minutes: int = Field(default=2, alias="RESEND_OTP_COOLDOWN_MINUTES")
     otp_expire_minutes: int = Field(default=10, alias="OTP_EXPIRE_MINUTES")
     logo_url: str = Field(default="/static/images/logo.png", alias="LOGO_URL")
+
+    @field_validator("jwt_algorithm", mode="before")
+    @classmethod
+    def default_jwt_algorithm(cls, value: str | None) -> str:
+        if value is None or not str(value).strip():
+            return "HS256"
+        return str(value).strip()
 
     @property
     def firebase_credential_path(self) -> str | None:

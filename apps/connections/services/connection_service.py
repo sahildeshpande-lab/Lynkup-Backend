@@ -10,7 +10,18 @@ from apps.profiles.db_models import Profile
 from ..schemas import ApiResponse
 from common.enums import UserStatus
 from common.responses import error_response, success_response
+from common.user_visibility import visible_user_filters
 from core.images import generate_profile_image_url
+
+
+DEFAULT_RELATIONSHIP_FLAGS: dict[str, bool] = {
+    "is_connected": False,
+    "is_followed": False,
+    "is_blocked": False,
+    "request_sent": False,
+    "request_received": False,
+}
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -59,12 +70,14 @@ async def send_connection_request(db: AsyncSession, sender_id: UUID, receiver_id
     receiver = (await db.execute(select(User).where(User.id == receiver_id))).scalar_one_or_none()
     if receiver is None:
         return error_response("User not found.", response_cls=ApiResponse)
-    if receiver.deleted_at:
+    if receiver.deleted_at or receiver.is_deleted:
         return error_response("Cannot send request. User account is deleted.", response_cls=ApiResponse)
     if receiver.status == UserStatus.suspended:
         return error_response("Cannot send request. User account is suspended.", response_cls=ApiResponse)
     if receiver.status == UserStatus.banned:
         return error_response("Cannot send request. User account is banned.", response_cls=ApiResponse)
+    if receiver.status == UserStatus.deleting:
+        return error_response("Cannot send request. User account is deleting.", response_cls=ApiResponse)
     if receiver.status != UserStatus.active:
         return error_response("Cannot send request. User account is not active.", response_cls=ApiResponse)
 
@@ -103,10 +116,8 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
 
     stmt = select(ConnectionRequest).where(
         ConnectionRequest.status == "pending",
-        or_(
-            and_(ConnectionRequest.sender_user_id == other_user_id, ConnectionRequest.receiver_user_id == user_id),
-            and_(ConnectionRequest.sender_user_id == user_id, ConnectionRequest.receiver_user_id == other_user_id)
-        )
+        ConnectionRequest.sender_user_id == other_user_id,
+        ConnectionRequest.receiver_user_id == user_id,
     )
     result = await db.execute(stmt)
     req = result.scalars().first()
@@ -141,36 +152,37 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
     await db.commit()
     await db.refresh(req)
 
-    # Queue email to the person who originally sent the request
-    from apps.accounts.db_models import User
-    from apps.profiles.db_models import Profile
-    from core.email_service import send_lynkup_response_email
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.info("Attempting to send Lynkup response email for request %s", req.id)
-    try:
-        sender_stmt = select(User, Profile).join(Profile, Profile.user_id == User.id).where(User.id == req.sender_user_id)
-        sender_result = await db.execute(sender_stmt)
-        sender_row = sender_result.first()
-        if sender_row:
-            sender_user, sender_profile = sender_row
-            full_name = f"{sender_profile.first_name} {sender_profile.last_name}".strip() if sender_profile else None
-            await send_lynkup_response_email(sender_user.email, response, full_name)
-            logger.info("Lynkup response email queued for %s", sender_user.email)
-        else:
-            logger.warning("Sender user not found for Lynkup response email, user_id=%s", req.sender_user_id)
-    except Exception as e:
-        logger.exception("Failed to queue Lynkup response email: %s", e)
+    # Temporarily disabled: connection request accepted/declined email
+    # # Queue email to the person who originally sent the request
+    # from apps.accounts.db_models import User
+    # from apps.profiles.db_models import Profile
+    # from core.email_service import send_lynkup_response_email
+    # import logging
+    # logger = logging.getLogger(__name__)
+    # logger.info("Attempting to send Lynkup response email for request %s", req.id)
+    # try:
+    #     sender_stmt = select(User, Profile).join(Profile, Profile.user_id == User.id).where(User.id == req.sender_user_id)
+    #     sender_result = await db.execute(sender_stmt)
+    #     sender_row = sender_result.first()
+    #     if sender_row:
+    #         sender_user, sender_profile = sender_row
+    #         full_name = f"{sender_profile.first_name} {sender_profile.last_name}".strip() if sender_profile else None
+    #         await send_lynkup_response_email(sender_user.email, response, full_name)
+    #         logger.info("Lynkup response email queued for %s", sender_user.email)
+    #     else:
+    #         logger.warning("Sender user not found for Lynkup response email, user_id=%s", req.sender_user_id)
+    # except Exception as e:
+    #     logger.exception("Failed to queue Lynkup response email: %s", e)
 
-    is_connected = response == "accepted"
+    is_accepted = response == "accepted"
     return success_response(
-        "You are now connected." if is_connected else "Request declined successfully.",
+        "You are now connected." if is_accepted else "Request declined successfully.",
         {
             "lynkup_id": req.id,
             "sender_user_id": req.sender_user_id,
             "receiver_user_id": req.receiver_user_id,
             "status": req.status,
-            "is_connected": is_connected,
+            "is_connected": is_accepted,
             "request_sent": False,
             "request_received": False,
             "is_sent": False,
@@ -252,9 +264,13 @@ async def get_pending_requests(
     base_stmt = select(ConnectionRequest, Profile).join(
         Profile,
         Profile.user_id == ConnectionRequest.sender_user_id,
+    ).join(
+        User,
+        User.id == ConnectionRequest.sender_user_id,
     ).where(
         ConnectionRequest.status == "pending",
         ConnectionRequest.receiver_user_id == user_id,
+        *visible_user_filters(User),
     )
 
     if search:
@@ -323,9 +339,14 @@ async def get_connections_service(
                 and_(Connection.user_high_id == user_id, Profile.user_id == Connection.user_low_id),
             ),
         )
+        .join(
+            User,
+            User.id == Profile.user_id,
+        )
         .where(
             or_(Connection.user_low_id == user_id, Connection.user_high_id == user_id),
             Connection.is_active == True,
+            *visible_user_filters(User),
         )
     )
 
@@ -458,13 +479,6 @@ async def get_relationship_flags(
     return result
 
 
-DEFAULT_RELATIONSHIP_FLAGS: dict[str, bool] = {
-    "is_connected": False,
-    "is_followed": False,
-    "is_blocked": False,
-    "request_sent": False,
-    "request_received": False,
-}
 
 
 def apply_relationship_flags(

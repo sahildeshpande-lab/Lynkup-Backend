@@ -26,8 +26,8 @@ class TransactionalEmailLog(SQLModel, table=True):
     is_send: bool = Field(default=False, sa_column=Column("is_sent", Boolean, nullable=False, server_default="false"))
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
     updated_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
-    sent_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
-    error_message: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    # sent_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    # error_message: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
 
     to: ClassVar = synonym("to_email")
     body: ClassVar = synonym("content")

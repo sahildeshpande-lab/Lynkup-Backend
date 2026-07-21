@@ -14,6 +14,7 @@ from apps.profiles.db_models import Profile
 from ..schemas import ApiResponse, FollowResponse
 from .connection_service import is_blocked
 from common.responses import error_response, success_response
+from common.user_visibility import is_hidden_account_status
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,12 @@ async def follow_user(db: AsyncSession, follower_id: UUID, following_id: UUID) -
         return error_response("Cannot follow self.", response_cls=ApiResponse)
 
     target_user = await db.get(User, following_id)
-    if not target_user or target_user.is_deleted:
+    if (
+        not target_user
+        or target_user.is_deleted
+        or target_user.deleted_at is not None
+        or is_hidden_account_status(target_user.status)
+    ):
         return error_response("User to follow not found.", response_cls=ApiResponse)
 
     if await is_blocked(db, follower_id, following_id):

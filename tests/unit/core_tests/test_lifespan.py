@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -24,7 +24,8 @@ async def test_lifespan_starts_and_stops_email_cron(monkeypatch) -> None:
             cron_cancelled.set()
             raise
 
-    monkeypatch.setattr("core.database.config.settings", MagicMock(auto_init_db=False))
+    # lifespan binds db_settings at import time — patch that reference.
+    monkeypatch.setattr("core.lifespan.db_settings", MagicMock(auto_init_db=False))
     monkeypatch.setattr("core.email.config.settings", MagicMock(is_sendgrid_configured=True))
     monkeypatch.setattr("core.email_service.cron_send_emails", _mock_cron_send_emails)
 
@@ -38,10 +39,18 @@ async def test_lifespan_starts_and_stops_email_cron(monkeypatch) -> None:
 async def test_lifespan_runs_init_db_when_enabled(monkeypatch) -> None:
     app = FastAPI()
     init_db_mock = AsyncMock()
+    migrations_mock = AsyncMock()
 
-    monkeypatch.setattr("core.database.config.settings", MagicMock(auto_init_db=True))
+    monkeypatch.setattr(
+        "core.lifespan.db_settings",
+        MagicMock(auto_init_db=True, db_host="test-host"),
+    )
     monkeypatch.setattr("core.lifespan.init_db", init_db_mock)
     monkeypatch.setattr("core.email.config.settings", MagicMock(is_sendgrid_configured=False))
+    monkeypatch.setattr(
+        "core.lifespan.run_db_migrations_programmatically",
+        migrations_mock,
+    )
 
     async def _noop_cron():
         await asyncio.sleep(0)
@@ -52,3 +61,4 @@ async def test_lifespan_runs_init_db_when_enabled(monkeypatch) -> None:
         pass
 
     init_db_mock.assert_awaited_once()
+

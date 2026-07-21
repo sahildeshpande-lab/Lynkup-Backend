@@ -1,0 +1,360 @@
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from apps.feed.services.feed_scoring import (
+    compute_relevance_score,
+    has_relevance_match,
+    is_feed_visible,
+    viewer_has_relevance_criteria,
+)
+from apps.feed.services.feed_service import get_feed_service
+from common.enums import ProfileVisibility, PostState
+
+
+VIEWER_UNIVERSITY = uuid.uuid4()
+AUTHOR_UNIVERSITY = uuid.uuid4()
+
+
+def test_public_profile_major_match():
+    score = compute_relevance_score(
+        viewer_major="Computer Science",
+        viewer_minor="Math",
+        viewer_university_id=VIEWER_UNIVERSITY,
+        author_major="Computer Science",
+        author_minor="Physics",
+        author_university_id=AUTHOR_UNIVERSITY,
+    )
+    assert score == 1
+    assert is_feed_visible(
+        profile_visibility=ProfileVisibility.public,
+        is_connected=False,
+        relevance_score=score,
+    )
+
+
+def test_public_profile_minor_match():
+    score = compute_relevance_score(
+        viewer_major="Biology",
+        viewer_minor="Statistics",
+        viewer_university_id=VIEWER_UNIVERSITY,
+        author_major="Chemistry",
+        author_minor="Statistics",
+        author_university_id=AUTHOR_UNIVERSITY,
+    )
+    assert score == 1
+    assert is_feed_visible(
+        profile_visibility=ProfileVisibility.public,
+        is_connected=False,
+        relevance_score=score,
+    )
+
+
+def test_public_profile_university_match():
+    score = compute_relevance_score(
+        viewer_major="Biology",
+        viewer_minor="Math",
+        viewer_university_id=VIEWER_UNIVERSITY,
+        author_major="Chemistry",
+        author_minor="Physics",
+        author_university_id=VIEWER_UNIVERSITY,
+    )
+    assert score == 1
+    assert is_feed_visible(
+        profile_visibility=ProfileVisibility.public,
+        is_connected=False,
+        relevance_score=score,
+    )
+
+
+def test_public_profile_no_matches_still_visible():
+    score = compute_relevance_score(
+        viewer_major="Biology",
+        viewer_minor="Math",
+        viewer_university_id=VIEWER_UNIVERSITY,
+        author_major="Chemistry",
+        author_minor="Physics",
+        author_university_id=AUTHOR_UNIVERSITY,
+    )
+    assert score == 0
+    assert not has_relevance_match(
+        viewer_major="Biology",
+        viewer_minor="Math",
+        viewer_university_id=VIEWER_UNIVERSITY,
+        author_major="Chemistry",
+        author_minor="Physics",
+        author_university_id=AUTHOR_UNIVERSITY,
+    )
+    assert is_feed_visible(
+        profile_visibility=ProfileVisibility.public,
+        is_connected=False,
+        relevance_score=score,
+        viewer_has_relevance_criteria=True,
+    )
+
+
+def test_public_profile_without_viewer_relevance_fields_includes_all():
+    score = compute_relevance_score(
+        viewer_major=None,
+        viewer_minor=None,
+        viewer_university_id=None,
+        author_major="Chemistry",
+        author_minor="Physics",
+        author_university_id=AUTHOR_UNIVERSITY,
+    )
+    assert score == 0
+    assert not viewer_has_relevance_criteria(
+        viewer_major=None,
+        viewer_minor=None,
+        viewer_university_id=None,
+    )
+    assert is_feed_visible(
+        profile_visibility=ProfileVisibility.public,
+        is_connected=False,
+        relevance_score=score,
+        viewer_has_relevance_criteria=False,
+    )
+
+
+def test_feed_ordering_created_at_only_when_viewer_has_no_relevance_fields():
+    now = datetime(2026, 7, 13, tzinfo=timezone.utc)
+    yesterday = datetime(2026, 7, 12, tzinfo=timezone.utc)
+
+    posts = [
+        SimpleNamespace(id=1, relevance_score=3, created_at=yesterday),
+        SimpleNamespace(id=2, relevance_score=1, created_at=now),
+        SimpleNamespace(id=3, relevance_score=2, created_at=now),
+    ]
+    ordered = sorted(posts, key=lambda post: -post.created_at.timestamp())
+    assert [post.id for post in ordered] == [2, 3, 1]
+
+
+def test_private_profile_connected_included():
+    score = compute_relevance_score(
+        viewer_major="Biology",
+        viewer_minor="Math",
+        viewer_university_id=VIEWER_UNIVERSITY,
+        author_major="Chemistry",
+        author_minor="Physics",
+        author_university_id=AUTHOR_UNIVERSITY,
+    )
+    assert is_feed_visible(
+        profile_visibility=ProfileVisibility.private,
+        is_connected=True,
+        relevance_score=score,
+    )
+
+
+def test_private_profile_non_connected_excluded():
+    score = compute_relevance_score(
+        viewer_major="Biology",
+        viewer_minor="Math",
+        viewer_university_id=VIEWER_UNIVERSITY,
+        author_major="Biology",
+        author_minor="Math",
+        author_university_id=VIEWER_UNIVERSITY,
+    )
+    assert not is_feed_visible(
+        profile_visibility=ProfileVisibility.private,
+        is_connected=False,
+        relevance_score=score,
+    )
+
+
+def test_relevance_score_all_three_matches():
+    score = compute_relevance_score(
+        viewer_major="Computer Science",
+        viewer_minor="Math",
+        viewer_university_id=VIEWER_UNIVERSITY,
+        author_major="computer science",
+        author_minor=" math ",
+        author_university_id=VIEWER_UNIVERSITY,
+    )
+    assert score == 3
+
+
+def test_relevance_score_major_and_university_match():
+    score = compute_relevance_score(
+        viewer_major="Computer Science",
+        viewer_minor="Math",
+        viewer_university_id=VIEWER_UNIVERSITY,
+        author_major="Computer Science",
+        author_minor="Physics",
+        author_university_id=VIEWER_UNIVERSITY,
+    )
+    assert score == 2
+
+
+def test_feed_ordering_matches_first_then_all_posts_newest_first():
+    now = datetime(2026, 7, 13, tzinfo=timezone.utc)
+    yesterday = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    two_days_ago = datetime(2026, 7, 11, tzinfo=timezone.utc)
+
+    posts = [
+        SimpleNamespace(id=1, is_match=False, created_at=now),
+        SimpleNamespace(id=2, is_match=True, created_at=yesterday),
+        SimpleNamespace(id=3, is_match=True, created_at=now),
+        SimpleNamespace(id=4, is_match=False, created_at=yesterday),
+        SimpleNamespace(id=5, is_match=False, created_at=two_days_ago),
+    ]
+    ordered = sorted(
+        posts,
+        key=lambda post: (-int(post.is_match), -post.created_at.timestamp()),
+    )
+    assert [post.id for post in ordered] == [3, 2, 1, 4, 5]
+
+
+@pytest.mark.asyncio
+async def test_feed_service_pagination(mock_db):
+    user_id = uuid.uuid4()
+    viewer_profile = SimpleNamespace(
+        major="CS",
+        minor="Math",
+        university_id=VIEWER_UNIVERSITY,
+    )
+    post_one = SimpleNamespace(
+        id=uuid.uuid4(),
+        author_user_id=uuid.uuid4(),
+        state=PostState.published,
+        revision_number=1,
+        content={},
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        like_count=0,
+        repost_count=0,
+        share_count=0,
+        comment_count=0,
+        is_moderator_reviewed=False,
+        reviewed_at=None,
+        moderator_id=None,
+        attachments=[],
+    )
+    post_two = SimpleNamespace(
+        id=uuid.uuid4(),
+        author_user_id=post_one.author_user_id,
+        state=PostState.published,
+        revision_number=1,
+        content={},
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        like_count=0,
+        repost_count=0,
+        share_count=0,
+        comment_count=0,
+        is_moderator_reviewed=False,
+        reviewed_at=None,
+        moderator_id=None,
+        attachments=[],
+    )
+    filler_one = SimpleNamespace(**{**post_one.__dict__, "id": uuid.uuid4()})
+    filler_two = SimpleNamespace(**{**post_two.__dict__, "id": uuid.uuid4()})
+    author_profile = SimpleNamespace(
+        first_name="A",
+        last_name="B",
+        profile_photo_url=None,
+        user_id=post_one.author_user_id,
+    )
+
+    db = mock_db()
+    page_rows = [
+        (filler_one, author_profile),
+        (filler_two, author_profile),
+        (post_one, author_profile),
+        (post_two, author_profile),
+    ]
+
+    with (
+        patch("apps.feed.services.feed_service.fetch_viewer_profile", AsyncMock(return_value=viewer_profile)),
+        patch("apps.feed.services.feed_service.get_user_connections", AsyncMock(return_value=set())),
+        patch("apps.feed.services.feed_service.count_feed_posts", AsyncMock(return_value=5)) as count_posts,
+        patch(
+            "apps.feed.services.feed_service.fetch_feed_posts",
+            AsyncMock(return_value=(page_rows, None)),
+        ) as fetch_posts,
+        patch(
+            "apps.feed.services.feed_service._load_requested_user_ids",
+            AsyncMock(return_value=set()),
+        ),
+        patch("apps.feed.services.feed_service.fetch_post_engagement_flags") as mock_flags,
+        patch("apps.feed.services.feed_service.load_latest_post_reactions", AsyncMock(return_value={})),
+    ):
+        mock_flags.return_value = SimpleNamespace(
+            user_reaction_for=lambda pid: None,
+            reposted_post_ids=frozenset(),
+            bookmarked_post_ids=frozenset(),
+        )
+        posts, total, _next_cursor = await get_feed_service(
+            user_id,
+            db,
+            page=2,
+            page_size=2,
+            include_total=True,
+        )
+
+    count_posts.assert_awaited_once()
+    fetch_posts.assert_awaited_once_with(
+        db,
+        user_id,
+        viewer_profile,
+        set(),
+        cursor=None,
+        limit=4,
+    )
+    assert total == 5
+    assert len(posts) == 2
+    assert posts[0]["first_name"] == "A"
+    assert posts[0]["author_user_id"] == post_one.author_user_id
+
+
+@pytest.mark.asyncio
+async def test_feed_service_without_pagination_fetches_all(mock_db):
+    user_id = uuid.uuid4()
+    db = mock_db()
+
+    with (
+        patch("apps.feed.services.feed_service.fetch_viewer_profile", AsyncMock(return_value=None)),
+        patch("apps.feed.services.feed_service.get_user_connections", AsyncMock(return_value=set())),
+        patch("apps.feed.services.feed_service.count_feed_posts", AsyncMock(return_value=0)),
+        patch(
+            "apps.feed.services.feed_service.fetch_feed_posts",
+            AsyncMock(return_value=([], None)),
+        ) as fetch_posts,
+    ):
+        posts, total, _next_cursor = await get_feed_service(user_id, db, include_total=True)
+
+    fetch_posts.assert_awaited_once_with(
+        db,
+        user_id,
+        None,
+        set(),
+        cursor=None,
+        limit=None,
+    )
+    assert posts == []
+    assert total == 0
+
+
+def test_encode_decode_cursor_roundtrip():
+    from apps.feed.services.feed_cursor import decode_cursor, encode_cursor
+
+    post_id = uuid.uuid4()
+    created_at = datetime(2026, 7, 18, 12, 30, 0, tzinfo=timezone.utc)
+    cursor = encode_cursor(relevance=6, created_at=created_at, post_id=post_id)
+    decoded = decode_cursor(cursor)
+    assert decoded["relevance"] == 6
+    assert decoded["created_at"] == created_at
+    assert decoded["id"] == post_id
+
+
+def test_decode_cursor_rejects_malformed():
+    from apps.feed.services.feed_cursor import decode_cursor
+    from common.exceptions import ApiError
+    import pytest as _pytest
+
+    with _pytest.raises(ApiError, match="Invalid cursor"):
+        decode_cursor("not-a-valid-cursor")
