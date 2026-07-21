@@ -311,6 +311,7 @@ async def test_review_report_admin_success(mock_db, scalar_result):
 
     with patch("apps.report.services.report_service.get_report_by_id", AsyncMock(side_effect=[row, updated_row])), \
          patch("apps.report.services.report_service.update_report", AsyncMock(return_value=report_obj)), \
+         patch("apps.report.services.report_service._apply_actioned_report_to_entity", AsyncMock(return_value=None)) as apply_action, \
          patch("apps.report.services.report_service.count_reports_by_entity_keys", AsyncMock(return_value={(report_obj.entity_type, report_obj.entity_id): 1})):
         response = await svc.review_report_admin_service(
             db,
@@ -321,4 +322,79 @@ async def test_review_report_admin_success(mock_db, scalar_result):
     assert response.status is True
     assert response.data.status == ReportStatus.under_review
     assert response.data.moderator_info.first_name == "Admin"
+    apply_action.assert_awaited_once()
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_review_report_rejected_skips_entity_action(mock_db):
+    report_obj = _report()
+    reporter_user = _user()
+    reporter_profile = SimpleNamespace(first_name="John", last_name="Doe")
+    admin_user = _user(status=UserStatus.active)
+    admin_profile = SimpleNamespace(first_name="Admin", last_name="User")
+
+    row = (report_obj, reporter_user, reporter_profile, None, None)
+    updated_row = (report_obj, reporter_user, reporter_profile, admin_user, admin_profile)
+    db = mock_db()
+    payload = ReportReviewRequest(
+        report_id=report_obj.id,
+        status=ReportStatus.rejected,
+        admin_comment="Not a violation",
+    )
+
+    with patch("apps.report.services.report_service.get_report_by_id", AsyncMock(side_effect=[row, updated_row])), \
+         patch("apps.report.services.report_service.update_report", AsyncMock(return_value=report_obj)), \
+         patch("apps.report.services.report_service._apply_actioned_report_to_entity", AsyncMock(return_value=None)) as apply_action, \
+         patch("apps.report.services.report_service.count_reports_by_entity_keys", AsyncMock(return_value={(report_obj.entity_type, report_obj.entity_id): 1})):
+        response = await svc.review_report_admin_service(
+            db,
+            current_admin_id=admin_user.id,
+            payload=payload,
+        )
+
+    assert response.status is True
+    apply_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_apply_actioned_report_flags_post(mock_db, scalar_result):
+    post = _post(state=PostState.published)
+    report = _report()
+    report.entity_type = ReportEntityType.post
+    report.entity_id = post.id
+    db = mock_db(scalar_result(post))
+    moderator_id = uuid.uuid4()
+
+    error = await svc._apply_actioned_report_to_entity(db, report, moderator_id=moderator_id)
+
+    assert error is None
+    assert post.state == PostState.flagged
+    assert post.moderator_id == moderator_id
+    assert post.is_moderator_reviewed is True
+    db.add.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_apply_actioned_report_deletes_comment(mock_db):
+    comment = _comment()
+    report = _report()
+    report.entity_type = ReportEntityType.comment
+    report.entity_id = comment.id
+    db = mock_db()
+
+    with patch(
+        "apps.report.services.report_service.get_comment_by_id",
+        AsyncMock(return_value=comment),
+    ), patch(
+        "apps.report.services.report_service.mark_comment_deleted",
+        AsyncMock(return_value=comment),
+    ) as mark_deleted:
+        error = await svc._apply_actioned_report_to_entity(
+            db,
+            report,
+            moderator_id=uuid.uuid4(),
+        )
+
+    assert error is None
+    mark_deleted.assert_awaited_once()

@@ -37,6 +37,11 @@ class ReportUserDetail(BaseModel):
     profilePhoto_url: str | None = None
 
 
+def is_report_reviewed(status: ReportStatus) -> bool:
+    """True once a moderator has rejected or actioned the report."""
+    return status in (ReportStatus.rejected, ReportStatus.actioned)
+
+
 class ReportDetailData(BaseModel):
     id: UUID
     reported_id: UUID
@@ -51,6 +56,7 @@ class ReportDetailData(BaseModel):
     reporter_details: ReportUserDetail | None = None
     moderator_info: ReportUserDetail | None = None
     report_count: int = 0
+    is_reviewed: bool = False
 
 
 class ReportResponse(ApiResponse):
@@ -71,6 +77,7 @@ class EntityReportItem(BaseModel):
     updated_at: datetime
     reporter_details: ReportUserDetail | None = None
     moderator_info: ReportUserDetail | None = None
+    is_reviewed: bool = False
 
 
 class ReportListData(BaseModel):
@@ -94,6 +101,7 @@ class ReportedEntityItem(BaseModel):
     latest_reported_at: datetime
     moderator_id: UUID | None = None
     status: ReportStatus
+    is_reviewed: bool = False
 
 
 class ReportedEntityListData(BaseModel):

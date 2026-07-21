@@ -10,7 +10,11 @@ from sqlalchemy.orm import aliased
 
 from apps.accounts.db_models import User
 from apps.engagement.db_models import Comment
-from apps.engagement.repositories.comment_repository import fetch_profiles_by_user_ids
+from apps.engagement.repositories.comment_repository import (
+    fetch_profiles_by_user_ids,
+    get_comment_by_id,
+    mark_comment_deleted,
+)
 from apps.engagement.services.comment_service import _format_author, _format_comment
 from apps.feed.db_models import Post
 from apps.feed.services.post_service import format_post_detail
@@ -45,6 +49,7 @@ from apps.report.schemas import (
     ReportedEntityItem,
     ReportedEntityListData,
     ReportedEntityListResponse,
+    is_report_reviewed,
 )
 from common.enums import PostState, ReportEntityType, ReportStatus, UserStatus
 from common.exceptions import ApiError
@@ -105,6 +110,7 @@ def format_report_detail(
             email=moderator_user.email,
         )
 
+    reviewed = is_report_reviewed(report.status)
     return ReportDetailData(
         id=report.id,
         reported_id=report.reported_id,
@@ -119,6 +125,7 @@ def format_report_detail(
         reporter_details=reporter_details,
         moderator_info=moderator_info,
         report_count=report_count,
+        is_reviewed=reviewed,
     )
 
 
@@ -144,6 +151,7 @@ def _format_entity_report_item(
             last_name=moderator_profile.last_name if moderator_profile else None,
             email=moderator_user.email,
         )
+    reviewed = is_report_reviewed(report.status)
     return EntityReportItem(
         id=report.id,
         who_reported_id=report.reported_id,
@@ -155,6 +163,7 @@ def _format_entity_report_item(
         updated_at=report.updated_at,
         reporter_details=reporter_details,
         moderator_info=moderator_info,
+        is_reviewed=reviewed,
     )
 
 
@@ -240,7 +249,7 @@ async def create_report_service(
     )
 
     try:
-        await create_report(
+        report = await create_report(
             db,
             reported_id=user_id,
             entity_type=payload.entity_type,
@@ -249,6 +258,7 @@ async def create_report_service(
             moderator_id=moderator_id,
         )
         await db.commit()
+        await db.refresh(report)
     except Exception:
         await db.rollback()
         logger.exception(
@@ -259,9 +269,22 @@ async def create_report_service(
         )
         return error_response("Failed to submit report", response_cls=ApiResponse)
 
+    reviewed = is_report_reviewed(report.status)
     return success_response(
         message="Report submitted successfully.",
-        data={},
+        data={
+            "id": report.id,
+            "who_reported_id": report.reported_id,
+            "entity_type": report.entity_type,
+            "entity_id": report.entity_id,
+            "reason": report.reason,
+            "status": report.status,
+            "moderator_id": report.moderator_id,
+            "admin_comment": report.admin_comment,
+            "created_at": report.created_at,
+            "updated_at": report.updated_at,
+            "is_reviewed": reviewed,
+        },
         response_cls=ApiResponse,
     )
 
@@ -455,6 +478,7 @@ async def get_reported_entities(
             latest_reported_at=row["latest_reported_at"],
             moderator_id=row["moderator_id"],
             status=row["status"],
+            is_reviewed=is_report_reviewed(row["status"]),
         )
         for row in rows
     ]
@@ -501,6 +525,47 @@ async def get_report_details_admin_service(
     )
 
 
+async def _apply_actioned_report_to_entity(
+    db: AsyncSession,
+    report: Report,
+    *,
+    moderator_id: UUID,
+) -> str | None:
+    """
+    Apply side effects when a report is actioned.
+
+    - post: set state to flagged
+    - comment: soft-delete (is_deleted=True)
+    - rejected reviews leave the entity unchanged (caller skips this)
+
+    Returns an error message if the entity cannot be updated, else None.
+    """
+    from datetime import datetime, timezone
+
+    if report.entity_type == ReportEntityType.post:
+        post = (
+            await db.execute(select(Post).where(Post.id == report.entity_id))
+        ).scalar_one_or_none()
+        if post is None:
+            return "Reported post not found"
+        post.state = PostState.flagged
+        post.moderator_id = moderator_id
+        post.is_moderator_reviewed = True
+        post.reviewed_at = datetime.now(timezone.utc)
+        post.updated_at = datetime.now(timezone.utc)
+        db.add(post)
+        return None
+
+    if report.entity_type == ReportEntityType.comment:
+        comment = await get_comment_by_id(db, report.entity_id)
+        if comment is None:
+            return "Reported comment not found"
+        await mark_comment_deleted(db, comment)
+        return None
+
+    return None
+
+
 async def review_report_admin_service(
     db: AsyncSession,
     current_admin_id: UUID,
@@ -511,7 +576,19 @@ async def review_report_admin_service(
     if row is None:
         return error_response("Report not found", response_cls=ReportResponse)
 
+    report = row[0]
+
     try:
+        if payload.status == ReportStatus.actioned:
+            action_error = await _apply_actioned_report_to_entity(
+                db,
+                report,
+                moderator_id=current_admin_id,
+            )
+            if action_error:
+                await db.rollback()
+                return error_response(action_error, response_cls=ReportResponse)
+
         await update_report(
             db,
             report_id=report_id,
