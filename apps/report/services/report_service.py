@@ -17,7 +17,7 @@ from apps.engagement.repositories.comment_repository import (
 )
 from apps.engagement.services.comment_service import _format_author, _format_comment
 from apps.feed.db_models import Post
-from apps.feed.services.post_service import format_post_detail
+from apps.feed.services.post_service import _resolve_moderator_name, format_post_detail
 from apps.moderation.services.moderator_assignment_service import (
     _fetch_active_moderator_ids,
     _fetch_superadmin_user_ids,
@@ -102,6 +102,7 @@ def format_report_detail(
     )
 
     moderator_info = None
+    moderator_name = None
     if moderator_user is not None:
         moderator_info = ReportUserDetail(
             id=moderator_user.id,
@@ -109,6 +110,7 @@ def format_report_detail(
             last_name=moderator_profile.last_name if moderator_profile else None,
             email=moderator_user.email,
         )
+        moderator_name = _resolve_moderator_name(moderator_user, moderator_profile)
 
     reviewed = is_report_reviewed(report.status)
     return ReportDetailData(
@@ -119,6 +121,7 @@ def format_report_detail(
         reason=report.reason,
         status=report.status,
         moderator_id=report.moderator_id,
+        moderator_name=moderator_name,
         admin_comment=report.admin_comment,
         created_at=report.created_at,
         updated_at=report.updated_at,
@@ -144,6 +147,7 @@ def _format_entity_report_item(
         profilePhoto_url=_profile_photo_url(reporter_profile),
     )
     moderator_info = None
+    moderator_name = None
     if moderator_user is not None:
         moderator_info = ReportUserDetail(
             id=moderator_user.id,
@@ -151,6 +155,7 @@ def _format_entity_report_item(
             last_name=moderator_profile.last_name if moderator_profile else None,
             email=moderator_user.email,
         )
+        moderator_name = _resolve_moderator_name(moderator_user, moderator_profile)
     reviewed = is_report_reviewed(report.status)
     return EntityReportItem(
         id=report.id,
@@ -158,6 +163,7 @@ def _format_entity_report_item(
         reason=report.reason,
         status=report.status,
         moderator_id=report.moderator_id,
+        moderator_name=moderator_name,
         admin_comment=report.admin_comment,
         created_at=report.created_at,
         updated_at=report.updated_at,
@@ -270,6 +276,11 @@ async def create_report_service(
         return error_response("Failed to submit report", response_cls=ApiResponse)
 
     reviewed = is_report_reviewed(report.status)
+    moderator_name = None
+    if report.moderator_id is not None:
+        names = await _batch_moderator_names(db, [report.moderator_id])
+        moderator_name = names.get(report.moderator_id)
+
     return success_response(
         message="Report submitted successfully.",
         data={
@@ -280,6 +291,7 @@ async def create_report_service(
             "reason": report.reason,
             "status": report.status,
             "moderator_id": report.moderator_id,
+            "moderator_name": moderator_name,
             "admin_comment": report.admin_comment,
             "created_at": report.created_at,
             "updated_at": report.updated_at,
@@ -346,19 +358,25 @@ async def _batch_load_posts(
         return {}
 
     AuthorProfile = aliased(Profile)
+    ModeratorUser = aliased(User)
+    ModeratorProfile = aliased(Profile)
     stmt = (
-        select(Post, AuthorProfile)
+        select(Post, AuthorProfile, ModeratorUser, ModeratorProfile)
         .outerjoin(AuthorProfile, AuthorProfile.user_id == Post.author_user_id)
+        .outerjoin(ModeratorUser, ModeratorUser.id == Post.moderator_id)
+        .outerjoin(ModeratorProfile, ModeratorProfile.user_id == Post.moderator_id)
         .where(Post.id.in_(post_ids))
     )
     rows = (await db.execute(stmt)).all()
     return {
         post.id: format_post_detail(
             post,
-            author_profile=profile,
+            author_profile=author_profile,
+            moderator_user=moderator_user,
+            moderator_profile=moderator_profile,
             viewer_user_id=viewer_user_id,
         )
-        for post, profile in rows
+        for post, author_profile, moderator_user, moderator_profile in rows
     }
 
 
@@ -433,6 +451,28 @@ async def _load_entities_for_queue(
     return {}
 
 
+async def _batch_moderator_names(
+    db: AsyncSession,
+    moderator_ids: list[UUID],
+) -> dict[UUID, str | None]:
+    """Resolve display names for report-assigned moderators."""
+    unique_ids = list({mid for mid in moderator_ids if mid is not None})
+    if not unique_ids:
+        return {}
+
+    ModeratorProfile = aliased(Profile)
+    stmt = (
+        select(User, ModeratorProfile)
+        .outerjoin(ModeratorProfile, ModeratorProfile.user_id == User.id)
+        .where(User.id.in_(unique_ids))
+    )
+    rows = (await db.execute(stmt)).all()
+    return {
+        user.id: _resolve_moderator_name(user, profile)
+        for user, profile in rows
+    }
+
+
 async def get_reported_entities(
     db: AsyncSession,
     *,
@@ -470,6 +510,10 @@ async def get_reported_entities(
         entity_ids=entity_ids,
         viewer_user_id=viewer_user_id,
     )
+    moderator_names = await _batch_moderator_names(
+        db,
+        [row["moderator_id"] for row in rows],
+    )
 
     items = [
         ReportedEntityItem(
@@ -477,6 +521,11 @@ async def get_reported_entities(
             report_count=row["report_count"],
             latest_reported_at=row["latest_reported_at"],
             moderator_id=row["moderator_id"],
+            moderator_name=(
+                moderator_names.get(row["moderator_id"])
+                if row["moderator_id"] is not None
+                else None
+            ),
             status=row["status"],
             is_reviewed=is_report_reviewed(row["status"]),
         )

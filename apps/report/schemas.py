@@ -50,6 +50,7 @@ class ReportDetailData(BaseModel):
     reason: str
     status: ReportStatus
     moderator_id: UUID | None = None
+    moderator_name: str | None = None
     admin_comment: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -72,6 +73,7 @@ class EntityReportItem(BaseModel):
     reason: str
     status: ReportStatus
     moderator_id: UUID | None = None
+    moderator_name: str | None = None
     admin_comment: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -100,6 +102,7 @@ class ReportedEntityItem(BaseModel):
     report_count: int
     latest_reported_at: datetime
     moderator_id: UUID | None = None
+    moderator_name: str | None = None
     status: ReportStatus
     is_reviewed: bool = False
 

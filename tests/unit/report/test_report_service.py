@@ -254,13 +254,14 @@ async def test_get_reports_for_entity_success(mock_db):
 @pytest.mark.asyncio
 async def test_get_reported_entities_success(mock_db):
     entity_id = uuid.uuid4()
+    moderator_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
     queue_row = {
         "entity_type": ReportEntityType.post,
         "entity_id": entity_id,
         "report_count": 3,
         "status": ReportStatus.under_review,
-        "moderator_id": uuid.uuid4(),
+        "moderator_id": moderator_id,
         "latest_reported_at": now,
         "created_at": now,
         "updated_at": now,
@@ -278,6 +279,9 @@ async def test_get_reported_entities_success(mock_db):
     ), patch(
         "apps.report.services.report_service._load_entities_for_queue",
         AsyncMock(return_value={entity_id: entity_payload}),
+    ), patch(
+        "apps.report.services.report_service._batch_moderator_names",
+        AsyncMock(return_value={moderator_id: "Mod Name"}),
     ):
         response = await svc.get_reported_entities(
             db,
@@ -293,6 +297,7 @@ async def test_get_reported_entities_success(mock_db):
     assert response.data.items[0].report_count == 3
     assert response.data.items[0].entity["caption"] == "Hello"
     assert response.data.items[0].status == ReportStatus.under_review
+    assert response.data.items[0].moderator_name == "Mod Name"
 
 
 @pytest.mark.asyncio
@@ -322,6 +327,7 @@ async def test_review_report_admin_success(mock_db, scalar_result):
     assert response.status is True
     assert response.data.status == ReportStatus.under_review
     assert response.data.moderator_info.first_name == "Admin"
+    assert response.data.moderator_name == "Admin User"
     apply_action.assert_awaited_once()
     db.commit.assert_awaited_once()
 
