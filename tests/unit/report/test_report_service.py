@@ -30,10 +30,11 @@ def _post(state=PostState.published, moderator_id=None):
     )
 
 
-def _comment(is_deleted=False):
+def _comment(is_deleted=False, post_id=None):
     return SimpleNamespace(
         id=uuid.uuid4(),
         is_deleted=is_deleted,
+        post_id=post_id or uuid.uuid4(),
     )
 
 
@@ -156,24 +157,68 @@ async def test_create_report_soft_deleted_post(mock_db, scalar_result):
 @pytest.mark.asyncio
 async def test_create_report_comment_success(mock_db, scalar_result):
     reporter_id = uuid.uuid4()
-    moderator_id = uuid.uuid4()
-    comment = _comment()
+    parent_moderator_id = uuid.uuid4()
+    parent_post = _post(moderator_id=parent_moderator_id)
+    comment = _comment(post_id=parent_post.id)
     payload = ReportCreateRequest(
         entity_type=ReportEntityType.comment,
         entity_id=comment.id,
         reason="Abusive language",
     )
-    db = mock_db(scalar_result(comment), scalar_result(None))
+    db = mock_db(scalar_result(comment), scalar_result(parent_post))
 
     with (
-        patch.object(svc, "_resolve_report_moderator_id", AsyncMock(return_value=moderator_id)),
         patch.object(svc, "create_report", AsyncMock(return_value=_report())) as create_report,
+        patch(
+            "apps.report.services.report_service.assign_next_moderator_round_robin",
+            AsyncMock(),
+        ) as round_robin,
     ):
         response = await svc.create_report_service(db, reporter_id, payload)
 
     assert response.status is True
     assert response.message == "Report submitted successfully."
     create_report.assert_awaited_once()
+    assert create_report.await_args.kwargs["moderator_id"] == parent_moderator_id
+    round_robin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_report_comment_reuses_parent_post_moderator(mock_db):
+    parent_moderator_id = uuid.uuid4()
+    parent_post = _post(moderator_id=parent_moderator_id)
+
+    with patch(
+        "apps.report.services.report_service.assign_next_moderator_round_robin",
+        AsyncMock(),
+    ) as round_robin:
+        assigned = await svc._resolve_report_moderator_id(
+            mock_db(),
+            entity_type=ReportEntityType.comment,
+            post=parent_post,
+        )
+
+    assert assigned == parent_moderator_id
+    round_robin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_report_comment_uses_rr_when_parent_post_has_no_moderator(mock_db):
+    rr_moderator_id = uuid.uuid4()
+    parent_post = _post(moderator_id=None)
+
+    with patch(
+        "apps.report.services.report_service.assign_next_moderator_round_robin",
+        AsyncMock(return_value=rr_moderator_id),
+    ) as round_robin:
+        assigned = await svc._resolve_report_moderator_id(
+            mock_db(),
+            entity_type=ReportEntityType.comment,
+            post=parent_post,
+        )
+
+    assert assigned == rr_moderator_id
+    round_robin.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -381,12 +426,71 @@ async def test_get_reported_entities_includes_previous_comments(mock_db):
     assert len(response.data.items[0].previous_comments) == 1
     assert response.data.items[0].previous_comments[0].admin_comment == "Prior action taken"
     assert response.data.items[0].previous_comments[0].moderator_name == "Mod One"
+    assert response.data.items[0].post_id is None
     previous_comments.assert_awaited_once_with(
         db,
         entity_type=ReportEntityType.post,
         entity_ids=[entity_id],
         exclude_report_ids=[latest_report_id],
     )
+
+
+@pytest.mark.asyncio
+async def test_get_reported_entities_comment_includes_post_id(mock_db):
+    comment_id = uuid.uuid4()
+    post_id = uuid.uuid4()
+    report_id = uuid.uuid4()
+    moderator_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    queue_row = {
+        "report_id": report_id,
+        "entity_type": ReportEntityType.comment,
+        "entity_id": comment_id,
+        "report_count": 1,
+        "status": ReportStatus.under_review,
+        "moderator_id": moderator_id,
+        "admin_comment": None,
+        "latest_reported_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }
+    db = mock_db()
+
+    with patch(
+        "apps.report.services.report_service.fetch_reported_entity_rows",
+        AsyncMock(return_value=[queue_row]),
+    ), patch(
+        "apps.report.services.report_service.count_reported_entities",
+        AsyncMock(return_value=1),
+    ), patch(
+        "apps.report.services.report_service._load_entities_for_queue",
+        AsyncMock(
+            return_value={
+                comment_id: {
+                    "id": str(comment_id),
+                    "post_id": str(post_id),
+                    "comment_text": "Bad comment",
+                }
+            }
+        ),
+    ), patch(
+        "apps.report.services.report_service._batch_moderator_names",
+        AsyncMock(return_value={moderator_id: "Mod Name"}),
+    ), patch(
+        "apps.report.services.report_service.get_previous_report_comments_for_entities",
+        AsyncMock(return_value=[]),
+    ):
+        response = await svc.get_reported_entities(
+            db,
+            entity_type=ReportEntityType.comment,
+            page=1,
+            page_size=20,
+            viewer_user_id=uuid.uuid4(),
+        )
+
+    assert response.status is True
+    assert response.data.items[0].post_id == post_id
+    assert response.data.items[0].entity["post_id"] == str(post_id)
 
 
 @pytest.mark.asyncio
@@ -415,7 +519,10 @@ async def test_get_report_details_includes_previous_comments(mock_db):
     ), patch(
         "apps.report.services.report_service.get_previous_report_comments",
         AsyncMock(return_value=[(previous, moderator_user, moderator_profile)]),
-    ) as previous_comments:
+    ) as previous_comments, patch(
+        "apps.report.services.report_service._resolve_comment_post_id",
+        AsyncMock(return_value=None),
+    ):
         response = await svc.get_report_details_admin_service(db, current.id)
 
     assert response.status is True
@@ -424,12 +531,42 @@ async def test_get_report_details_includes_previous_comments(mock_db):
     assert response.data.previous_comments[0].admin_comment == "Prior action taken"
     assert response.data.previous_comments[0].moderator_name == "Mod One"
     assert response.data.previous_comments[0].moderator_id == previous.moderator_id
+    assert response.data.post_id is None
     previous_comments.assert_awaited_once_with(
         db,
         entity_type=current.entity_type,
         entity_id=current.entity_id,
         exclude_report_id=current.id,
     )
+
+
+@pytest.mark.asyncio
+async def test_get_report_details_comment_includes_post_id(mock_db):
+    current = _report()
+    current.entity_type = ReportEntityType.comment
+    post_id = uuid.uuid4()
+    reporter_user = _user()
+    reporter_profile = SimpleNamespace(first_name="John", last_name="Doe", profile_photo_url=None)
+    row = (current, reporter_user, reporter_profile, None, None)
+    db = mock_db()
+
+    with patch(
+        "apps.report.services.report_service.get_report_by_id",
+        AsyncMock(return_value=row),
+    ), patch(
+        "apps.report.services.report_service.count_reports_by_entity_keys",
+        AsyncMock(return_value={(current.entity_type, current.entity_id): 1}),
+    ), patch(
+        "apps.report.services.report_service.get_previous_report_comments",
+        AsyncMock(return_value=[]),
+    ), patch(
+        "apps.report.services.report_service._resolve_comment_post_id",
+        AsyncMock(return_value=post_id),
+    ):
+        response = await svc.get_report_details_admin_service(db, current.id)
+
+    assert response.status is True
+    assert response.data.post_id == post_id
 
 
 @pytest.mark.asyncio
@@ -449,6 +586,9 @@ async def test_get_report_details_previous_comments_null_when_none(mock_db):
     ), patch(
         "apps.report.services.report_service.get_previous_report_comments",
         AsyncMock(return_value=[]),
+    ), patch(
+        "apps.report.services.report_service._resolve_comment_post_id",
+        AsyncMock(return_value=None),
     ):
         response = await svc.get_report_details_admin_service(db, current.id)
 
@@ -474,7 +614,8 @@ async def test_review_report_admin_success(mock_db, scalar_result):
          patch("apps.report.services.report_service.update_report", AsyncMock(return_value=report_obj)), \
          patch("apps.report.services.report_service._apply_actioned_report_to_entity", AsyncMock(return_value=None)) as apply_action, \
          patch("apps.report.services.report_service.count_reports_by_entity_keys", AsyncMock(return_value={(report_obj.entity_type, report_obj.entity_id): 1})), \
-         patch("apps.report.services.report_service.get_previous_report_comments", AsyncMock(return_value=[])):
+         patch("apps.report.services.report_service.get_previous_report_comments", AsyncMock(return_value=[])), \
+         patch("apps.report.services.report_service._resolve_comment_post_id", AsyncMock(return_value=None)):
         response = await svc.review_report_admin_service(
             db,
             current_admin_id=admin_user.id,
@@ -511,7 +652,8 @@ async def test_review_report_rejected_skips_entity_action(mock_db):
          patch("apps.report.services.report_service.update_report", AsyncMock(return_value=report_obj)), \
          patch("apps.report.services.report_service._apply_actioned_report_to_entity", AsyncMock(return_value=None)) as apply_action, \
          patch("apps.report.services.report_service.count_reports_by_entity_keys", AsyncMock(return_value={(report_obj.entity_type, report_obj.entity_id): 1})), \
-         patch("apps.report.services.report_service.get_previous_report_comments", AsyncMock(return_value=[])):
+         patch("apps.report.services.report_service.get_previous_report_comments", AsyncMock(return_value=[])), \
+         patch("apps.report.services.report_service._resolve_comment_post_id", AsyncMock(return_value=None)):
         response = await svc.review_report_admin_service(
             db,
             current_admin_id=admin_user.id,

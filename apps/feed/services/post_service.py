@@ -830,11 +830,14 @@ async def admin_publish_post_service(
 async def get_post_service(
     post_id: UUID,
     user_id: UUID,
-    db: AsyncSession
+    db: AsyncSession,
+    *,
+    viewer_role: str | None = None,
 ) -> Post:
     """
     Retrieve details of a specific post.
     Validates visibility access permissions.
+    Moderators and superadmins can view posts regardless of feed visibility rules.
     """
     from common.user_visibility import is_hidden_account_status
 
@@ -847,6 +850,9 @@ async def get_post_service(
     if not row:
         raise ApiError("Post not found")
     post, author = row
+
+    if viewer_role in ("moderator", "superadmin"):
+        return post
 
     # Hide posts from suspended/banned/deleting authors for other viewers.
     if post.author_user_id != user_id and is_hidden_account_status(author.status):

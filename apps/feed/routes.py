@@ -76,13 +76,14 @@ async def save_post(
 @router.get("/posts/{id}", response_model=ApiResponse)
 async def get_post(
     id: UUID,
-    current_user: User = Depends(get_current_app_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     post = await get_post_service(
         post_id=id,
         user_id=current_user.id,
-        db=db
+        db=db,
+        viewer_role=current_user.role,
     )
     return success_response(
         "Post retrieved successfully",

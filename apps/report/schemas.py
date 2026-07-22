@@ -66,6 +66,7 @@ class ReportDetailData(BaseModel):
     report_count: int = 0
     is_reviewed: bool = False
     previous_comments: list[PreviousCommentItem] | None = None
+    post_id: UUID | None = None
 
 
 class ReportResponse(ApiResponse):
@@ -115,6 +116,7 @@ class ReportedEntityItem(BaseModel):
     admin_comment: str | None = None
     is_reviewed: bool = False
     previous_comments: list[PreviousCommentItem] | None = None
+    post_id: UUID | None = None
 
 
 class ReportedEntityListData(BaseModel):

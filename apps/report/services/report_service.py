@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -95,6 +96,7 @@ def format_report_detail(
     *,
     report_count: int = 0,
     previous_comments: list[PreviousCommentItem] | None = None,
+    post_id: UUID | None = None,
 ) -> ReportDetailData:
     reporter_details = ReportUserDetail(
         id=reporter_user.id,
@@ -133,7 +135,30 @@ def format_report_detail(
         report_count=report_count,
         is_reviewed=reviewed,
         previous_comments=previous_comments,
+        post_id=post_id,
     )
+
+
+def _comment_post_id_from_entity(entity: Any) -> UUID | None:
+    """Extract parent post_id from a formatted comment entity payload."""
+    if not isinstance(entity, dict):
+        return None
+    raw = entity.get("post_id")
+    if raw is None:
+        return None
+    return UUID(str(raw))
+
+
+async def _resolve_comment_post_id(
+    db: AsyncSession,
+    *,
+    entity_type: ReportEntityType,
+    entity_id: UUID,
+) -> UUID | None:
+    if entity_type != ReportEntityType.comment:
+        return None
+    comment = await get_comment_by_id(db, entity_id)
+    return comment.post_id if comment is not None else None
 
 
 def _format_previous_comments(
@@ -205,11 +230,13 @@ async def _resolve_report_moderator_id(
     Assign a moderator for a new report.
 
     - Post reports reuse the moderator already assigned at publish time.
-    - User/comment reports (and posts with no moderator) use the shared
+    - Comment reports reuse the parent post's moderator when set.
+    - User reports (and posts/comments with no moderator) use the shared
       round-robin cursor; fall back to first active moderator, then superadmin.
     """
-    if entity_type == ReportEntityType.post and post is not None and post.moderator_id is not None:
-        return post.moderator_id
+    if entity_type in (ReportEntityType.post, ReportEntityType.comment):
+        if post is not None and post.moderator_id is not None:
+            return post.moderator_id
 
     try:
         return await assign_next_moderator_round_robin(db)
@@ -265,6 +292,9 @@ async def create_report_service(
             return error_response("Comment does not exist", response_cls=ApiResponse)
         if comment.is_deleted:
             return error_response("Cannot report a soft-deleted comment", response_cls=ApiResponse)
+        post = (
+            await db.execute(select(Post).where(Post.id == comment.post_id))
+        ).scalar_one_or_none()
 
     moderator_id = await _resolve_report_moderator_id(
         db,
@@ -564,6 +594,11 @@ async def get_reported_entities(
             previous_comments=_format_previous_comments(
                 previous_by_entity.get(row["entity_id"], [])
             ),
+            post_id=(
+                _comment_post_id_from_entity(entities.get(row["entity_id"]))
+                if entity_type == ReportEntityType.comment
+                else None
+            ),
         )
         for row in rows
     ]
@@ -609,6 +644,11 @@ async def get_report_details_admin_service(
         row[4],
         report_count=report_counts.get((report.entity_type, report.entity_id), 0),
         previous_comments=_format_previous_comments(previous_rows),
+        post_id=await _resolve_comment_post_id(
+            db,
+            entity_type=report.entity_type,
+            entity_id=report.entity_id,
+        ),
     )
     return success_response(
         message="Report details retrieved successfully",
@@ -740,6 +780,11 @@ async def review_report_admin_service(
         updated_row[4],
         report_count=report_counts.get((report.entity_type, report.entity_id), 0),
         previous_comments=_format_previous_comments(previous_rows),
+        post_id=await _resolve_comment_post_id(
+            db,
+            entity_type=report.entity_type,
+            entity_id=report.entity_id,
+        ),
     )
     return success_response(
         message="Report reviewed successfully",
