@@ -21,7 +21,7 @@ from apps.report.services import (
     get_reports,
     review_report_admin_service,
 )
-from common.enums import ReportEntityType
+from common.enums import ReportEntityType, ReportStatus
 from common.pagination import PaginationParams
 from common.schemas import ApiResponse
 from core.database.session import get_session
@@ -81,11 +81,17 @@ async def list_reports_admin_route(
     summary="List reported entities",
     description=(
         "Return one row per reported entity for the moderation dashboard. "
+        "Optionally filter by status (under_review, actioned, rejected). "
         "Admin/moderator only."
     ),
 )
 async def get_reported_entities_route(
     entity_type: ReportEntityType = Query(...),
+    status_filter: ReportStatus | None = Query(
+        None,
+        alias="status",
+        description="Filter by report status: under_review, actioned, or rejected.",
+    ),
     moderator_id: UUID | None = Query(None),
     current_user=Depends(get_current_moderator),
     db: AsyncSession = Depends(get_session),
@@ -94,6 +100,7 @@ async def get_reported_entities_route(
     return await get_reported_entities(
         db,
         entity_type=entity_type,
+        status=status_filter,
         moderator_id=moderator_id,
         page=pagination.page,
         page_size=pagination.pageSize,

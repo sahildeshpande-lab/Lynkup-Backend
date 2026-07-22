@@ -477,6 +477,7 @@ async def get_reported_entities(
     db: AsyncSession,
     *,
     entity_type: ReportEntityType,
+    status: ReportStatus | None = None,
     moderator_id: UUID | None = None,
     page: int = 1,
     page_size: int = 20,
@@ -486,6 +487,7 @@ async def get_reported_entities(
     Return one moderation-dashboard row per reported entity.
 
     Each item includes the full entity payload plus report metadata.
+    Optionally filter by report status (under_review, actioned, rejected).
     """
     _validate_entity_type(entity_type)
     offset = (page - 1) * page_size
@@ -493,6 +495,7 @@ async def get_reported_entities(
     rows = await fetch_reported_entity_rows(
         db,
         entity_type=entity_type,
+        status=status,
         moderator_id=moderator_id,
         offset=offset,
         limit=page_size,
@@ -500,6 +503,7 @@ async def get_reported_entities(
     total_items = await count_reported_entities(
         db,
         entity_type=entity_type,
+        status=status,
         moderator_id=moderator_id,
     )
 

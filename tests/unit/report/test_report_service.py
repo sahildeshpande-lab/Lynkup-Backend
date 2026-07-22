@@ -273,10 +273,10 @@ async def test_get_reported_entities_success(mock_db):
     with patch(
         "apps.report.services.report_service.fetch_reported_entity_rows",
         AsyncMock(return_value=[queue_row]),
-    ), patch(
+    ) as fetch_rows, patch(
         "apps.report.services.report_service.count_reported_entities",
         AsyncMock(return_value=1),
-    ), patch(
+    ) as count_rows, patch(
         "apps.report.services.report_service._load_entities_for_queue",
         AsyncMock(return_value={entity_id: entity_payload}),
     ), patch(
@@ -286,6 +286,7 @@ async def test_get_reported_entities_success(mock_db):
         response = await svc.get_reported_entities(
             db,
             entity_type=ReportEntityType.post,
+            status=ReportStatus.under_review,
             page=1,
             page_size=20,
             viewer_user_id=viewer_id,
@@ -298,6 +299,8 @@ async def test_get_reported_entities_success(mock_db):
     assert response.data.items[0].entity["caption"] == "Hello"
     assert response.data.items[0].status == ReportStatus.under_review
     assert response.data.items[0].moderator_name == "Mod Name"
+    assert fetch_rows.await_args.kwargs["status"] == ReportStatus.under_review
+    assert count_rows.await_args.kwargs["status"] == ReportStatus.under_review
 
 
 @pytest.mark.asyncio
