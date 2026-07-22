@@ -262,6 +262,7 @@ async def test_get_reported_entities_success(mock_db):
         "report_count": 3,
         "status": ReportStatus.under_review,
         "moderator_id": moderator_id,
+        "admin_comment": None,
         "latest_reported_at": now,
         "created_at": now,
         "updated_at": now,
@@ -298,6 +299,7 @@ async def test_get_reported_entities_success(mock_db):
     assert response.data.items[0].report_count == 3
     assert response.data.items[0].entity["caption"] == "Hello"
     assert response.data.items[0].status == ReportStatus.under_review
+    assert response.data.items[0].admin_comment is None
     assert response.data.items[0].moderator_name == "Mod Name"
     assert fetch_rows.await_args.kwargs["status"] == ReportStatus.under_review
     assert count_rows.await_args.kwargs["status"] == ReportStatus.under_review
@@ -407,3 +409,71 @@ async def test_apply_actioned_report_deletes_comment(mock_db):
 
     assert error is None
     mark_deleted.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_apply_actioned_report_blocks_user(mock_db, scalar_result):
+    user = _user(status=UserStatus.active)
+    user.firebase_uid = "firebase-uid"
+    report = _report()
+    report.entity_type = ReportEntityType.user
+    report.entity_id = user.id
+    db = mock_db(scalar_result(user))
+
+    with patch("core.auth.services.disable_firebase_user") as disable_mock:
+        error = await svc._apply_actioned_report_to_entity(
+            db,
+            report,
+            moderator_id=uuid.uuid4(),
+        )
+
+    assert error is None
+    assert user.status == UserStatus.suspended
+    db.add.assert_called()
+    disable_mock.assert_called_once_with("firebase-uid")
+
+
+@pytest.mark.asyncio
+async def test_get_reported_entities_includes_admin_comment(mock_db):
+    entity_id = uuid.uuid4()
+    moderator_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    queue_row = {
+        "entity_type": ReportEntityType.user,
+        "entity_id": entity_id,
+        "report_count": 2,
+        "status": ReportStatus.actioned,
+        "moderator_id": moderator_id,
+        "admin_comment": "Harassment confirmed",
+        "latest_reported_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }
+    db = mock_db()
+
+    with patch(
+        "apps.report.services.report_service.fetch_reported_entity_rows",
+        AsyncMock(return_value=[queue_row]),
+    ), patch(
+        "apps.report.services.report_service.count_reported_entities",
+        AsyncMock(return_value=1),
+    ), patch(
+        "apps.report.services.report_service._load_entities_for_queue",
+        AsyncMock(return_value={entity_id: {"id": str(entity_id), "status": "suspended"}}),
+    ), patch(
+        "apps.report.services.report_service._batch_moderator_names",
+        AsyncMock(return_value={moderator_id: "Mod Name"}),
+    ):
+        response = await svc.get_reported_entities(
+            db,
+            entity_type=ReportEntityType.user,
+            status=ReportStatus.actioned,
+            page=1,
+            page_size=20,
+            viewer_user_id=uuid.uuid4(),
+        )
+
+    assert response.status is True
+    assert response.data.items[0].admin_comment == "Harassment confirmed"
+    assert response.data.items[0].status == ReportStatus.actioned
+    assert response.data.items[0].is_reviewed is True

@@ -104,6 +104,7 @@ class ReportedEntityItem(BaseModel):
     moderator_id: UUID | None = None
     moderator_name: str | None = None
     status: ReportStatus
+    admin_comment: str | None = None
     is_reviewed: bool = False
 
 

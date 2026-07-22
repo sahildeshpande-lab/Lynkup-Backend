@@ -243,6 +243,7 @@ async def get_reported_entities(
             Report.entity_id.label("entity_id"),
             Report.status.label("status"),
             Report.moderator_id.label("moderator_id"),
+            Report.admin_comment.label("admin_comment"),
             Report.created_at.label("latest_reported_at"),
             func.count(Report.id)
             .over(partition_by=(Report.entity_type, Report.entity_id))
@@ -271,6 +272,7 @@ async def get_reported_entities(
             ranked.c.report_count,
             ranked.c.status,
             ranked.c.moderator_id,
+            ranked.c.admin_comment,
             ranked.c.latest_reported_at,
             ranked.c.created_at,
             ranked.c.updated_at,
@@ -290,6 +292,7 @@ async def get_reported_entities(
             "report_count": int(row.report_count),
             "status": row.status,
             "moderator_id": row.moderator_id,
+            "admin_comment": row.admin_comment,
             "latest_reported_at": row.latest_reported_at,
             "created_at": row.created_at,
             "updated_at": row.updated_at,

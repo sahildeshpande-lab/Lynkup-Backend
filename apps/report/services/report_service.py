@@ -531,6 +531,7 @@ async def get_reported_entities(
                 else None
             ),
             status=row["status"],
+            admin_comment=row.get("admin_comment"),
             is_reviewed=is_report_reviewed(row["status"]),
         )
         for row in rows
@@ -589,6 +590,7 @@ async def _apply_actioned_report_to_entity(
 
     - post: set state to flagged
     - comment: soft-delete (is_deleted=True)
+    - user: set status to suspended (and disable Firebase account when present)
     - rejected reviews leave the entity unchanged (caller skips this)
 
     Returns an error message if the entity cannot be updated, else None.
@@ -614,6 +616,31 @@ async def _apply_actioned_report_to_entity(
         if comment is None:
             return "Reported comment not found"
         await mark_comment_deleted(db, comment)
+        return None
+
+    if report.entity_type == ReportEntityType.user:
+        user = (
+            await db.execute(select(User).where(User.id == report.entity_id))
+        ).scalar_one_or_none()
+        if user is None:
+            return "Reported user not found"
+        if user.is_deleted or user.deleted_at is not None or user.status == UserStatus.deleting:
+            return "Cannot action a soft-deleted user"
+
+        user.status = UserStatus.suspended
+        user.updated_at = datetime.now(timezone.utc)
+        db.add(user)
+
+        if user.firebase_uid:
+            try:
+                from core.auth.services import disable_firebase_user
+
+                disable_firebase_user(user.firebase_uid)
+            except Exception:
+                logger.exception(
+                    "Failed to disable Firebase user for actioned report user_id=%s",
+                    user.id,
+                )
         return None
 
     return None
