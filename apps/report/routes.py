@@ -80,7 +80,8 @@ async def list_reports_admin_route(
     status_code=status.HTTP_200_OK,
     summary="List reported entities",
     description=(
-        "Return one row per reported entity for the moderation dashboard. "
+        "Return one row per reported entity for the moderation dashboard, "
+        "including previous moderation comments for each entity. "
         "Optionally filter by status (under_review, actioned, rejected). "
         "Admin/moderator only."
     ),
@@ -113,7 +114,7 @@ async def get_reported_entities_route(
     response_model=ReportResponse,
     status_code=status.HTTP_200_OK,
     summary="Get report by ID",
-    description="Retrieve details of a report by its ID. Admin/moderator only.",
+    description="Retrieve details of a report by its ID, including previous moderation comments for the same entity. Admin/moderator only.",
 )
 async def get_report_details_admin_route(
     report_id: UUID,

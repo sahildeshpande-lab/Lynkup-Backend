@@ -11,7 +11,6 @@ from apps.engagement.db_models import Comment, Report
 from apps.engagement.repositories.report_repository import (
     count_reports,
     create_report,
-    get_duplicate_report,
     get_report_by_id,
     get_reports,
     update_report,
@@ -110,11 +109,6 @@ async def create_report_service(
             return error_response("Comment does not exist", response_cls=ApiResponse)
         if comment.is_deleted:
             return error_response("Cannot report a soft-deleted comment", response_cls=ApiResponse)
-
-    # 3. Prevent duplicate reports
-    existing = await get_duplicate_report(db, user_id, payload.entity_type, payload.entity_id)
-    if existing is not None:
-        return error_response("You have already reported this entity", response_cls=ApiResponse)
 
     # 4. Create and save report
     try:

@@ -31,7 +31,8 @@ from apps.report.repositories.report_repository import (
     count_reports as count_report_rows,
     count_reports_by_entity_keys,
     create_report,
-    get_duplicate_report,
+    get_previous_report_comments,
+    get_previous_report_comments_for_entities,
     get_report_by_id,
     get_reported_entities as fetch_reported_entity_rows,
     get_reports as fetch_report_rows,
@@ -39,6 +40,7 @@ from apps.report.repositories.report_repository import (
 )
 from apps.report.schemas import (
     EntityReportItem,
+    PreviousCommentItem,
     ReportCreateRequest,
     ReportDetailData,
     ReportListData,
@@ -92,6 +94,7 @@ def format_report_detail(
     moderator_profile: Profile | None,
     *,
     report_count: int = 0,
+    previous_comments: list[PreviousCommentItem] | None = None,
 ) -> ReportDetailData:
     reporter_details = ReportUserDetail(
         id=reporter_user.id,
@@ -129,7 +132,26 @@ def format_report_detail(
         moderator_info=moderator_info,
         report_count=report_count,
         is_reviewed=reviewed,
+        previous_comments=previous_comments,
     )
+
+
+def _format_previous_comments(
+    rows: list[tuple[Report, User | None, Profile | None]],
+) -> list[PreviousCommentItem] | None:
+    if not rows:
+        return None
+    return [
+        PreviousCommentItem(
+            moderator_id=report.moderator_id,
+            moderator_name=_resolve_moderator_name(moderator_user, moderator_profile)
+            if moderator_user is not None
+            else None,
+            updated_at=report.updated_at,
+            admin_comment=report.admin_comment,
+        )
+        for report, moderator_user, moderator_profile in rows
+    ]
 
 
 def _format_entity_report_item(
@@ -243,10 +265,6 @@ async def create_report_service(
             return error_response("Comment does not exist", response_cls=ApiResponse)
         if comment.is_deleted:
             return error_response("Cannot report a soft-deleted comment", response_cls=ApiResponse)
-
-    existing = await get_duplicate_report(db, user_id, payload.entity_type, payload.entity_id)
-    if existing is not None:
-        return error_response("You have already reported this entity", response_cls=ApiResponse)
 
     moderator_id = await _resolve_report_moderator_id(
         db,
@@ -518,6 +536,16 @@ async def get_reported_entities(
         db,
         [row["moderator_id"] for row in rows],
     )
+    previous_rows = await get_previous_report_comments_for_entities(
+        db,
+        entity_type=entity_type,
+        entity_ids=entity_ids,
+        exclude_report_ids=[row["report_id"] for row in rows if row.get("report_id")],
+    )
+    previous_by_entity: dict[UUID, list[tuple[Report, User | None, Profile | None]]] = {}
+    for previous_row in previous_rows:
+        report = previous_row[0]
+        previous_by_entity.setdefault(report.entity_id, []).append(previous_row)
 
     items = [
         ReportedEntityItem(
@@ -533,6 +561,9 @@ async def get_reported_entities(
             status=row["status"],
             admin_comment=row.get("admin_comment"),
             is_reviewed=is_report_reviewed(row["status"]),
+            previous_comments=_format_previous_comments(
+                previous_by_entity.get(row["entity_id"], [])
+            ),
         )
         for row in rows
     ]
@@ -564,6 +595,12 @@ async def get_report_details_admin_service(
         db,
         [(report.entity_type, report.entity_id)],
     )
+    previous_rows = await get_previous_report_comments(
+        db,
+        entity_type=report.entity_type,
+        entity_id=report.entity_id,
+        exclude_report_id=report.id,
+    )
     detail = format_report_detail(
         row[0],
         row[1],
@@ -571,6 +608,7 @@ async def get_report_details_admin_service(
         row[3],
         row[4],
         report_count=report_counts.get((report.entity_type, report.entity_id), 0),
+        previous_comments=_format_previous_comments(previous_rows),
     )
     return success_response(
         message="Report details retrieved successfully",
@@ -688,6 +726,12 @@ async def review_report_admin_service(
         db,
         [(report.entity_type, report.entity_id)],
     )
+    previous_rows = await get_previous_report_comments(
+        db,
+        entity_type=report.entity_type,
+        entity_id=report.entity_id,
+        exclude_report_id=report.id,
+    )
     detail = format_report_detail(
         updated_row[0],
         updated_row[1],
@@ -695,6 +739,7 @@ async def review_report_admin_service(
         updated_row[3],
         updated_row[4],
         report_count=report_counts.get((report.entity_type, report.entity_id), 0),
+        previous_comments=_format_previous_comments(previous_rows),
     )
     return success_response(
         message="Report reviewed successfully",

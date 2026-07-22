@@ -42,6 +42,13 @@ def is_report_reviewed(status: ReportStatus) -> bool:
     return status in (ReportStatus.rejected, ReportStatus.actioned)
 
 
+class PreviousCommentItem(BaseModel):
+    moderator_id: UUID | None = None
+    moderator_name: str | None = None
+    updated_at: datetime
+    admin_comment: str | None = None
+
+
 class ReportDetailData(BaseModel):
     id: UUID
     reported_id: UUID
@@ -58,6 +65,7 @@ class ReportDetailData(BaseModel):
     moderator_info: ReportUserDetail | None = None
     report_count: int = 0
     is_reviewed: bool = False
+    previous_comments: list[PreviousCommentItem] | None = None
 
 
 class ReportResponse(ApiResponse):
@@ -106,6 +114,7 @@ class ReportedEntityItem(BaseModel):
     status: ReportStatus
     admin_comment: str | None = None
     is_reviewed: bool = False
+    previous_comments: list[PreviousCommentItem] | None = None
 
 
 class ReportedEntityListData(BaseModel):

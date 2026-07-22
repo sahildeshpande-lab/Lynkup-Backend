@@ -68,6 +68,82 @@ async def get_duplicate_report(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+async def get_previous_report_comments(
+    db: AsyncSession,
+    *,
+    entity_type: ReportEntityType,
+    entity_id: UUID,
+    exclude_report_id: UUID,
+) -> list[tuple[Report, User | None, Profile | None]]:
+    """
+    Fetch prior reviewed moderation comments for the same entity.
+
+    Includes reports that already have an admin_comment, excluding the current
+    report. Ordered by updated_at ASC for chronological history.
+    """
+    moderator_user = aliased(User, name="previous_moderator_user")
+    moderator_profile = aliased(Profile, name="previous_moderator_profile")
+
+    stmt = (
+        select(Report, moderator_user, moderator_profile)
+        .outerjoin(moderator_user, moderator_user.id == Report.moderator_id)
+        .outerjoin(moderator_profile, moderator_profile.user_id == Report.moderator_id)
+        .where(
+            Report.entity_type == entity_type,
+            Report.entity_id == entity_id,
+            Report.id != exclude_report_id,
+            Report.admin_comment.is_not(None),
+            Report.admin_comment != "",
+            Report.status.in_((ReportStatus.rejected, ReportStatus.actioned)),
+        )
+        .order_by(Report.updated_at.asc(), Report.created_at.asc())
+    )
+    return list((await db.execute(stmt)).all())
+
+
+async def get_previous_report_comments_for_entities(
+    db: AsyncSession,
+    *,
+    entity_type: ReportEntityType,
+    entity_ids: list[UUID],
+    exclude_report_ids: list[UUID],
+) -> list[tuple[Report, User | None, Profile | None]]:
+    """
+    Batch-fetch prior reviewed moderation comments for many entities.
+
+    Excludes the latest/current report ids shown on the queue rows. Ordered by
+    entity_id, then updated_at ASC for chronological history per entity.
+    """
+    if not entity_ids:
+        return []
+
+    moderator_user = aliased(User, name="batch_previous_moderator_user")
+    moderator_profile = aliased(Profile, name="batch_previous_moderator_profile")
+
+    conditions = [
+        Report.entity_type == entity_type,
+        Report.entity_id.in_(entity_ids),
+        Report.admin_comment.is_not(None),
+        Report.admin_comment != "",
+        Report.status.in_((ReportStatus.rejected, ReportStatus.actioned)),
+    ]
+    if exclude_report_ids:
+        conditions.append(Report.id.notin_(exclude_report_ids))
+
+    stmt = (
+        select(Report, moderator_user, moderator_profile)
+        .outerjoin(moderator_user, moderator_user.id == Report.moderator_id)
+        .outerjoin(moderator_profile, moderator_profile.user_id == Report.moderator_id)
+        .where(*conditions)
+        .order_by(
+            Report.entity_id.asc(),
+            Report.updated_at.asc(),
+            Report.created_at.asc(),
+        )
+    )
+    return list((await db.execute(stmt)).all())
+
+
 async def get_reports(
     db: AsyncSession,
     *,
@@ -239,6 +315,7 @@ async def get_reported_entities(
 
     ranked = (
         select(
+            Report.id.label("report_id"),
             Report.entity_type.label("entity_type"),
             Report.entity_id.label("entity_id"),
             Report.status.label("status"),
@@ -267,6 +344,7 @@ async def get_reported_entities(
 
     stmt = (
         select(
+            ranked.c.report_id,
             ranked.c.entity_type,
             ranked.c.entity_id,
             ranked.c.report_count,
@@ -287,6 +365,7 @@ async def get_reported_entities(
     rows = (await db.execute(stmt)).all()
     return [
         {
+            "report_id": row.report_id,
             "entity_type": row.entity_type,
             "entity_id": row.entity_id,
             "report_count": int(row.report_count),

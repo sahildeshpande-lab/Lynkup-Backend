@@ -175,7 +175,7 @@ async def test_create_report_soft_deleted_comment(mock_db, scalar_result):
 
 
 @pytest.mark.asyncio
-async def test_create_report_duplicate_prevention(mock_db, scalar_result):
+async def test_create_report_allows_multiple_reports(mock_db, scalar_result):
     reporter_id = uuid.uuid4()
     post = _post()
     payload = ReportCreateRequest(
@@ -183,11 +183,15 @@ async def test_create_report_duplicate_prevention(mock_db, scalar_result):
         entity_id=post.id,
         reason="Spam",
     )
-    db = mock_db(scalar_result(post), scalar_result(_report()))
+    db = mock_db(scalar_result(post))
 
-    response = await svc.create_report_service(db, reporter_id, payload)
-    assert response.status is False
-    assert "already reported" in response.message.lower()
+    with patch(
+        "apps.engagement.services.report_service.create_report",
+        AsyncMock(return_value=_report()),
+    ):
+        response = await svc.create_report_service(db, reporter_id, payload)
+
+    assert response.status is True
 
 
 @pytest.mark.asyncio
