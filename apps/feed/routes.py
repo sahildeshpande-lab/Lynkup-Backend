@@ -5,7 +5,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 
 from core.database.session import get_session
-from core.security.auth import get_current_app_user, get_current_user
+from core.security.auth import (
+    get_current_app_user,
+    get_current_user,
+    get_current_user_moderator_or_superadmin,
+)
 from apps.accounts.db_models import User
 from common.enums import MediaType
 from common.responses import success_response
@@ -76,14 +80,13 @@ async def save_post(
 @router.get("/posts/{id}", response_model=ApiResponse)
 async def get_post(
     id: UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     post = await get_post_service(
         post_id=id,
         user_id=current_user.id,
-        db=db,
-        viewer_role=current_user.role,
+        db=db
     )
     return success_response(
         "Post retrieved successfully",

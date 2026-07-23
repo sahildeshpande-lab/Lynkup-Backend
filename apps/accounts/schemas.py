@@ -21,7 +21,8 @@ class SocialAuthRequest(BaseModel):
     user: Role = "user"
     device_id: str
     fullName: Optional[str] = None
-    # profilePhotoUrl: Optional[str] = None
+    # Google / Apple avatar URL — stored as-is on profiles.profile_photo_url.
+    profile_photo_url: Optional[str] = None
 
     @field_validator("device_id")
     @classmethod
@@ -30,6 +31,14 @@ class SocialAuthRequest(BaseModel):
         if not normalized:
             raise ValueError("device_id cannot be blank")
         return normalized
+
+    @field_validator("profile_photo_url")
+    @classmethod
+    def normalize_profile_photo_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 class EmailSignupRequest(BaseModel):

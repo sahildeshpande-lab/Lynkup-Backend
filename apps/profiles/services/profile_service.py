@@ -93,6 +93,31 @@ async def update_profile_me(
                 detail="Invalid universityId"
             )
 
+    #
+    # Country
+    #
+    if payload.countryId is not None:
+        if payload.countryId:
+            try:
+                country_uuid = UUID(payload.countryId)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid countryId",
+                )
+            from apps.profiles.db_models.country_db_model import Country
+            country = (
+                await db.execute(select(Country).where(Country.id == country_uuid))
+            ).scalar_one_or_none()
+            if not country:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid countryId",
+                )
+            profile.country_id = country_uuid
+        else:
+            profile.country_id = None
+
     current_user.onboarding_status = (
         OnboardingStatus.completed
     )
@@ -327,6 +352,23 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
         else:
             profile.university_id = None
 
+    if payload.country_id is not None:
+        if payload.country_id:
+            try:
+                from uuid import UUID as _UUID
+                country_uuid = _UUID(str(payload.country_id))
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid country_id")
+            from apps.profiles.db_models.country_db_model import Country
+            country = (
+                await db.execute(select(Country).where(Country.id == country_uuid))
+            ).scalar_one_or_none()
+            if not country:
+                raise HTTPException(status_code=400, detail="Invalid country_id")
+            profile.country_id = country_uuid
+        else:
+            profile.country_id = None
+
     if payload.education_level_id is not None:
         from common.enums import EducationLevel
         try:
@@ -458,6 +500,28 @@ async def update_user_profile_by_admin_service(
                 )
         else:
             profile.university_id = None
+
+    if payload.country_id is not None:
+        if payload.country_id:
+            try:
+                country_uuid = UUID(str(payload.country_id))
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid country_id",
+                )
+            from apps.profiles.db_models.country_db_model import Country
+            country = (
+                await db.execute(select(Country).where(Country.id == country_uuid))
+            ).scalar_one_or_none()
+            if not country:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid country_id",
+                )
+            profile.country_id = country_uuid
+        else:
+            profile.country_id = None
 
     if payload.education_level_id is not None:
         from common.enums import EducationLevel

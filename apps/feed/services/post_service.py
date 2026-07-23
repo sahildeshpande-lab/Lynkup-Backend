@@ -56,6 +56,20 @@ def _resolve_moderator_name(mod_user=None, mod_profile=None) -> str | None:
     return moderator_name
 
 
+def _normalize_profile_visibility(profile) -> str:
+    """Return 'private' only when visibility is private; otherwise 'public'.
+
+    ``connections_only`` and ``None`` both map to ``public`` for API responses.
+    """
+    if profile is None:
+        return "public"
+    raw = getattr(profile, "profile_visibility", None)
+    if raw is None:
+        return "public"
+    value = raw.value if hasattr(raw, "value") else str(raw)
+    return "private" if value == "private" else "public"
+
+
 def format_post_detail(
     post: Post,
     *,
@@ -75,6 +89,9 @@ def format_post_detail(
 ) -> dict:
     """
     Format a Post model and its attachments into a dictionary matching PostDetailData schema.
+
+    ``profile_visibility`` is always the post author's visibility (never mixed with
+    a reposter). Set last so enrichment cannot overwrite it.
     """
     media_data = _extract_post_media(post)
 
@@ -85,6 +102,7 @@ def format_post_detail(
         if viewer_user_id is None
         else viewer_user_id != post.author_user_id
     )
+    author_profile = author_profile or getattr(post, "_author_profile", None)
     data = {
         "id": post.id,
         "author_user_id": post.author_user_id,
@@ -98,6 +116,7 @@ def format_post_detail(
         },
         "created_at": post.created_at,
         "updated_at": post.updated_at,
+        "is_edited": bool(getattr(post, "is_edited", False)),
         "like_count": post.like_count,
         "repost_count": post.repost_count,
         "share_count": getattr(post, "share_count", 0),
@@ -121,7 +140,6 @@ def format_post_detail(
         "media": media_data,
         "reposted_data": reposted_data,
     }
-    author_profile = author_profile or getattr(post, "_author_profile", None)
     if author_profile is not None:
         photo_url = (
             generate_profile_image_url(author_profile.profile_photo_url)
@@ -138,7 +156,11 @@ def format_post_detail(
     if is_requested is not None:
         data["is_requested"] = is_requested
     if profile_details is not None:
-        data.update(profile_details)
+        # Strip any accidental visibility key so author visibility stays authoritative.
+        details = {k: v for k, v in profile_details.items() if k != "profile_visibility"}
+        data.update(details)
+    # Author's profile_visibility only — set last to avoid duplicates/overwrites.
+    data["profile_visibility"] = _normalize_profile_visibility(author_profile)
     return data
 
 
@@ -167,6 +189,10 @@ def format_repost_item(
     """
     Format a repost as a common post object for the reposter, with the original
     post nested under ``reposted_data`` only (not mixed into the outer object).
+
+    Visibility ownership:
+    - top-level ``profile_visibility`` → reposting user
+    - ``reposted_data.profile_visibility`` → original post author
     """
     nested = format_post_detail(
         original_post,
@@ -184,6 +210,8 @@ def format_repost_item(
         reposted_data=None,
         viewer_user_id=viewer_user_id,
     )
+    # Original author visibility lives only under reposted_data.
+    nested["profile_visibility"] = _normalize_profile_visibility(original_author_profile)
 
     rp_photo = None
     if reposter_profile is not None and reposter_profile.profile_photo_url:
@@ -221,6 +249,7 @@ def format_repost_item(
         },
         "created_at": reposted_at,
         "updated_at": reposted_at,
+        "is_edited": False,
         "like_count": original_post.like_count,
         "repost_count": original_post.repost_count,
         "share_count": getattr(original_post, "share_count", 0),
@@ -243,7 +272,10 @@ def format_repost_item(
     if reposter_is_requested is not None:
         data["is_requested"] = reposter_is_requested
     if reposter_details is not None:
-        data.update(reposter_details)
+        details = {k: v for k, v in reposter_details.items() if k != "profile_visibility"}
+        data.update(details)
+    # Reposter visibility only at top level — set last to avoid duplicates/overwrites.
+    data["profile_visibility"] = _normalize_profile_visibility(reposter_profile)
     return data
 
 # Post states that require a moderator to be assigned for review.
@@ -611,6 +643,7 @@ async def edit_post_service(
             post.state = PostState.draft
 
     post.revision_number += 1
+    post.is_edited = True
     post.updated_at = utc_now()
 
     try:
@@ -830,14 +863,11 @@ async def admin_publish_post_service(
 async def get_post_service(
     post_id: UUID,
     user_id: UUID,
-    db: AsyncSession,
-    *,
-    viewer_role: str | None = None,
+    db: AsyncSession
 ) -> Post:
     """
     Retrieve details of a specific post.
     Validates visibility access permissions.
-    Moderators and superadmins can view posts regardless of feed visibility rules.
     """
     from common.user_visibility import is_hidden_account_status
 
@@ -850,9 +880,6 @@ async def get_post_service(
     if not row:
         raise ApiError("Post not found")
     post, author = row
-
-    if viewer_role in ("moderator", "superadmin"):
-        return post
 
     # Hide posts from suspended/banned/deleting authors for other viewers.
     if post.author_user_id != user_id and is_hidden_account_status(author.status):
@@ -1327,6 +1354,9 @@ def _format_reviewed_post_item(
         "is_moderator_reviewed": post.is_moderator_reviewed,
         "reviewed_at": post.reviewed_at,
         "created_at": post.created_at,
+        "updated_at": post.updated_at,
+        "is_edited": bool(getattr(post, "is_edited", False)),
+        "revision_number": post.revision_number,
         "like_count": getattr(post, "like_count", 0) or 0,
         "repost_count": getattr(post, "repost_count", 0) or 0,
         "share_count": getattr(post, "share_count", 0) or 0,
@@ -1373,6 +1403,9 @@ def _format_processing_post_item(post: Post, profile, mod_user=None, mod_profile
         "moderator_id": post.moderator_id,
         "moderator_name": _resolve_moderator_name(mod_user, mod_profile),
         "reviewed_at": post.reviewed_at,
+        "updated_at": post.updated_at,
+        "is_edited": bool(getattr(post, "is_edited", False)),
+        "revision_number": post.revision_number,
     }
 
 

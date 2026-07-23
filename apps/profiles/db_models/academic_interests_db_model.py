@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, text
 from sqlmodel import Field, SQLModel
 
 
@@ -27,7 +27,6 @@ class AcademicInterest(SQLModel, table=True):
         sa_column=Column(
             String(100),
             nullable=False,
-            unique=True,
         )
     )
 
@@ -70,6 +69,11 @@ class AcademicInterest(SQLModel, table=True):
     )
 
     __table_args__ = (
+        UniqueConstraint(
+            "education_level_id",
+            "name",
+            name="uq_academic_interests_education_level_id_name",
+        ),
         Index(
             "ix_academic_interests_name_trgm",
             "name",

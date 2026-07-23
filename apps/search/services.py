@@ -128,8 +128,12 @@ async def create_academic_interest(
     if education_level is None:
         raise ApiError("Education level not found")
 
-    # Reject exact matches (any casing) and near-duplicates with minor spelling variations.
-    existing = await _find_existing_academic_interest(name, db)
+    # Reject exact matches (any casing) and near-duplicates within the same education level.
+    existing = await _find_existing_academic_interest(
+        name,
+        db,
+        education_level_id=education_level_id,
+    )
     if existing is not None:
         raise ApiError("Academic interest already exists")
 

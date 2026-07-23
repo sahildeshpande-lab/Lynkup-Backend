@@ -137,6 +137,15 @@ def _escape_like_exact(value: str) -> str:
     )
 
 
+def _word_boundary_match(column, term: str):
+    """Case-insensitive whole-word/phrase match (Postgres ``\\y`` boundaries).
+
+    Prevents substring hits such as query ``ai`` matching ``Argentina``.
+    """
+    pattern = rf"\y{re.escape(term)}\y"
+    return column.op("~*")(pattern)
+
+
 def _profile_interest_contains(author_profile, interest_id):
     """Match interest ids stored as JSON numbers or JSON strings.
 
@@ -324,6 +333,7 @@ def _build_search_filters(
 ):
     filters = [
         Post.state == PostState.published,
+        Post.author_user_id != current_user_id,
         *visible_user_filters(author_user),
     ]
 
@@ -352,7 +362,6 @@ def _build_search_filters(
     filters.append(
         or_(
             author_profile.profile_visibility == ProfileVisibility.public,
-            Post.author_user_id == current_user_id,
             and_(
                 author_profile.profile_visibility.in_(
                     [ProfileVisibility.private, ProfileVisibility.connections_only]
@@ -371,11 +380,11 @@ def _build_search_filters(
         )
         filters.append(
             or_(
-                Post.content["caption"].astext.ilike(f"%{term}%"),
-                Post.content["content_html"].astext.ilike(f"%{term}%"),
-                author_profile.first_name.ilike(f"%{term}%"),
-                author_profile.last_name.ilike(f"%{term}%"),
-                author_full_name.ilike(f"%{term}%"),
+                _word_boundary_match(Post.content["caption"].astext, term),
+                _word_boundary_match(Post.content["content_html"].astext, term),
+                _word_boundary_match(author_profile.first_name, term),
+                _word_boundary_match(author_profile.last_name, term),
+                _word_boundary_match(author_full_name, term),
             )
         )
 

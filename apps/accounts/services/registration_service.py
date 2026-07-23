@@ -201,7 +201,6 @@ async def _build_device_auth_session(
 
 
 async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dict, bool, str]:
-    from core.images import normalize_image_name
     from core.auth.services import verify_firebase_token
     from sqlmodel import select
     from sqlalchemy.orm import selectinload
@@ -305,8 +304,9 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
 
         stmt_profile = select(Profile).where(Profile.user_id == user.id)
         profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-        if profile and getattr(payload, "profilePhotoUrl", None):
-            profile.profile_photo_url = normalize_image_name(payload.profilePhotoUrl)
+        if profile and payload.profile_photo_url:
+            # Store Google/Apple photo URL as-is (no S3 key normalization).
+            profile.profile_photo_url = payload.profile_photo_url
             db.add(profile)
             await db.flush()
             from apps.profiles.services import calculate_completeness_score
@@ -355,6 +355,8 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
         user_id=user.id,
         first_name=first_name,
         last_name=last_name,
+        # Store Google/Apple photo URL as-is when provided.
+        profile_photo_url=payload.profile_photo_url,
         completeness_score=0,
         updated_at=now
     )

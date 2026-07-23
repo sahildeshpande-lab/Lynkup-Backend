@@ -15,6 +15,7 @@ from apps.engagement.repositories.comment_repository import (
     fetch_profiles_by_user_ids,
     get_comment_by_id,
     mark_comment_deleted,
+    update_post_comment_count,
 )
 from apps.engagement.services.comment_service import _format_author, _format_comment
 from apps.feed.db_models import Post
@@ -32,6 +33,7 @@ from apps.report.repositories.report_repository import (
     count_reports as count_report_rows,
     count_reports_by_entity_keys,
     create_report,
+    get_duplicate_report,
     get_previous_report_comments,
     get_previous_report_comments_for_entities,
     get_report_by_id,
@@ -295,6 +297,15 @@ async def create_report_service(
         post = (
             await db.execute(select(Post).where(Post.id == comment.post_id))
         ).scalar_one_or_none()
+
+    existing = await get_duplicate_report(
+        db, user_id, payload.entity_type, payload.entity_id
+    )
+    if existing is not None:
+        return error_response(
+            "You have already reported this entity",
+            response_cls=ApiResponse,
+        )
 
     moderator_id = await _resolve_report_moderator_id(
         db,
@@ -667,7 +678,9 @@ async def _apply_actioned_report_to_entity(
     Apply side effects when a report is actioned.
 
     - post: set state to flagged
-    - comment: soft-delete (is_deleted=True)
+    - comment: soft-delete (is_deleted=True); for top-level comments,
+      post.comment_count is decremented (replies don't affect it;
+      already-deleted comments are skipped)
     - user: set status to suspended (and disable Firebase account when present)
     - rejected reviews leave the entity unchanged (caller skips this)
 
@@ -693,6 +706,10 @@ async def _apply_actioned_report_to_entity(
         comment = await get_comment_by_id(db, report.entity_id)
         if comment is None:
             return "Reported comment not found"
+        if comment.is_deleted:
+            return None
+        if comment.parent_comment_id is None:
+            await update_post_comment_count(db, comment.post_id, -1)
         await mark_comment_deleted(db, comment)
         return None
 

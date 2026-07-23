@@ -11,16 +11,16 @@ from .response_service import build_user_base_response
 
 async def complete_onboarding(
     user: User,
-    bio: str | None ,
+    bio: str | None,
     major: str,
     minor: str | None,
-    country_id: str,
     university_id: str,
     education_level_id: int,
     academic_interests: list[str],
-    profile_photo_key: str | None ,
-    banner_photo_key :str | None ,
+    profile_photo_key: str | None,
+    banner_photo_key: str | None,
     db: AsyncSession,
+    country_id: str | None = None,
     invitation_code: str | None = None,
 ) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
