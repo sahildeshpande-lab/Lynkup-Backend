@@ -190,6 +190,11 @@ async def _build_device_auth_session(
     await db.commit()
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
+
+    from apps.chat.service import sync_stream_user_on_auth
+
+    await sync_stream_user_on_auth(user, db)
+
     return (
         attach_otp_flags(
             await _issue_auth_session(user, db),

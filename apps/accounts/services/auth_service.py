@@ -138,6 +138,10 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
 
+    from apps.chat.service import sync_stream_user_on_auth
+
+    await sync_stream_user_on_auth(user, db)
+
     return ApiResponse(
         status=True,
         message="Login successful",
@@ -181,6 +185,9 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
 
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()
+        from apps.chat.service import sync_stream_user_on_auth
+
+        await sync_stream_user_on_auth(user, db)
         data = attach_otp_flags(
             await _issue_auth_session(user, db),
             email_sent=False,
