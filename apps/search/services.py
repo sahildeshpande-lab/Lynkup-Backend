@@ -128,8 +128,12 @@ async def create_academic_interest(
     if education_level is None:
         raise ApiError("Education level not found")
 
-    # Reject exact matches (any casing) and near-duplicates with minor spelling variations.
-    existing = await _find_existing_academic_interest(name, db)
+    # Reject exact matches (any casing) and near-duplicates within the same education level.
+    existing = await _find_existing_academic_interest(
+        name,
+        db,
+        education_level_id=education_level_id,
+    )
     if existing is not None:
         raise ApiError("Academic interest already exists")
 
@@ -286,6 +290,75 @@ async def get_academics_info(
         "countries": countries_data,
         "hashtags": hashtags_data,
     }
+
+
+async def _list_distinct_profile_field(
+    db: AsyncSession,
+    *,
+    field_name: str,
+    query: Optional[str],
+    page: int | None,
+    page_size: int | None,
+) -> dict:
+    """Return distinct non-empty values for a profile text field (major/minor)."""
+    from sqlalchemy import and_
+    from apps.profiles.db_models.profile_db_model import Profile
+
+    column = getattr(Profile, field_name)
+    filters = [column.is_not(None), func.btrim(column) != ""]
+
+    clean_query = (query or "").strip()
+    if clean_query:
+        filters.append(column.ilike(f"%{clean_query}%"))
+
+    where_clause = and_(*filters)
+    count_stmt = select(func.count(func.distinct(column))).where(where_clause)
+    stmt = select(column).where(where_clause).distinct().order_by(column.asc())
+
+    total_items = int((await db.execute(count_stmt)).scalar_one())
+    if page is not None and page_size is not None:
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+        resolved_page = page
+        resolved_page_size = page_size
+    else:
+        resolved_page = 1
+        resolved_page_size = total_items if total_items > 0 else 1
+
+    values = [row[0] for row in (await db.execute(stmt)).all()]
+    items = [{"name": value} for value in values]
+    return build_paginated_response(items, resolved_page, resolved_page_size, total_items).model_dump()
+
+
+async def list_profile_majors(
+    db: AsyncSession,
+    *,
+    query: Optional[str] = None,
+    page: int | None = None,
+    page_size: int | None = None,
+) -> dict:
+    return await _list_distinct_profile_field(
+        db,
+        field_name="major",
+        query=query,
+        page=page,
+        page_size=page_size,
+    )
+
+
+async def list_profile_minors(
+    db: AsyncSession,
+    *,
+    query: Optional[str] = None,
+    page: int | None = None,
+    page_size: int | None = None,
+) -> dict:
+    return await _list_distinct_profile_field(
+        db,
+        field_name="minor",
+        query=query,
+        page=page,
+        page_size=page_size,
+    )
 
 
 async def search_users(

@@ -124,6 +124,54 @@ def test_get_academics_info_returns_success(monkeypatch) -> None:
     assert body["data"]["educationLevels"][1]["interests"][0]["name"] == "Artificial Intelligence"
 
 
+def test_list_majors_returns_success(monkeypatch) -> None:
+    async def _list_profile_majors(db, *, query=None, page=None, page_size=None) -> dict:
+        assert query == "Comp"
+        assert page == 1
+        assert page_size == 10
+        return {
+            "items": [{"name": "Computer Science"}],
+            "page": 1,
+            "pageSize": 10,
+            "totalItems": 1,
+            "totalPages": 1,
+        }
+
+    monkeypatch.setattr(search_routes.services, "list_profile_majors", _list_profile_majors)
+
+    response = client.get("/api/v1/majors", params={"query": "Comp", "page": 1, "pageSize": 10})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is True
+    assert body["message"] == "Majors fetched successfully"
+    assert body["data"]["items"][0]["name"] == "Computer Science"
+
+
+def test_list_minors_returns_all_without_pagination(monkeypatch) -> None:
+    async def _list_profile_minors(db, *, query=None, page=None, page_size=None) -> dict:
+        assert page is None
+        assert page_size is None
+        return {
+            "items": [{"name": "Psychology"}, {"name": "Economics"}],
+            "page": 1,
+            "pageSize": 2,
+            "totalItems": 2,
+            "totalPages": 1,
+        }
+
+    monkeypatch.setattr(search_routes.services, "list_profile_minors", _list_profile_minors)
+
+    response = client.get("/api/v1/minor")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is True
+    assert body["message"] == "Minors fetched successfully"
+    assert body["data"]["totalItems"] == 2
+    assert len(body["data"]["items"]) == 2
+
+
 def test_create_academic_interest_returns_created(monkeypatch) -> None:
     async def _create_academic_interest(name, education_level_id, db) -> dict:
         assert name == "Data Science"

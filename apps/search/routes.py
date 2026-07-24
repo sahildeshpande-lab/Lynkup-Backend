@@ -60,6 +60,42 @@ async def list_academics_info(
     return ApiResponse(message="Academics info fetched successfully", data=data)
 
 
+@router.get("/majors", response_model=ApiResponse)
+async def list_majors(
+    query: Optional[str] = Query(None, description="Search majors by name"),
+    page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
+    pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user_or_superadmin),
+) -> ApiResponse:
+    data = await services.list_profile_majors(
+        db,
+        query=query,
+        page=page,
+        page_size=pageSize,
+    )
+    message = "No majors found" if data["totalItems"] == 0 else "Majors fetched successfully"
+    return ApiResponse(message=message, data=data)
+
+
+@router.get("/minor", response_model=ApiResponse)
+async def list_minors(
+    query: Optional[str] = Query(None, description="Search minors by name"),
+    page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
+    pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user_or_superadmin),
+) -> ApiResponse:
+    data = await services.list_profile_minors(
+        db,
+        query=query,
+        page=page,
+        page_size=pageSize,
+    )
+    message = "No minors found" if data["totalItems"] == 0 else "Minors fetched successfully"
+    return ApiResponse(message=message, data=data)
+
+
 @router.post(
     "/academic-interests",
     response_model=ApiResponse,
