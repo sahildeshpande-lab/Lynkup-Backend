@@ -102,6 +102,30 @@ async def test_evaluate_device_otp_requirement_when_verified_same_device(mock_db
     assert needs_otp is False
 
 
+@pytest.mark.asyncio
+async def test_evaluate_device_otp_skips_known_inactive_device_after_logout(mock_db):
+    """Deactivated installation (manual logout) is still a known/trusted device."""
+    verified_at = datetime.now(timezone.utc)
+    user = _user(email_verified_at=verified_at)
+    inactive = _installation()
+    inactive.is_active = False
+    db = mock_db()
+
+    with patch(
+        "apps.accounts.services.device_otp_service.get_user_installation",
+        AsyncMock(return_value=inactive),
+    ):
+        installation, is_new_device, needs_otp = await evaluate_device_otp_requirement(
+            db,
+            user,
+            "device-1",
+        )
+
+    assert installation is inactive
+    assert is_new_device is False
+    assert needs_otp is False
+
+
 def test_clear_session_email_verification():
     user = _user(email_verified_at=datetime.now(timezone.utc))
     user.email_otp = "1234"
@@ -220,8 +244,9 @@ async def test_login_rejects_apple_account_without_password_hash(mock_db):
     )
 
 @pytest.mark.asyncio
-async def test_logout_clears_email_verification(mock_db):
-    user = _user(email_verified_at=datetime.now(timezone.utc))
+async def test_logout_preserves_email_verification_for_known_device(mock_db):
+    verified_at = datetime.now(timezone.utc)
+    user = _user(email_verified_at=verified_at)
     user.email_otp = "1234"
     user.email_otp_created_at = datetime.now(timezone.utc)
     installation = _installation()
@@ -242,36 +267,8 @@ async def test_logout_clears_email_verification(mock_db):
 
         await session_svc.logout(payload, {"uid": user.firebase_uid}, db)
 
-    assert user.email_verified_at is None
+    assert user.email_verified_at == verified_at
     assert user.email_otp is None
     assert user.email_otp_created_at is None
-    db.commit.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_logout_clears_email_verification(mock_db):
-    user = _user(email_verified_at=datetime.now(timezone.utc))
-    user.email_otp = "1234"
-    user.email_otp_created_at = datetime.now(timezone.utc)
-    installation = _installation()
-    db = mock_db()
-
-    with (
-        patch.object(session_svc, "_revoke_refresh_token_row", AsyncMock()),
-        patch("apps.accounts.services.session_service.revoke_firebase_tokens"),
-    ):
-        db.execute = AsyncMock(
-            side_effect=[
-                SimpleNamespace(scalar_one_or_none=lambda: user),
-                SimpleNamespace(scalar_one_or_none=lambda: installation),
-                SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
-            ]
-        )
-        payload = SimpleNamespace(device_id="device-1")
-
-        await session_svc.logout(payload, {"uid": user.firebase_uid}, db)
-
-    assert user.email_verified_at is None
-    assert user.email_otp is None
-    assert user.email_otp_created_at is None
+    assert installation.is_active is False
     db.commit.assert_awaited_once()

@@ -191,6 +191,10 @@ async def _build_device_auth_session(
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
 
+    from apps.chat.service import sync_stream_user_on_auth
+
+    await sync_stream_user_on_auth(user, db)
+
     return (
         attach_otp_flags(
             await _issue_auth_session(user, db),
@@ -373,6 +377,10 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
 
+    from apps.chat.service import sync_stream_user_on_auth
+
+    await sync_stream_user_on_auth(user, db)
+
     session_data, message = await _build_device_auth_session(db, user, payload.device_id)
     return session_data, True, message
 
@@ -539,6 +547,10 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     await db.refresh(profile)
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
+
+    from apps.chat.service import sync_stream_user_on_auth
+
+    await sync_stream_user_on_auth(user, db)
 
     data = attach_otp_flags(
         await _issue_auth_session(user, db),

@@ -344,7 +344,7 @@ async def test_logout_sets_pending(db_session: AsyncSession, monkeypatch):
     assert refreshed.status == UserStatus.active
 
 @pytest.mark.asyncio
-async def test_logout_clears_verification_so_next_login_requires_otp(db_session: AsyncSession, monkeypatch):
+async def test_logout_same_device_does_not_require_otp_again(db_session: AsyncSession, monkeypatch):
     from apps.accounts.services import _hash_password
     from apps.accounts.schemas import LoginRequest, LogoutRequest
     from apps.accounts.db_models import UserInstallation
@@ -415,7 +415,7 @@ async def test_logout_clears_verification_so_next_login_requires_otp(db_session:
     assert installation.is_active is False
 
     refreshed = await db_session.get(User, user.id)
-    assert refreshed.email_verified_at is None
+    assert refreshed.email_verified_at is not None
 
     second_login = await login(
         payload=LoginRequest(
@@ -428,9 +428,10 @@ async def test_logout_clears_verification_so_next_login_requires_otp(db_session:
         db=db_session,
     )
     assert second_login.status is True
-    assert second_login.message == "Verification email sent. Please verify your OTP."
-    assert second_login.data["emailSent"] is True
-    assert sent_emails
+    assert second_login.message == "Login successful"
+    assert second_login.data["emailSent"] is False
+    assert second_login.data["needsOtp"] is False
+    assert not sent_emails
 
 @pytest.mark.asyncio
 async def test_logout_all_sets_pending(db_session: AsyncSession):

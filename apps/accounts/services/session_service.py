@@ -61,6 +61,8 @@ async def logout(
     ).scalar_one_or_none()
 
     if installation:
+        # Keep the installation row so this device stays trusted after logout.
+        # OTP is only required when signing in from a *new* device.
         installation.is_active = False
         installation.last_active_at = _now()
         db.add(installation)
@@ -84,7 +86,10 @@ async def logout(
     for token_row in token_rows:
         await _revoke_refresh_token_row(db, token_row)
 
-    clear_session_email_verification(user)
+    # Clear any pending OTP codes, but keep email_verified_at so returning to
+    # this known device does not require OTP again.
+    user.email_otp = None
+    user.email_otp_created_at = None
     user.updated_at = _now()
     db.add(user)
 
@@ -111,6 +116,7 @@ async def logout_all(current_user: User, db: AsyncSession) -> dict:
     for installation in installation_rows:
         await db.delete(installation)
 
+    # Logout-all removes every trusted device, so the next sign-in requires OTP.
     clear_session_email_verification(current_user)
     current_user.updated_at = _now()
     db.add(current_user)

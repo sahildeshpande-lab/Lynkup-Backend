@@ -45,6 +45,9 @@ async def test_logout_deactivates_current_installation(db_scalar_result, db_scal
     assert result is None
     mock_db.delete.assert_not_called()
     assert installation.is_active is False
-    assert user.email_verified_at is None
+    # Manual logout keeps email verification so the same device skips OTP next time.
+    assert user.email_verified_at == "verified"
+    assert user.email_otp is None
+    assert user.email_otp_created_at is None
     mock_db.add.assert_called()
     mock_db.commit.assert_awaited_once()

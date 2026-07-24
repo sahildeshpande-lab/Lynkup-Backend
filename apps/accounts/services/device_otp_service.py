@@ -32,6 +32,15 @@ async def evaluate_device_otp_requirement(
     user: User,
     device_id: str,
 ) -> tuple[UserInstallation | None, bool, bool]:
+    """Decide whether this sign-in needs an OTP challenge.
+
+    OTP is required when:
+    - the device has never been seen (no ``UserInstallation`` row), or
+    - the account email has never been verified (``email_verified_at`` is null).
+
+    A known device that was only deactivated by logout still counts as trusted,
+    so returning to it after manual logout does **not** require OTP again.
+    """
     installation = await get_user_installation(db, user.id, device_id)
     is_new_device = installation is None
     needs_otp = user.email_verified_at is None or is_new_device
