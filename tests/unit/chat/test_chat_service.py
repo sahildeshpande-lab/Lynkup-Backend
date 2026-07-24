@@ -58,13 +58,12 @@ async def test_sync_stream_user_on_auth_does_not_raise_on_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_stream_token_uses_configured_expiry(monkeypatch) -> None:
+async def test_generate_stream_token_returns_non_expiring_token(monkeypatch) -> None:
     user = User(
         id=uuid4(),
         email="user@example.com",
         firebase_uid="firebase-uid",
     )
-    monkeypatch.setattr("apps.chat.service.settings.stream_token_expiry", 7200)
     monkeypatch.setattr("apps.chat.service.settings.stream_api_key", "test-api-key")
     monkeypatch.setattr("apps.chat.service.settings.stream_secret_key", "test-secret-key")
 
@@ -75,18 +74,11 @@ async def test_generate_stream_token_uses_configured_expiry(monkeypatch) -> None
     with patch(
         "apps.chat.service.get_stream_client",
         return_value=mock_stream_client,
-    ), patch(
-        "apps.chat.service.time.time",
-        return_value=1_700_000_000,
     ):
         token_data = await generate_stream_token(user)
 
     assert token_data.stream_token == "stream-token-123"
-    assert token_data.expires_in == 7200
-    mock_stream_client.create_token.assert_called_once_with(
-        str(user.id),
-        exp=1_700_000_000 + 7200,
-    )
+    mock_stream_client.create_token.assert_called_once_with(str(user.id))
 
 
 @pytest.mark.asyncio
@@ -143,7 +135,7 @@ def test_create_stream_token_route_success(monkeypatch) -> None:
     async def _mock_generate_stream_token(_user):
         from apps.chat.schemas import StreamTokenData
 
-        return StreamTokenData(stream_token="stream-token-123", expires_in=86400)
+        return StreamTokenData(stream_token="stream-token-123")
 
     monkeypatch.setattr(
         "apps.chat.router.generate_stream_token",
@@ -161,7 +153,7 @@ def test_create_stream_token_route_success(monkeypatch) -> None:
     assert body["status"] is True
     assert body["message"] == "Stream token generated successfully."
     assert body["data"]["stream_token"] == "stream-token-123"
-    assert body["data"]["expires_in"] == 86400
+    assert "expires_in" not in body["data"]
 
 
 def test_create_stream_token_route_handles_service_error(monkeypatch) -> None:

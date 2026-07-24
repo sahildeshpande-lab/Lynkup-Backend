@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -91,14 +90,10 @@ async def sync_stream_user_on_auth(user: User, db: AsyncSession) -> None:
 async def generate_stream_token(user: User) -> StreamTokenData:
     _ensure_stream_configured()
 
-    expires_in = settings.stream_token_expiry
-    # stream-chat server SDK accepts `exp` as a Unix timestamp for token expiry.
-    expiration_timestamp = int(time.time()) + expires_in
-
     try:
-        stream_token = get_stream_client().create_token(str(user.id), exp=expiration_timestamp)
+        stream_token = get_stream_client().create_token(str(user.id))
     except Exception as exc:
         logger.exception("Stream token generation failed for user_id=%s", user.id)
         raise StreamChatError("Failed to generate Stream token") from exc
 
-    return StreamTokenData(stream_token=stream_token, expires_in=expires_in)
+    return StreamTokenData(stream_token=stream_token)

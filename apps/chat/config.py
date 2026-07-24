@@ -15,7 +15,6 @@ class ChatSettings(BaseSettings):
 
     stream_api_key: str | None = Field(default=None, alias="STREAM_API_KEY")
     stream_secret_key: str | None = Field(default=None, alias="STREAM_SECRET_KEY")
-    stream_token_expiry: int = Field(default=86400, ge=1, alias="STREAM_TOKEN_EXPIRY")
 
 
 settings = ChatSettings()
