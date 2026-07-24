@@ -310,6 +310,11 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
         profile.first_name = payload.firstName
     if payload.lastName is not None:
         profile.last_name = payload.lastName
+    stream_sync_needed = (
+        payload.firstName is not None
+        or payload.lastName is not None
+        or "profile_photo_key" in payload.model_fields_set
+    )
     if payload.major is not None:
         profile.major = payload.major
     if payload.minor is not None:
@@ -361,6 +366,21 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
     db.add(profile)
     await db.commit()
     await db.refresh(profile)
+
+    if stream_sync_needed:
+        from apps.chat.service import StreamChatError, upsert_stream_user
+        from common.exceptions import ApiError
+        import logging
+
+        profile_logger = logging.getLogger(__name__)
+        try:
+            await upsert_stream_user(user, db)
+        except StreamChatError as exc:
+            profile_logger.exception(
+                "Stream user sync failed during profile update for user_id=%s",
+                user.id,
+            )
+            raise ApiError(str(exc)) from exc
 
     # Temporarily disabled: profile updated email
     # try:
@@ -440,6 +460,11 @@ async def update_user_profile_by_admin_service(
         profile.first_name = payload.firstName
     if payload.lastName is not None:
         profile.last_name = payload.lastName
+    stream_sync_needed = (
+        payload.firstName is not None
+        or payload.lastName is not None
+        or payload.profile_photo_key is not None
+    )
     if payload.major is not None:
         profile.major = payload.major
     if payload.minor is not None:
@@ -502,6 +527,21 @@ async def update_user_profile_by_admin_service(
     db.add(profile)
     await db.commit()
     await db.refresh(profile)
+
+    if stream_sync_needed:
+        from apps.chat.service import StreamChatError, upsert_stream_user
+        from common.exceptions import ApiError
+        import logging
+
+        profile_logger = logging.getLogger(__name__)
+        try:
+            await upsert_stream_user(user, db)
+        except StreamChatError as exc:
+            profile_logger.exception(
+                "Stream user sync failed during admin profile update for user_id=%s",
+                user.id,
+            )
+            raise ApiError(str(exc)) from exc
 
     # Temporarily disabled: profile updated email
     # try:

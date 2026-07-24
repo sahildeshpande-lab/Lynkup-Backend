@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -8,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from apps.accounts.db_models import User
-from apps.chat.dependencies import get_current_chat_user
+from apps.chat.router import get_current_chat_user
 from apps.chat.service import (
     StreamChatError,
     build_stream_user_payload,
@@ -38,9 +37,9 @@ def test_build_stream_user_payload_uses_profile_fields() -> None:
     payload = build_stream_user_payload(user, profile)
 
     assert payload["id"] == str(user.id)
-    assert payload["full_name"] == "Jane Doe"
-    assert payload["profile_photo_url"] is not None
-    assert "profiles/photo.jpg" in payload["profile_photo_url"]
+    assert payload["name"] == "Jane Doe"
+    assert payload["image"] is not None
+    assert "profiles/photo.jpg" in payload["image"]
 
 
 @pytest.mark.asyncio
@@ -71,22 +70,16 @@ async def test_generate_stream_token_uses_configured_expiry(monkeypatch) -> None
 
     mock_stream_client = MagicMock()
     mock_stream_client.create_token.return_value = "stream-token-123"
-
-    @asynccontextmanager
-    async def mock_stream_client_context():
-        yield mock_stream_client
+    monkeypatch.setattr("apps.chat.service._stream_client", mock_stream_client)
 
     with patch(
-        "apps.chat.service.upsert_stream_user",
-        new=AsyncMock(),
-    ), patch(
-        "apps.chat.service._stream_client",
-        mock_stream_client_context,
+        "apps.chat.service.get_stream_client",
+        return_value=mock_stream_client,
     ), patch(
         "apps.chat.service.time.time",
         return_value=1_700_000_000,
     ):
-        token_data = await generate_stream_token(user, AsyncMock())
+        token_data = await generate_stream_token(user)
 
     assert token_data.stream_token == "stream-token-123"
     assert token_data.expires_in == 7200
@@ -94,6 +87,32 @@ async def test_generate_stream_token_uses_configured_expiry(monkeypatch) -> None
         str(user.id),
         exp=1_700_000_000 + 7200,
     )
+
+
+@pytest.mark.asyncio
+async def test_upsert_stream_user_raises_on_api_failure(monkeypatch) -> None:
+    user = User(
+        id=uuid4(),
+        email="user@example.com",
+        firebase_uid="firebase-uid",
+    )
+    monkeypatch.setattr("apps.chat.service.settings.stream_api_key", "test-api-key")
+    monkeypatch.setattr("apps.chat.service.settings.stream_secret_key", "test-secret-key")
+
+    mock_stream_client = MagicMock()
+    mock_stream_client.upsert_user.side_effect = RuntimeError("stream unavailable")
+
+    with patch(
+        "apps.chat.service.get_stream_client",
+        return_value=mock_stream_client,
+    ), patch(
+        "apps.chat.service._fetch_user_profile",
+        new=AsyncMock(return_value=None),
+    ):
+        with pytest.raises(StreamChatError, match="Failed to sync user with Stream Chat"):
+            from apps.chat.service import upsert_stream_user
+
+            await upsert_stream_user(user, AsyncMock())
 
 
 async def _override_firebase_user():
@@ -121,7 +140,7 @@ def teardown_module() -> None:
 
 
 def test_create_stream_token_route_success(monkeypatch) -> None:
-    async def _mock_generate_stream_token(_user, _db):
+    async def _mock_generate_stream_token(_user):
         from apps.chat.schemas import StreamTokenData
 
         return StreamTokenData(stream_token="stream-token-123", expires_in=86400)
@@ -134,6 +153,7 @@ def test_create_stream_token_route_success(monkeypatch) -> None:
     response = client.post(
         "/api/v1/chat/token",
         headers={"Authorization": "Bearer firebase-token"},
+        json={},
     )
 
     assert response.status_code == 200
@@ -145,7 +165,7 @@ def test_create_stream_token_route_success(monkeypatch) -> None:
 
 
 def test_create_stream_token_route_handles_service_error(monkeypatch) -> None:
-    async def _mock_generate_stream_token(_user, _db):
+    async def _mock_generate_stream_token(_user):
         raise StreamChatError("Stream Chat secret key is not configured")
 
     monkeypatch.setattr(
@@ -156,6 +176,7 @@ def test_create_stream_token_route_handles_service_error(monkeypatch) -> None:
     response = client.post(
         "/api/v1/chat/token",
         headers={"Authorization": "Bearer firebase-token"},
+        json={},
     )
 
     assert response.status_code == 200

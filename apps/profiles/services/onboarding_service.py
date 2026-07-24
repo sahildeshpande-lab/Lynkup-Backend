@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 from fastapi import HTTPException, status
 from core.images import normalize_image_name, generate_profile_image_url
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +9,8 @@ from common.enums import OnboardingStatus, EducationLevel
 from .completeness_service import calculate_completeness_score
 from .interest_service import _resolve_academic_interest_ids
 from .response_service import build_user_base_response
+
+logger = logging.getLogger(__name__)
 
 async def complete_onboarding(
     user: User,
@@ -168,6 +171,15 @@ async def complete_onboarding(
     await db.commit()
     await db.refresh(user)
     await db.refresh(profile)
+
+    from apps.chat.service import StreamChatError, upsert_stream_user
+    from common.exceptions import ApiError
+
+    try:
+        await upsert_stream_user(user, db)
+    except StreamChatError as exc:
+        logger.exception("Stream user sync failed during onboarding for user_id=%s", user.id)
+        raise ApiError(str(exc)) from exc
 
     user_data = await build_user_base_response(user, profile, db)
     return {"user": user_data}

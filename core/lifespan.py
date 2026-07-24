@@ -29,12 +29,12 @@ async def lifespan(app: FastAPI):
     from core.email.config import settings as email_settings
 
 
-    if email_settings.is_sendgrid_configured:
-        logger.info("SendGrid email delivery is configured.")
-    else:
-        logger.warning(
-            "SendGrid is not fully configured; transactional emails will be simulated."
-        )
+    # if email_settings.is_sendgrid_configured:
+    #     logger.info("SendGrid email delivery is configured.")
+    # else:
+    #     logger.warning(
+    #         "SendGrid is not fully configured; transactional emails will be simulated."
+    #     )
 
     # Start the email sender background cron task
     from core.email_service import cron_send_emails
