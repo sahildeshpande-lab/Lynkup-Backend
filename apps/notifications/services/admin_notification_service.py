@@ -45,11 +45,6 @@ from core.auth.services import send_push_notifications
 
 logger = logging.getLogger(__name__)
 
-CAMPAIGN_CREATED_MESSAGE = "Notification campaign created successfully."
-CAMPAIGNS_FETCHED_MESSAGE = "Notification campaigns fetched successfully."
-NOTIFICATION_TYPE_MISSING_MESSAGE = "Notification type is not configured."
-CAMPAIGN_NOT_FOUND_MESSAGE = "Notification campaign not found."
-
 # Stored on campaign.deep_link_payload so dispatch_campaign(campaign_id) can run
 # later from a worker without a dedicated targets column (no schema change).
 _TARGETS_STORAGE_KEY = "targets"
@@ -106,7 +101,7 @@ async def create_campaign(
     )
     if notification_type is None:
         return error_response(
-            NOTIFICATION_TYPE_MISSING_MESSAGE,
+            "Notification type is not configured.",
             response_cls=CreateCampaignResponse,
         )
 
@@ -139,7 +134,7 @@ async def create_campaign(
         )
 
     return success_response(
-        CAMPAIGN_CREATED_MESSAGE,
+        "Notification campaign created successfully.",
         CreateCampaignData(id=campaign.id),
         response_cls=CreateCampaignResponse,
     )
@@ -160,7 +155,7 @@ async def dispatch_campaign(
     campaign = await _get_campaign(db, campaign_id)
     if campaign is None:
         logger.error("Campaign failed campaign_id=%s reason=not_found", campaign_id)
-        raise ValueError(CAMPAIGN_NOT_FOUND_MESSAGE)
+        raise ValueError("Notification campaign not found.")
 
     try:
         recipient_user_ids = await _resolve_recipients(db, campaign)
@@ -364,7 +359,7 @@ async def list_campaigns(
         data = {"items": [item.model_dump(mode="json") for item in items]}
 
     return success_response(
-        CAMPAIGNS_FETCHED_MESSAGE,
+        "Notification campaigns fetched successfully.",
         data,
         response_cls=AdminCampaignListResponse,
     )

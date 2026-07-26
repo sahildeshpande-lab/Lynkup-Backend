@@ -44,7 +44,6 @@ NOTIFICATIONS_FETCHED_MESSAGE = "Notifications fetched successfully."
 NOTIFICATION_READ_MESSAGE = "Notification marked as read."
 NOTIFICATIONS_READ_ALL_MESSAGE = "All notifications marked as read."
 NOTIFICATION_NOT_FOUND_MESSAGE = "Notification not found."
-NOTIFICATION_TYPE_MISSING_MESSAGE = "Notification type is not configured."
 
 
 def _merged_category_preferences(
