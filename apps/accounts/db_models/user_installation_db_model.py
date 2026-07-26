@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, String, text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, String, Text, text
 from sqlmodel import Field, SQLModel
 
 
@@ -16,7 +16,8 @@ class UserInstallation(SQLModel, table=True):
 
     id: UUID = Field(default_factory=uuid4, primary_key=True, index=True)
     user_id: UUID = Field(foreign_key="users.id", nullable=False, index=True)
-    platform: str | None = Field(default=None, sa_column=Column(String(32), nullable=True, index=True))
+    platform: str | None = Field(default=None, sa_column=Column(String(20), nullable=True, index=True))
+    fcm_token: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     device_id: str = Field(sa_column=Column(String(255), nullable=False, index=True))
     app_version: str | None = Field(default=None, sa_column=Column(String(64)))
     installed_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))

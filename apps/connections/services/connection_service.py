@@ -1,17 +1,20 @@
 from __future__ import annotations
 from datetime import datetime, timezone
+import logging
 from uuid import UUID
 from sqlalchemy import or_, and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
 from apps.connections.db_models import Block, Connection, ConnectionRequest, Follow
-from apps.profiles.db_models.profile_db_model import Profile
+from apps.notifications.services import create_notification
 from apps.profiles.db_models import Profile
 from ..schemas import ApiResponse
 from common.enums import UserStatus
 from common.responses import error_response, success_response
 from common.user_visibility import visible_user_filters
 from core.images import generate_profile_image_url
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_RELATIONSHIP_FLAGS: dict[str, bool] = {
@@ -97,6 +100,32 @@ async def send_connection_request(db: AsyncSession, sender_id: UUID, receiver_id
     db.add(request)
     await db.commit()
     await db.refresh(request)
+
+    try:
+        sender_profile = (
+            await db.execute(select(Profile).where(Profile.user_id == sender_id))
+        ).scalar_one_or_none()
+        sender_name = "Someone"
+        if sender_profile is not None:
+            sender_name = (
+                f"{sender_profile.first_name or ''} {sender_profile.last_name or ''}".strip()
+                or "Someone"
+            )
+        await create_notification(
+            db,
+            recipient_user_id=receiver_id,
+            notification_type="CONNECTION_REQUEST",
+            title="New Connection Request",
+            body=f"{sender_name} wants to connect with you.",
+            sender_user_id=sender_id,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send CONNECTION_REQUEST notification sender=%s receiver=%s",
+            sender_id,
+            receiver_id,
+        )
+
     return success_response(
         "Connection request sent successfully.",
         {
@@ -173,6 +202,32 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
     #         logger.warning("Sender user not found for Lynkup response email, user_id=%s", req.sender_user_id)
     # except Exception as e:
     #     logger.exception("Failed to queue Lynkup response email: %s", e)
+
+    if response == "accepted":
+        try:
+            receiver_profile = (
+                await db.execute(select(Profile).where(Profile.user_id == user_id))
+            ).scalar_one_or_none()
+            receiver_name = "Someone"
+            if receiver_profile is not None:
+                receiver_name = (
+                    f"{receiver_profile.first_name or ''} {receiver_profile.last_name or ''}".strip()
+                    or "Someone"
+                )
+            await create_notification(
+                db,
+                recipient_user_id=req.sender_user_id,
+                notification_type="CONNECTION_ACCEPTED",
+                title="Connection Accepted",
+                body=f"{receiver_name} accepted your connection request.",
+                sender_user_id=user_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send CONNECTION_ACCEPTED notification sender=%s receiver=%s",
+                req.sender_user_id,
+                user_id,
+            )
 
     is_accepted = response == "accepted"
     return success_response(

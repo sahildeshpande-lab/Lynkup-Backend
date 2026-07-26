@@ -120,30 +120,20 @@ async def _upsert_user_installation(
     user_id,
     device_id: str,
     now,
+    *,
+    platform: str | None = None,
+    fcm_token: str | None = None,
 ) -> None:
-    from apps.accounts.db_models import UserInstallation
+    from apps.accounts.services.device_otp_service import upsert_user_installation
 
-    stmt = select(UserInstallation).where(
-        UserInstallation.user_id == user_id,
-        UserInstallation.device_id == device_id,
+    await upsert_user_installation(
+        db,
+        user_id,
+        device_id,
+        platform=platform,
+        fcm_token=fcm_token,
+        now=now,
     )
-    installation = (await db.execute(stmt)).scalar_one_or_none()
-    if installation is None:
-        db.add(
-            UserInstallation(
-                user_id=user_id,
-                device_id=device_id,
-                platform=None,
-                app_version=None,
-                installed_at=now,
-                last_active_at=now,
-                is_active=True,
-            )
-        )
-    else:
-        installation.last_active_at = now
-        installation.is_active = True
-        db.add(installation)
 
 
 async def _build_device_auth_session(
@@ -190,11 +180,6 @@ async def _build_device_auth_session(
     await db.commit()
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
-
-    from apps.chat.service import sync_stream_user_on_auth
-
-    await sync_stream_user_on_auth(user, db)
-
     return (
         attach_otp_flags(
             await _issue_auth_session(user, db),
@@ -206,7 +191,6 @@ async def _build_device_auth_session(
 
 
 async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dict, bool, str]:
-    from core.images import normalize_image_name
     from core.auth.services import verify_firebase_token
     from sqlmodel import select
     from sqlalchemy.orm import selectinload
@@ -310,8 +294,9 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
 
         stmt_profile = select(Profile).where(Profile.user_id == user.id)
         profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-        if profile and getattr(payload, "profilePhotoUrl", None):
-            profile.profile_photo_url = normalize_image_name(payload.profilePhotoUrl)
+        if profile and payload.profile_photo_url:
+            # Store Google/Apple photo URL as-is (no S3 key normalization).
+            profile.profile_photo_url = payload.profile_photo_url
             db.add(profile)
             await db.flush()
             from apps.profiles.services import calculate_completeness_score
@@ -360,6 +345,8 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
         user_id=user.id,
         first_name=first_name,
         last_name=last_name,
+        # Store Google/Apple photo URL as-is when provided.
+        profile_photo_url=payload.profile_photo_url,
         completeness_score=0,
         updated_at=now
     )
@@ -376,10 +363,6 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
 
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
-
-    from apps.chat.service import sync_stream_user_on_auth
-
-    await sync_stream_user_on_auth(user, db)
 
     session_data, message = await _build_device_auth_session(db, user, payload.device_id)
     return session_data, True, message
@@ -427,25 +410,15 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
                 profile.completeness_score = await calculate_completeness_score(existing_user_email.id, db)
                 db.add(profile)
 
-            # Ensure installation exists
-            from apps.accounts.db_models import UserInstallation
-            stmt_inst = select(UserInstallation).where(UserInstallation.user_id == existing_user_email.id, UserInstallation.device_id == payload.device_id)
-            inst = (await db.execute(stmt_inst)).scalar_one_or_none()
-            if not inst:
-                inst = UserInstallation(
-                    user_id=existing_user_email.id,
-                    device_id=payload.device_id,
-                    platform=None,
-                    app_version=None,
-                    installed_at=now,
-                    last_active_at=now,
-                    is_active=True,
-                )
-                db.add(inst)
-            else:
-                inst.last_active_at = now
-                inst.is_active = True
-                db.add(inst)
+            # Ensure installation exists / refresh FCM token when provided
+            await _upsert_user_installation(
+                db,
+                existing_user_email.id,
+                payload.device_id,
+                now,
+                platform=payload.platform,
+                fcm_token=payload.fcm_token,
+            )
 
             await db.commit()
 
@@ -522,18 +495,15 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
 
-    # 4. Create UserInstallation record
-    from apps.accounts.db_models import UserInstallation
-    installation = UserInstallation(
-        user_id=user.id,
-        device_id=payload.device_id,
-        platform=None,
-        app_version=None,
-        installed_at=now,
-        last_active_at=now,
-        is_active=True,
+    # 4. Create / refresh UserInstallation record
+    await _upsert_user_installation(
+        db,
+        user.id,
+        payload.device_id,
+        now,
+        platform=payload.platform,
+        fcm_token=payload.fcm_token,
     )
-    db.add(installation)
 
     await db.commit()
     otp = user.email_otp or _generate_otp()
@@ -547,10 +517,6 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     await db.refresh(profile)
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
-
-    from apps.chat.service import sync_stream_user_on_auth
-
-    await sync_stream_user_on_auth(user, db)
 
     data = attach_otp_flags(
         await _issue_auth_session(user, db),

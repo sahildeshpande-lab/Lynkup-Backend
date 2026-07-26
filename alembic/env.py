@@ -6,6 +6,7 @@ from sqlmodel import SQLModel
 from apps.accounts.db_models import *
 from apps.profiles.db_models import *
 from apps.feed.db_models import *
+from apps.notifications.db_models import *
 from apps.invitations.db_models import *
 from apps.engagement.db_models import *
 from apps.report.db_models import *

@@ -7,7 +7,7 @@ from sqlmodel import select
 from sqlalchemy.orm import selectinload
 from pwdlib import PasswordHash
 from pwdlib.hashers.bcrypt import BcryptHasher
-from apps.accounts.db_models import User, UserInstallation
+from apps.accounts.db_models import User
 from apps.profiles.db_models import Profile
 from common.enums import OnboardingStatus, UserStatus, inactive_account_message
 from core.auth.config import settings as auth_settings
@@ -20,6 +20,7 @@ from .device_otp_service import (
     attach_otp_flags,
     evaluate_device_otp_requirement,
     send_otp_challenge,
+    upsert_user_installation,
 )
 
 async def _issue_auth_session(user: User, db: AsyncSession) -> dict:
@@ -108,6 +109,8 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
             device_id,
             installation=installation,
             is_new_device=is_new_device,
+            platform=payload.platform,
+            fcm_token=payload.fcm_token,
         )
 
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
@@ -128,19 +131,19 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     user.updated_at = _now()
     db.add(user)
 
-    if installation:
-        installation.last_active_at = _now()
-        installation.is_active = True
-        db.add(installation)
+    await upsert_user_installation(
+        db,
+        user.id,
+        device_id,
+        platform=payload.platform,
+        fcm_token=payload.fcm_token,
+        now=_now(),
+    )
 
     await db.commit()
 
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
-
-    from apps.chat.service import sync_stream_user_on_auth
-
-    await sync_stream_user_on_auth(user, db)
 
     return ApiResponse(
         status=True,
@@ -185,11 +188,6 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
 
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()
-
-        from apps.chat.service import sync_stream_user_on_auth
-
-        await sync_stream_user_on_auth(user, db)
-
         data = attach_otp_flags(
             await _issue_auth_session(user, db),
             email_sent=False,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -25,6 +27,49 @@ async def get_user_installation(
         UserInstallation.device_id == device_id,
     )
     return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def upsert_user_installation(
+    db: AsyncSession,
+    user_id,
+    device_id: str,
+    *,
+    platform: str | None = None,
+    fcm_token: str | None = None,
+    now: datetime | None = None,
+) -> UserInstallation:
+    """Create or refresh a user_installation row.
+
+    ``fcm_token`` / ``platform`` are optional. When omitted or blank, existing
+    values are left unchanged (never cleared to NULL).
+    """
+    timestamp = now or _now()
+    normalized_platform = (platform or "").strip() or None
+    normalized_fcm_token = (fcm_token or "").strip() or None
+
+    installation = await get_user_installation(db, user_id, device_id)
+    if installation is None:
+        installation = UserInstallation(
+            user_id=user_id,
+            device_id=device_id,
+            platform=normalized_platform,
+            fcm_token=normalized_fcm_token,
+            app_version=None,
+            installed_at=timestamp,
+            last_active_at=timestamp,
+            is_active=True,
+        )
+        db.add(installation)
+        return installation
+
+    installation.last_active_at = timestamp
+    installation.is_active = True
+    if normalized_platform is not None:
+        installation.platform = normalized_platform
+    if normalized_fcm_token is not None:
+        installation.fcm_token = normalized_fcm_token
+    db.add(installation)
+    return installation
 
 
 async def evaluate_device_otp_requirement(
@@ -54,6 +99,8 @@ async def send_otp_challenge(
     *,
     installation: UserInstallation | None,
     is_new_device: bool,
+    platform: str | None = None,
+    fcm_token: str | None = None,
 ) -> str:
     now = _now()
     otp = _generate_otp()
@@ -65,22 +112,14 @@ async def send_otp_challenge(
     user.updated_at = now
     db.add(user)
 
-    if is_new_device:
-        db.add(
-            UserInstallation(
-                user_id=user.id,
-                device_id=device_id,
-                platform=None,
-                app_version=None,
-                installed_at=now,
-                last_active_at=now,
-                is_active=True,
-            )
-        )
-    elif installation is not None:
-        installation.last_active_at = now
-        installation.is_active = True
-        db.add(installation)
+    await upsert_user_installation(
+        db,
+        user.id,
+        device_id,
+        platform=platform,
+        fcm_token=fcm_token,
+        now=now,
+    )
 
     await db.commit()
     await send_otp_email(user.email, otp, "email_verification")
