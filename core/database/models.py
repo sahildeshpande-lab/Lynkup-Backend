@@ -12,6 +12,7 @@ from apps.notifications.db_models import (
     Notification,
     NotificationCampaign,
     NotificationCampaignAudience,
+    NotificationCategory,
     NotificationPreference,
     NotificationType,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "ModerationAssignmentState",
     "Invitation",
     "NotificationType",
+    "NotificationCategory",
     "NotificationPreference",
     "NotificationCampaign",
     "NotificationCampaignAudience",

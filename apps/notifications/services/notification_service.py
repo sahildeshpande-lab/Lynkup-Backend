@@ -5,20 +5,22 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
 from apps.notifications.db_models import Notification
 from apps.notifications.repositories.campaign_audience_repository import (
     get_active_fcm_tokens_for_users,
 )
 from apps.notifications.repositories.notification_repository import (
-    DEFAULT_CATEGORY_PREFERENCES,
-    count_notifications_for_user,
     create_notification as persist_notification,
     create_preferences,
+    get_broadcast_notification_by_id,
+    get_default_category_preferences,
     get_notification_for_user,
     get_notification_type_by_name,
     get_preferences_by_user_id,
-    list_notifications_for_user,
+    list_broadcast_notifications,
+    list_personal_notifications_for_user,
     mark_all_notifications_read as persist_mark_all_read,
     mark_notification_as_read as persist_mark_as_read,
     update_preferences as persist_update_preferences,
@@ -32,39 +34,52 @@ from apps.notifications.schemas import (
     NotificationPreferencesResponse,
     UpdateNotificationPreferencesRequest,
 )
+from apps.notifications.services.topic_service import TopicService
 from common.pagination import build_paginated_response
 from common.responses import error_response, success_response
 from core.auth.services import send_push_notifications
 
 logger = logging.getLogger(__name__)
 
-PREFERENCES_FETCHED_MESSAGE = "Notification preferences fetched successfully."
-PREFERENCES_UPDATED_MESSAGE = "Notification preferences updated successfully."
-NOTIFICATIONS_FETCHED_MESSAGE = "Notifications fetched successfully."
-NOTIFICATION_READ_MESSAGE = "Notification marked as read."
-NOTIFICATIONS_READ_ALL_MESSAGE = "All notifications marked as read."
-NOTIFICATION_NOT_FOUND_MESSAGE = "Notification not found."
+_FIREBASE_TOPICS_KEY = "firebase_topics"
 
 
-def _merged_category_preferences(
+async def _merged_category_preferences(
+    db: AsyncSession,
     existing: dict[str, Any] | None,
 ) -> dict[str, bool]:
-    merged = dict(DEFAULT_CATEGORY_PREFERENCES)
+    """
+    Active categories from DB as defaults (True), overlaid with the user's stored
+    values. Inactive categories are excluded even if present in stored JSON.
+    """
+    merged = dict(await get_default_category_preferences(db))
     if existing:
-        for key, value in existing.items():
-            merged[str(key)] = bool(value)
+        for key in list(merged.keys()):
+            if key in existing:
+                merged[key] = bool(existing[key])
     return merged
 
 
-def _is_category_enabled(preferences, notification_type: str) -> bool:
-    categories = _merged_category_preferences(preferences.category_preferences)
+async def _is_category_enabled(
+    db: AsyncSession,
+    preferences,
+    notification_type: str,
+) -> bool:
+    categories = await _merged_category_preferences(db, preferences.category_preferences)
     return bool(categories.get(notification_type, True))
 
 
-def _to_notification_item(notification: Notification) -> NotificationItem:
+def _to_notification_item(
+    notification: Notification,
+    *,
+    is_broadcast: bool = False,
+) -> NotificationItem:
     type_name = None
     if getattr(notification, "notification_type", None) is not None:
         type_name = notification.notification_type.name
+    # Broadcast rows are shared; per-user read state is not stored without a schema change.
+    is_read = False if is_broadcast else notification.is_read
+    read_at = None if is_broadcast else notification.read_at
     return NotificationItem(
         id=notification.id,
         notification_type=type_name,
@@ -73,17 +88,86 @@ def _to_notification_item(notification: Notification) -> NotificationItem:
         title=notification.title,
         body=notification.body,
         deep_link_payload=notification.deep_link_payload,
-        is_read=notification.is_read,
-        read_at=notification.read_at,
+        is_read=is_read,
+        read_at=read_at,
         created_at=notification.created_at,
     )
+
+
+async def _user_topic_set(db: AsyncSession, user_id: UUID) -> set[str]:
+    from apps.profiles.db_models.profile_db_model import Profile
+
+    profile = (
+        await db.execute(select(Profile).where(Profile.user_id == user_id))
+    ).scalar_one_or_none()
+    if profile is None:
+        return set()
+    return await TopicService.build_topics(db, profile)
+
+
+def _is_broadcast_visible_to_user(
+    notification: Notification,
+    *,
+    user_topics: set[str],
+) -> bool:
+    type_name = None
+    if getattr(notification, "notification_type", None) is not None:
+        type_name = notification.notification_type.name
+    if type_name == "ANNOUNCEMENT":
+        return True
+    if type_name == "TOPIC":
+        stored = (notification.deep_link_payload or {}).get(_FIREBASE_TOPICS_KEY) or []
+        return bool(user_topics.intersection(set(stored)))
+    return False
+
+
+async def _list_unified_notifications_for_user(
+    db: AsyncSession,
+    user_id: UUID,
+    *,
+    unread_only: bool = False,
+) -> list[tuple[Notification, bool]]:
+    """Return (notification, is_broadcast) pairs newest-first."""
+    personal = await list_personal_notifications_for_user(
+        db,
+        user_id,
+        unread_only=unread_only,
+    )
+    broadcasts = await list_broadcast_notifications(db)
+    user_topics: set[str] | None = None
+    visible_broadcasts: list[Notification] = []
+    for notification in broadcasts:
+        type_name = (
+            notification.notification_type.name
+            if getattr(notification, "notification_type", None) is not None
+            else None
+        )
+        if type_name == "TOPIC":
+            if user_topics is None:
+                user_topics = await _user_topic_set(db, user_id)
+            if not _is_broadcast_visible_to_user(
+                notification,
+                user_topics=user_topics,
+            ):
+                continue
+        elif type_name != "ANNOUNCEMENT":
+            continue
+        # Broadcasts have no per-user read flag; include them even when unread_only.
+        visible_broadcasts.append(notification)
+
+    merged: list[tuple[Notification, bool]] = [
+        *( (row, False) for row in personal ),
+        *( (row, True) for row in visible_broadcasts ),
+    ]
+    merged.sort(key=lambda item: item[0].created_at, reverse=True)
+    return merged
 
 
 async def _get_or_create_preferences(db: AsyncSession, user_id: UUID):
     preference = await get_preferences_by_user_id(db, user_id)
     if preference is not None:
-        # Ensure defaults exist for any newly introduced categories.
-        merged = _merged_category_preferences(preference.category_preferences)
+        # Ensure newly added active categories appear; drop deactivated from the view.
+        merged = await _merged_category_preferences(db, preference.category_preferences)
         if merged != (preference.category_preferences or {}):
             preference = await persist_update_preferences(
                 db,
@@ -91,10 +175,12 @@ async def _get_or_create_preferences(db: AsyncSession, user_id: UUID):
                 category_preferences=merged,
             )
         return preference
+
+    defaults = await get_default_category_preferences(db)
     return await create_preferences(
         db,
         user_id=user_id,
-        category_preferences=dict(DEFAULT_CATEGORY_PREFERENCES),
+        category_preferences=defaults,
     )
 
 
@@ -106,12 +192,13 @@ async def get_preferences(
     preference = await _get_or_create_preferences(db, user_id)
     await db.commit()
     return success_response(
-        PREFERENCES_FETCHED_MESSAGE,
+        "Notification preferences fetched successfully.",
         NotificationPreferencesData(
             push_enabled=preference.push_enabled,
             in_app_enabled=preference.in_app_enabled,
-            category_preferences=_merged_category_preferences(
-                preference.category_preferences
+            category_preferences=await _merged_category_preferences(
+                db,
+                preference.category_preferences,
             ),
         ),
         response_cls=NotificationPreferencesResponse,
@@ -128,9 +215,14 @@ async def update_preferences(
 
     merged_categories = None
     if payload.category_preferences is not None:
-        merged_categories = _merged_category_preferences(preference.category_preferences)
+        merged_categories = await _merged_category_preferences(
+            db,
+            preference.category_preferences,
+        )
         for key, value in payload.category_preferences.items():
-            merged_categories[str(key)] = bool(value)
+            key_str = str(key)
+            if key_str in merged_categories:
+                merged_categories[key_str] = bool(value)
 
     preference = await persist_update_preferences(
         db,
@@ -143,12 +235,13 @@ async def update_preferences(
     await db.refresh(preference)
 
     return success_response(
-        PREFERENCES_UPDATED_MESSAGE,
+        "Notification preferences updated successfully.",
         NotificationPreferencesData(
             push_enabled=preference.push_enabled,
             in_app_enabled=preference.in_app_enabled,
-            category_preferences=_merged_category_preferences(
-                preference.category_preferences
+            category_preferences=await _merged_category_preferences(
+                db,
+                preference.category_preferences,
             ),
         ),
         response_cls=NotificationPreferencesResponse,
@@ -163,23 +256,24 @@ async def list_notifications(
     page_size: int | None = None,
     unread_only: bool = False,
 ) -> NotificationListResponse:
+    merged = await _list_unified_notifications_for_user(
+        db,
+        user_id,
+        unread_only=unread_only,
+    )
+    total_items = len(merged)
+
     paginate = page is not None or page_size is not None
     if paginate:
         resolved_page = page if page is not None else 1
         resolved_page_size = page_size if page_size is not None else 20
-        total_items = await count_notifications_for_user(
-            db,
-            user_id,
-            unread_only=unread_only,
-        )
-        rows = await list_notifications_for_user(
-            db,
-            user_id,
-            unread_only=unread_only,
-            page=resolved_page,
-            page_size=resolved_page_size,
-        )
-        items = [_to_notification_item(row) for row in rows]
+        start = (resolved_page - 1) * resolved_page_size
+        end = start + resolved_page_size
+        page_rows = merged[start:end]
+        items = [
+            _to_notification_item(row, is_broadcast=is_broadcast)
+            for row, is_broadcast in page_rows
+        ]
         data = build_paginated_response(
             items,
             resolved_page,
@@ -187,16 +281,14 @@ async def list_notifications(
             total_items,
         ).model_dump(mode="json")
     else:
-        rows = await list_notifications_for_user(
-            db,
-            user_id,
-            unread_only=unread_only,
-        )
-        items = [_to_notification_item(row) for row in rows]
+        items = [
+            _to_notification_item(row, is_broadcast=is_broadcast)
+            for row, is_broadcast in merged
+        ]
         data = {"items": [item.model_dump(mode="json") for item in items]}
 
     return success_response(
-        NOTIFICATIONS_FETCHED_MESSAGE,
+        "Notifications fetched successfully.",
         data,
         response_cls=NotificationListResponse,
     )
@@ -213,24 +305,39 @@ async def mark_as_read(
         notification_id=notification_id,
         recipient_user_id=user_id,
     )
-    if notification is None:
-        return error_response(
-            NOTIFICATION_NOT_FOUND_MESSAGE,
+    if notification is not None:
+        if not notification.is_read:
+            notification = await persist_mark_as_read(db, notification)
+            await db.commit()
+            notification = await get_notification_for_user(
+                db,
+                notification_id=notification_id,
+                recipient_user_id=user_id,
+            )
+        return success_response(
+            "Notification marked as read.",
+            _to_notification_item(notification) if notification else None,
             response_cls=MarkNotificationReadResponse,
         )
 
-    if not notification.is_read:
-        notification = await persist_mark_as_read(db, notification)
-        await db.commit()
-        notification = await get_notification_for_user(
-            db,
-            notification_id=notification_id,
-            recipient_user_id=user_id,
+    broadcast = await get_broadcast_notification_by_id(db, notification_id)
+    if broadcast is None:
+        return error_response(
+            "Notification not found.",
+            response_cls=MarkNotificationReadResponse,
         )
 
+    user_topics = await _user_topic_set(db, user_id)
+    if not _is_broadcast_visible_to_user(broadcast, user_topics=user_topics):
+        return error_response(
+            "Notification not found.",
+            response_cls=MarkNotificationReadResponse,
+        )
+
+    # Shared broadcast row — acknowledge read without mutating global state.
     return success_response(
-        NOTIFICATION_READ_MESSAGE,
-        _to_notification_item(notification) if notification else None,
+        "Notification marked as read.",
+        _to_notification_item(broadcast, is_broadcast=True),
         response_cls=MarkNotificationReadResponse,
     )
 
@@ -243,7 +350,7 @@ async def mark_all_read(
     updated = await persist_mark_all_read(db, user_id)
     await db.commit()
     return success_response(
-        NOTIFICATIONS_READ_ALL_MESSAGE,
+        "All notifications marked as read.",
         {"updated_count": updated},
         response_cls=MarkAllNotificationsReadResponse,
     )
@@ -277,7 +384,7 @@ async def create_notification(
         return None
 
     preference = await _get_or_create_preferences(db, recipient_user_id)
-    category_enabled = _is_category_enabled(preference, type_name)
+    category_enabled = await _is_category_enabled(db, preference, type_name)
 
     notification: Notification | None = None
     if preference.in_app_enabled and category_enabled:

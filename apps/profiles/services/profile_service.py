@@ -298,6 +298,11 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
     from sqlmodel import select
     from core.images import file_exists, normalize_image_name
     from fastapi import HTTPException
+    import logging
+
+    from apps.notifications.services.topic_service import TopicService
+
+    profile_logger = logging.getLogger(__name__)
 
     stmt = select(Profile).where(Profile.user_id == user.id)
     profile = (await db.execute(stmt)).scalar_one_or_none()
@@ -305,6 +310,11 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
         profile = Profile(user_id=user.id, first_name="", last_name="", completeness_score=0)
         db.add(profile)
         await db.flush()
+
+    topic_fields_changed = TopicService.affects_topics(payload)
+    old_topics: set[str] = set()
+    if topic_fields_changed:
+        old_topics = await TopicService.capture_topics(db, profile)
 
     if payload.firstName is not None:
         profile.first_name = payload.firstName
@@ -370,9 +380,7 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
     if stream_sync_needed:
         from apps.chat.service import StreamChatError, upsert_stream_user
         from common.exceptions import ApiError
-        import logging
 
-        profile_logger = logging.getLogger(__name__)
         try:
             await upsert_stream_user(user, db)
         except StreamChatError as exc:
@@ -381,6 +389,14 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
                 user.id,
             )
             raise ApiError(str(exc)) from exc
+
+    if topic_fields_changed:
+        await TopicService.sync_user_topics(
+            db,
+            user.id,
+            old_topics=old_topics,
+            profile=profile,
+        )
 
     # Temporarily disabled: profile updated email
     # try:
@@ -436,6 +452,7 @@ async def update_user_profile_by_admin_service(
     from apps.accounts.db_models import User
     from apps.profiles.db_models.profile_db_model import Profile
     from core.images import file_exists, normalize_image_name
+    from apps.notifications.services.topic_service import TopicService
 
     # 1. Fetch user
     user_uuid = UUID(str(user_id)) if isinstance(user_id, str) else user_id
@@ -454,6 +471,11 @@ async def update_user_profile_by_admin_service(
         profile = Profile(user_id=user.id, first_name="", last_name="", completeness_score=0)
         db.add(profile)
         await db.flush()
+
+    topic_fields_changed = TopicService.affects_topics(payload)
+    old_topics: set[str] = set()
+    if topic_fields_changed:
+        old_topics = await TopicService.capture_topics(db, profile)
 
     # 3. Apply updates
     if payload.firstName is not None:
@@ -542,6 +564,14 @@ async def update_user_profile_by_admin_service(
                 user.id,
             )
             raise ApiError(str(exc)) from exc
+
+    if topic_fields_changed:
+        await TopicService.sync_user_topics(
+            db,
+            user.id,
+            old_topics=old_topics,
+            profile=profile,
+        )
 
     # Temporarily disabled: profile updated email
     # try:

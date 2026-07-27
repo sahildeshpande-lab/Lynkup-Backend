@@ -173,6 +173,7 @@ async def complete_onboarding(
     await db.refresh(profile)
 
     from apps.chat.service import StreamChatError, upsert_stream_user
+    from apps.notifications.services.topic_service import TopicService
     from common.exceptions import ApiError
 
     try:
@@ -180,6 +181,13 @@ async def complete_onboarding(
     except StreamChatError as exc:
         logger.exception("Stream user sync failed during onboarding for user_id=%s", user.id)
         raise ApiError(str(exc)) from exc
+
+    await TopicService.sync_user_topics(
+        db,
+        user.id,
+        old_topics=set(),
+        profile=profile,
+    )
 
     user_data = await build_user_base_response(user, profile, db)
     return {"user": user_data}

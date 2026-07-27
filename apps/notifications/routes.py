@@ -12,20 +12,26 @@ from apps.notifications.schemas import (
     AdminCampaignListResponse,
     CreateCampaignRequest,
     CreateCampaignResponse,
+    DeleteCampaignRequest,
+    DeleteCampaignResponse,
     MarkAllNotificationsReadResponse,
     MarkNotificationReadResponse,
     NotificationListResponse,
     NotificationPreferencesResponse,
+    UpdateCampaignRequest,
+    UpdateCampaignResponse,
     UpdateNotificationPreferencesRequest,
 )
 from apps.notifications.services import (
     create_campaign,
+    delete_campaign,
     dispatch_campaign,
     get_preferences,
     list_campaigns,
     list_notifications,
     mark_all_read,
     mark_as_read,
+    update_campaign,
     update_preferences,
 )
 from common.enums import NotificationCampaignStatus, NotificationCampaignType
@@ -197,3 +203,42 @@ async def admin_create_notification_campaign(
                 result.data.id,
             )
     return result
+
+
+@router.patch(
+    "/admin/notifications",
+    response_model=UpdateCampaignResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update a notification campaign",
+    description=(
+        "Update an active admin notification campaign. "
+        "Request body matches POST with an additional id field. "
+        "Does not re-dispatch push notifications."
+    ),
+)
+async def admin_update_notification_campaign(
+    payload: UpdateCampaignRequest,
+    current_user: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> UpdateCampaignResponse:
+    _ = current_user
+    return await update_campaign(db, payload=payload)
+
+
+@router.delete(
+    "/admin/notifications",
+    response_model=DeleteCampaignResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Delete a notification campaign",
+    description=(
+        "Soft-delete a notification campaign by setting is_active=false. "
+        "Provide the campaign id in the JSON body."
+    ),
+)
+async def admin_delete_notification_campaign(
+    payload: DeleteCampaignRequest,
+    current_user: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> DeleteCampaignResponse:
+    _ = current_user
+    return await delete_campaign(db, campaign_id=payload.id)

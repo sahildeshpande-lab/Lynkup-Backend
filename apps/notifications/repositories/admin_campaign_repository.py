@@ -21,7 +21,10 @@ def _apply_campaign_filters(
     search: str | None = None,
     campaign_type: NotificationCampaignType | None = None,
     status: NotificationCampaignStatus | None = None,
+    active_only: bool = True,
 ):
+    if active_only:
+        stmt = stmt.where(NotificationCampaign.is_active.is_(True))
     if search:
         term = f"%{search.strip()}%"
         stmt = stmt.where(
@@ -40,9 +43,47 @@ def _apply_campaign_filters(
 async def get_campaign_by_id(
     db: AsyncSession,
     campaign_id: UUID,
+    *,
+    active_only: bool = False,
 ) -> NotificationCampaign | None:
     stmt = select(NotificationCampaign).where(NotificationCampaign.id == campaign_id)
+    if active_only:
+        stmt = stmt.where(NotificationCampaign.is_active.is_(True))
     return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def update_campaign(
+    db: AsyncSession,
+    campaign: NotificationCampaign,
+    *,
+    notification_type_id: UUID,
+    campaign_type: NotificationCampaignType,
+    title: str,
+    message: str,
+    deep_link_payload: dict[str, Any] | None = None,
+) -> NotificationCampaign:
+    campaign.notification_type_id = notification_type_id
+    campaign.campaign_type = campaign_type
+    campaign.title = title
+    campaign.message = message
+    campaign.deep_link_payload = deep_link_payload
+    campaign.updated_at = utc_now()
+    db.add(campaign)
+    await db.flush()
+    await db.refresh(campaign)
+    return campaign
+
+
+async def deactivate_campaign(
+    db: AsyncSession,
+    campaign: NotificationCampaign,
+) -> NotificationCampaign:
+    campaign.is_active = False
+    campaign.updated_at = utc_now()
+    db.add(campaign)
+    await db.flush()
+    await db.refresh(campaign)
+    return campaign
 
 
 async def create_campaign(

@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, ConfigDict
 
 from common.enums import (
     NotificationCampaignStatus,
@@ -93,12 +93,35 @@ class CreateCampaignRequest(BaseModel):
         return self
 
 
+class UpdateCampaignRequest(CreateCampaignRequest):
+    id: UUID
+
+
+class DeleteCampaignRequest(BaseModel):
+    id: UUID
+
+
 class CreateCampaignData(BaseModel):
     id: UUID
 
 
 class CreateCampaignResponse(ApiResponse):
     data: CreateCampaignData | None = None
+
+
+class UpdateCampaignResponse(ApiResponse):
+    data: CreateCampaignData | None = None
+
+
+class DeleteCampaignResponse(ApiResponse):
+    data: CreateCampaignData | None = None
+
+
+class CampaignTargetResponse(BaseModel):
+    """Same shape as create-campaign targets; returned as originally stored."""
+
+    type: NotificationTargetType
+    values: list[str]
 
 
 class AdminCampaignListItem(BaseModel):
@@ -108,6 +131,7 @@ class AdminCampaignListItem(BaseModel):
     campaign_type: NotificationCampaignType
     status: NotificationCampaignStatus
     recipient_count: int
+    targets: list[CampaignTargetResponse] = Field(default_factory=list)
     scheduled_at: datetime | None = None
     sent_at: datetime | None = None
     created_at: datetime
@@ -125,16 +149,76 @@ class SendCampaignResponse(ApiResponse):
     data: dict | None = None
 
 
+# class NotificationPreferencesData(BaseModel):
+#     push_enabled: bool
+#     in_app_enabled: bool
+#     category_preferences: dict[str, bool] = Field(default_factory=dict)
+
 class NotificationPreferencesData(BaseModel):
     push_enabled: bool
     in_app_enabled: bool
-    category_preferences: dict[str, bool] = Field(default_factory=dict)
+    category_preferences: dict[str, bool] = Field(
+        default_factory=dict,
+        description=(
+            "Dynamic mapping of notification category to enabled/disabled state."
+        ),
+        examples=[
+            {
+                "CONNECTION_REQUEST": True,
+                "CONNECTION_ACCEPTED": True,
+                "DIRECT_MESSAGE": False,
+                "ANNOUNCEMENT": True,
+                "TOPIC": True,
+            }
+        ],
+    )
 
 
+# class UpdateNotificationPreferencesRequest(BaseModel):
+#     push_enabled: bool | None = None
+#     in_app_enabled: bool | None = None
+#     category_preferences: dict[str, bool] | None = None
 class UpdateNotificationPreferencesRequest(BaseModel):
-    push_enabled: bool | None = None
-    in_app_enabled: bool | None = None
-    category_preferences: dict[str, bool] | None = None
+    push_enabled: bool | None = Field(
+        default=None,
+        description="Enable or disable push notifications.",
+    )
+    in_app_enabled: bool | None = Field(
+        default=None,
+        description="Enable or disable in-app notifications.",
+    )
+    category_preferences: dict[str, bool] | None = Field(
+        default=None,
+        description=(
+            "Dynamic mapping of notification category to enabled/disabled state."
+        ),
+        examples=[
+            {
+                "CONNECTION_REQUEST": True,
+                "CONNECTION_ACCEPTED": True,
+                "DIRECT_MESSAGE": False,
+                "ANNOUNCEMENT": True,
+                "TOPIC": True,
+            }
+        ],
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "push_enabled": True,
+                "in_app_enabled": True,
+                "category_preferences": {
+                    "CONNECTION_REQUEST": True,
+                    "CONNECTION_ACCEPTED": True,
+                    "DIRECT_MESSAGE": False,
+                    "ANNOUNCEMENT": True,
+                    "TOPIC": True,
+                },
+            }
+        }
+    )
+
 
 
 class NotificationPreferencesResponse(ApiResponse):

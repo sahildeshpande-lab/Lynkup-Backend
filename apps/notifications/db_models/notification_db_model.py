@@ -40,6 +40,29 @@ class NotificationType(SQLModel, table=True):
     )
 
 
+class NotificationCategory(SQLModel, table=True):
+    """Catalog of preference categories. Active rows drive default category_preferences."""
+
+    __tablename__ = "notification_categories"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    code: str = Field(sa_column=Column(String(100), nullable=False, unique=True))
+    name: str = Field(sa_column=Column(String(255), nullable=False))
+    description: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    is_active: bool = Field(
+        default=True,
+        sa_column=Column(Boolean, nullable=False, server_default=text("true")),
+    )
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
 class NotificationPreference(SQLModel, table=True):
     __tablename__ = "notification_preferences"
 

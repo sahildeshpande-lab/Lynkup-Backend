@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 from datetime import timedelta
 from uuid import uuid4
 from fastapi.responses import HTMLResponse
@@ -13,6 +14,7 @@ from common.enums import OnboardingStatus, UserStatus, inactive_account_message
 from core.auth.config import settings as auth_settings
 from core.email_service import send_otp_email, send_verification_success_email, build_email_verified_success_html
 from ..schemas import ApiResponse, LoginRequest, ResendOtpRequest, OtpVerifyRequest, UserBaseResponse
+logger = logging.getLogger(__name__)
 PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 
 from .common_service import _fetch_user_profile, _generate_otp, _now
@@ -113,6 +115,27 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
             fcm_token=payload.fcm_token,
         )
 
+        # Best-effort sync: never fail login if Firebase sync fails.
+        try:
+            from apps.notifications.services.topic_service import TopicService
+
+            profile = await _fetch_user_profile(db, user)
+            if profile is not None:
+                # For pre-feature users we may not have prior Firebase subscriptions recorded,
+                # so treat "old_topics" as empty to subscribe to all expected topics.
+                new_topics = await TopicService.build_topics(db, profile)
+                await TopicService.sync_topics(
+                    db,
+                    user.id,
+                    old_topics=set(),
+                    new_topics=new_topics,
+                )
+        except Exception:
+            logger.exception(
+                "Firebase topic sync failed during login (OTP flow) user_id=%s",
+                user.id,
+            )
+
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()
 
@@ -141,6 +164,25 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     )
 
     await db.commit()
+
+    # Best-effort sync: never fail login if Firebase sync fails.
+    try:
+        from apps.notifications.services.topic_service import TopicService
+
+        profile = await _fetch_user_profile(db, user)
+        if profile is not None:
+            new_topics = await TopicService.build_topics(db, profile)
+            await TopicService.sync_topics(
+                db,
+                user.id,
+                old_topics=set(),
+                new_topics=new_topics,
+            )
+    except Exception:
+        logger.exception(
+            "Firebase topic sync failed during login (no-OTP flow) user_id=%s",
+            user.id,
+        )
 
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()

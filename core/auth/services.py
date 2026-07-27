@@ -168,3 +168,69 @@ def send_push_notifications(
         "failed_count": failed_count,
         "failed_tokens": failed_tokens,
     }
+
+
+def send_push_to_topic(
+    topic: str,
+    title: str,
+    body: str,
+    data: dict[str, Any] | None = None,
+) -> str:
+    """
+    Publish one FCM notification to a Firebase topic.
+
+    Returns the Firebase message id on success.
+    """
+    initialize_firebase_app()
+
+    topic_name = (topic or "").strip()
+    if not topic_name:
+        raise ValueError("topic cannot be blank")
+
+    message = messaging.Message(
+        topic=topic_name,
+        notification=messaging.Notification(title=title, body=body),
+        data=_stringify_fcm_data(data),
+    )
+
+    try:
+        message_id = messaging.send(message)
+        logger.info("FCM topic message sent successfully: topic=%s id=%s", topic_name, message_id)
+        return message_id
+    except Exception:
+        logger.exception("FCM topic push failed: topic=%s", topic_name)
+        raise
+
+
+def send_push_to_topics(
+    topics: list[str] | set[str],
+    title: str,
+    body: str,
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Publish the same FCM notification to many Firebase topics.
+
+    Continues after individual topic failures.
+    """
+    successful_count = 0
+    failed_count = 0
+    failed_topics: list[str] = []
+
+    for raw_topic in topics or []:
+        topic = (raw_topic or "").strip()
+        if not topic:
+            continue
+        try:
+            send_push_to_topic(topic, title, body, data)
+            successful_count += 1
+        except Exception:
+            failed_count += 1
+            failed_topics.append(topic)
+            logger.exception("FCM topic batch continuing after failure for topic=%s", topic)
+
+    return {
+        "successful_count": successful_count,
+        "failed_count": failed_count,
+        "failed_topics": failed_topics,
+    }
