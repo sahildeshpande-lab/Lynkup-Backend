@@ -125,15 +125,35 @@ async def _list_unified_notifications_for_user(
     db: AsyncSession,
     user_id: UUID,
     *,
-    unread_only: bool = False,
+    is_read: bool | None = None,
 ) -> list[tuple[Notification, bool]]:
-    """Return (notification, is_broadcast) pairs newest-first."""
+    """Return (notification, is_broadcast) pairs newest-first, respecting preferences."""
+    preference = await _get_or_create_preferences(db, user_id)
+    if not preference.in_app_enabled:
+        return []
+
+    enabled_categories = await _merged_category_preferences(
+        db,
+        preference.category_preferences,
+    )
+
     personal = await list_personal_notifications_for_user(
         db,
         user_id,
-        unread_only=unread_only,
+        is_read=is_read,
     )
-    broadcasts = await list_broadcast_notifications(db)
+    personal = [
+        row
+        for row in personal
+        if _notification_type_enabled(row, enabled_categories)
+    ]
+
+    # Broadcast rows have no per-user read state and are always exposed as is_read=false.
+    if is_read is True:
+        broadcasts: list[Notification] = []
+    else:
+        broadcasts = await list_broadcast_notifications(db)
+
     user_topics: set[str] | None = None
     visible_broadcasts: list[Notification] = []
     for notification in broadcasts:
@@ -142,6 +162,8 @@ async def _list_unified_notifications_for_user(
             if getattr(notification, "notification_type", None) is not None
             else None
         )
+        if type_name and not enabled_categories.get(type_name, True):
+            continue
         if type_name == "TOPIC":
             if user_topics is None:
                 user_topics = await _user_topic_set(db, user_id)
@@ -152,15 +174,26 @@ async def _list_unified_notifications_for_user(
                 continue
         elif type_name != "ANNOUNCEMENT":
             continue
-        # Broadcasts have no per-user read flag; include them even when unread_only.
         visible_broadcasts.append(notification)
 
     merged: list[tuple[Notification, bool]] = [
-        *( (row, False) for row in personal ),
-        *( (row, True) for row in visible_broadcasts ),
+        *((row, False) for row in personal),
+        *((row, True) for row in visible_broadcasts),
     ]
     merged.sort(key=lambda item: item[0].created_at, reverse=True)
     return merged
+
+
+def _notification_type_enabled(
+    notification: Notification,
+    enabled_categories: dict[str, bool],
+) -> bool:
+    type_name = None
+    if getattr(notification, "notification_type", None) is not None:
+        type_name = notification.notification_type.name
+    if not type_name:
+        return True
+    return bool(enabled_categories.get(type_name, True))
 
 
 async def _get_or_create_preferences(db: AsyncSession, user_id: UUID):
@@ -220,7 +253,7 @@ async def update_preferences(
             preference.category_preferences,
         )
         for key, value in payload.category_preferences.items():
-            key_str = str(key)
+            key_str = str(key).strip().upper()
             if key_str in merged_categories:
                 merged_categories[key_str] = bool(value)
 
@@ -254,12 +287,12 @@ async def list_notifications(
     user_id: UUID,
     page: int | None = None,
     page_size: int | None = None,
-    unread_only: bool = False,
+    is_read: bool | None = None,
 ) -> NotificationListResponse:
     merged = await _list_unified_notifications_for_user(
         db,
         user_id,
-        unread_only=unread_only,
+        is_read=is_read,
     )
     total_items = len(merged)
 

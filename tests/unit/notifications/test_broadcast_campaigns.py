@@ -427,6 +427,31 @@ async def test_list_notifications_merges_personal_and_broadcasts(mock_db) -> Non
     with (
         patch.object(
             svc,
+            "_get_or_create_preferences",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    in_app_enabled=True,
+                    category_preferences={
+                        "CONNECTION_REQUEST": True,
+                        "ANNOUNCEMENT": True,
+                        "TOPIC": True,
+                    },
+                )
+            ),
+        ),
+        patch.object(
+            svc,
+            "get_default_category_preferences",
+            AsyncMock(
+                return_value={
+                    "CONNECTION_REQUEST": True,
+                    "ANNOUNCEMENT": True,
+                    "TOPIC": True,
+                }
+            ),
+        ),
+        patch.object(
+            svc,
             "list_personal_notifications_for_user",
             AsyncMock(return_value=[personal]),
         ),
@@ -448,3 +473,78 @@ async def test_list_notifications_merges_personal_and_broadcasts(mock_db) -> Non
     assert [item["title"] for item in items] == ["Campus news", "Request", "AI update"]
     assert items[0]["is_read"] is False  # broadcast forced unread in API
     assert items[1]["campaign_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_notifications_hides_disabled_announcement_category(mock_db) -> None:
+    from apps.notifications.services import notification_service as svc
+
+    db = mock_db()
+    user_id = uuid4()
+    announcement = SimpleNamespace(
+        id=uuid4(),
+        notification_type=SimpleNamespace(name="ANNOUNCEMENT"),
+        notification_type_id=uuid4(),
+        campaign_id=uuid4(),
+        title="Campus news",
+        body="hello",
+        deep_link_payload={"broadcast": True},
+        is_read=False,
+        read_at=None,
+        created_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+    )
+    personal = SimpleNamespace(
+        id=uuid4(),
+        notification_type=SimpleNamespace(name="CONNECTION_REQUEST"),
+        notification_type_id=uuid4(),
+        campaign_id=None,
+        title="Request",
+        body="body",
+        deep_link_payload=None,
+        is_read=False,
+        read_at=None,
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    with (
+        patch.object(
+            svc,
+            "_get_or_create_preferences",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    in_app_enabled=True,
+                    category_preferences={
+                        "CONNECTION_REQUEST": True,
+                        "ANNOUNCEMENT": False,
+                        "TOPIC": True,
+                    },
+                )
+            ),
+        ),
+        patch.object(
+            svc,
+            "get_default_category_preferences",
+            AsyncMock(
+                return_value={
+                    "CONNECTION_REQUEST": True,
+                    "ANNOUNCEMENT": True,
+                    "TOPIC": True,
+                }
+            ),
+        ),
+        patch.object(
+            svc,
+            "list_personal_notifications_for_user",
+            AsyncMock(return_value=[personal]),
+        ),
+        patch.object(
+            svc,
+            "list_broadcast_notifications",
+            AsyncMock(return_value=[announcement]),
+        ),
+    ):
+        response = await svc.list_notifications(db, user_id=user_id)
+
+    titles = [item["title"] for item in response.data["items"]]
+    assert titles == ["Request"]
+    assert "Campus news" not in titles

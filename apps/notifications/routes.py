@@ -83,7 +83,7 @@ async def update_notification_preferences_route(
     description=(
         "Return in-app notifications for the authenticated user, newest first. "
         "When both page and pageSize are omitted, all notifications are returned. "
-        "Use unread_only=true to filter unread items."
+        "Use is_read=false to return unread items only, or is_read=true for read items."
     ),
 )
 async def list_my_notifications_route(
@@ -91,14 +91,17 @@ async def list_my_notifications_route(
     db: Annotated[AsyncSession, Depends(get_session)],
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
-    unread_only: bool = Query(default=False),
+    is_read: bool | None = Query(
+        default=None,
+        description="Filter by read state. Omit to return all notifications.",
+    ),
 ) -> NotificationListResponse:
     return await list_notifications(
         db,
         user_id=current_user.id,
         page=page,
         page_size=pageSize,
-        unread_only=unread_only,
+        is_read=is_read,
     )
 
 

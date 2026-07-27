@@ -304,3 +304,26 @@ async def test_update_preferences_ignores_unknown_category_keys(mock_db):
     saved = persist.await_args.kwargs["category_preferences"]
     assert "NOT_A_REAL_CATEGORY" not in saved
     assert saved["TOPIC"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_default_category_preferences_falls_back_to_notification_types(
+    mock_db,
+    scalar_result,
+):
+    from apps.notifications.repositories import notification_repository as repo
+
+    db = mock_db(
+        # categories query returns empty
+        scalar_result(values=[]),
+        # types query returns active names
+        scalar_result(values=["ANNOUNCEMENT", "TOPIC", "CONNECTION_REQUEST"]),
+    )
+
+    defaults = await repo.get_default_category_preferences(db)
+
+    assert defaults == {
+        "ANNOUNCEMENT": True,
+        "TOPIC": True,
+        "CONNECTION_REQUEST": True,
+    }

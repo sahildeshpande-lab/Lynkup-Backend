@@ -29,10 +29,26 @@ async def list_active_notification_categories(
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def list_active_notification_type_names(db: AsyncSession) -> list[str]:
+    stmt = (
+        select(NotificationType.name)
+        .where(NotificationType.is_active.is_(True))
+        .order_by(NotificationType.name.asc())
+    )
+    return [str(name) for name in (await db.execute(stmt)).scalars().all() if name]
+
+
 async def get_default_category_preferences(db: AsyncSession) -> dict[str, bool]:
-    """Build `{category.code: True}` for every active notification category."""
+    """
+    Build `{code: True}` for every active preference category.
+
+    Prefer ``notification_categories``. If that catalog is empty (not seeded yet),
+    fall back to active ``notification_types`` so GET/PATCH preferences still work.
+    """
     categories = await list_active_notification_categories(db)
-    return {category.code: True for category in categories}
+    if categories:
+        return {category.code: True for category in categories}
+    return {name: True for name in await list_active_notification_type_names(db)}
 
 
 async def get_notification_type_by_name(
@@ -97,7 +113,7 @@ async def list_personal_notifications_for_user(
     db: AsyncSession,
     recipient_user_id: UUID,
     *,
-    unread_only: bool = False,
+    is_read: bool | None = None,
 ) -> list[Notification]:
     stmt = (
         select(Notification)
@@ -108,8 +124,8 @@ async def list_personal_notifications_for_user(
         .options(selectinload(Notification.notification_type))
         .order_by(Notification.created_at.desc())
     )
-    if unread_only:
-        stmt = stmt.where(Notification.is_read.is_(False))
+    if is_read is not None:
+        stmt = stmt.where(Notification.is_read.is_(is_read))
     return list((await db.execute(stmt)).scalars().all())
 
 
@@ -166,7 +182,7 @@ async def count_notifications_for_user(
     db: AsyncSession,
     recipient_user_id: UUID,
     *,
-    unread_only: bool = False,
+    is_read: bool | None = None,
 ) -> int:
     """Count personal notifications only (broadcast eligibility is computed in the service)."""
     stmt = (
@@ -177,8 +193,8 @@ async def count_notifications_for_user(
             Notification.campaign_id.is_(None),
         )
     )
-    if unread_only:
-        stmt = stmt.where(Notification.is_read.is_(False))
+    if is_read is not None:
+        stmt = stmt.where(Notification.is_read.is_(is_read))
     return int((await db.execute(stmt)).scalar_one())
 
 
@@ -186,7 +202,7 @@ async def list_notifications_for_user(
     db: AsyncSession,
     recipient_user_id: UUID,
     *,
-    unread_only: bool = False,
+    is_read: bool | None = None,
     page: int | None = None,
     page_size: int | None = None,
 ) -> list[Notification]:
@@ -200,8 +216,8 @@ async def list_notifications_for_user(
         .options(selectinload(Notification.notification_type))
         .order_by(Notification.created_at.desc())
     )
-    if unread_only:
-        stmt = stmt.where(Notification.is_read.is_(False))
+    if is_read is not None:
+        stmt = stmt.where(Notification.is_read.is_(is_read))
     if page is not None and page_size is not None:
         stmt = stmt.offset((page - 1) * page_size).limit(page_size)
     return list((await db.execute(stmt)).scalars().all())
