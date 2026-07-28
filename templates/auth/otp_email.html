@@ -1,23 +1,14 @@
-<!-- OTP body: table-based blocks for Gmail, Outlook, Apple Mail -->
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-  <tr>
-    <td align="center" style="padding:0 0 16px;">
-      <p class="body-text dm-text-primary" style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#475569;line-height:1.6;text-align:center;">
-        Hello,<br>
-        Please use this one-time code to verify your email address and securely access your account.
-      </p>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" style="padding:0 0 12px;">
-      {{otp_display}}
-    </td>
-  </tr>
-  <tr>
-    <td align="center" style="padding:0;">
-      <p class="muted-text dm-text-secondary" style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#64748B;line-height:1.5;text-align:center;">
-        This code expires in {{otp_expire_minutes}} minutes.
-      </p>
-    </td>
-  </tr>
-</table>
+<p class="body-text" style="margin: 0 0 20px; color: #475569;">
+  Hello,<br>
+    Please use this one-time code to verify your email address and securely access your account.
+</p>
+
+<!-- Dynamic OTP Display -->
+<div style="margin: 0 0 20px;">
+  {{otp_display}}
+</div>
+
+<p class="muted-text" style="margin: 0 0 16px; font-size: 14px; color: #64748B;">
+  One-time code will expire in {{otp_expire_minutes}} minutes.
+</p>
+
