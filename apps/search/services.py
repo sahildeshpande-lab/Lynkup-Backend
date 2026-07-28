@@ -305,15 +305,21 @@ async def _list_distinct_profile_field(
     from apps.profiles.db_models.profile_db_model import Profile
 
     column = getattr(Profile, field_name)
+    normalized = func.lower(func.btrim(column))
     filters = [column.is_not(None), func.btrim(column) != ""]
 
     clean_query = (query or "").strip()
     if clean_query:
-        filters.append(column.ilike(f"%{clean_query}%"))
+        filters.append(normalized.ilike(f"%{clean_query.lower()}%"))
 
     where_clause = and_(*filters)
-    count_stmt = select(func.count(func.distinct(column))).where(where_clause)
-    stmt = select(column).where(where_clause).distinct().order_by(column.asc())
+    count_stmt = select(func.count(func.distinct(normalized))).where(where_clause)
+    stmt = (
+        select(normalized)
+        .where(where_clause)
+        .distinct()
+        .order_by(normalized.asc())
+    )
 
     total_items = int((await db.execute(count_stmt)).scalar_one())
     if page is not None and page_size is not None:

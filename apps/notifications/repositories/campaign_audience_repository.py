@@ -341,9 +341,40 @@ async def _resolve_interest_users(db: AsyncSession, values: list[str]) -> list[U
     return await _base_visible_profile_user_ids(db, [or_(*clauses)])
 
 
+async def _resolve_hashtag_tags(db: AsyncSession, values: list[str]) -> list[str]:
+    tags: list[str] = []
+    hashtag_ids: list[UUID] = []
+
+    for value in values:
+        raw = str(value).strip()
+        if not raw:
+            continue
+        parsed_id = _try_parse_uuid(raw)
+        if parsed_id is not None:
+            hashtag_ids.append(parsed_id)
+            continue
+        normalized = _normalize_hashtag(raw)
+        if normalized:
+            tags.append(normalized)
+
+    if hashtag_ids:
+        rows = (
+            await db.execute(select(Hashtag.tag).where(Hashtag.id.in_(hashtag_ids)))
+        ).scalars().all()
+        tags.extend((tag or "").strip().lower() for tag in rows if (tag or "").strip())
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for tag in tags:
+        if tag in seen:
+            continue
+        seen.add(tag)
+        deduped.append(tag)
+    return deduped
+
+
 async def _resolve_hashtag_users(db: AsyncSession, values: list[str]) -> list[UUID]:
-    tags = [_normalize_hashtag(value) for value in values]
-    tags = [tag for tag in tags if tag]
+    tags = await _resolve_hashtag_tags(db, values)
     if not tags:
         return []
 

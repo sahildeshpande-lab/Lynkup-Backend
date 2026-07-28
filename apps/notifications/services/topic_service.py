@@ -129,7 +129,21 @@ async def _resolve_target_value_for_topic(
         return value
 
     if target_type == NotificationTargetType.hashtags:
-        return value.lstrip("#")
+        from apps.feed.db_models.hashtag_db_model import Hashtag
+
+        raw = value.lstrip("#").strip()
+        if not raw:
+            return None
+        try:
+            hashtag_id = UUID(raw)
+        except (TypeError, ValueError):
+            hashtag_id = None
+        if hashtag_id is not None:
+            hashtag = (
+                await db.execute(select(Hashtag).where(Hashtag.id == hashtag_id))
+            ).scalar_one_or_none()
+            return ((hashtag.tag or "").strip().lower() or None) if hashtag else None
+        return raw.lower()
 
     return value
 
@@ -155,6 +169,33 @@ async def _topics_from_major(_db: AsyncSession, profile: Profile) -> set[str]:
 async def _topics_from_minor(_db: AsyncSession, profile: Profile) -> set[str]:
     topic = format_topic("minor", profile.minor or "")
     return {topic} if topic else set()
+
+
+async def _topics_from_hashtags(db: AsyncSession, profile: Profile) -> set[str]:
+    from apps.feed.db_models.hashtag_db_model import Hashtag
+    from apps.feed.db_models.post_db_model import Post
+    from apps.feed.db_models.post_hashtag_db_model import PostHashtag
+    from common.enums import PostState
+
+    rows = (
+        await db.execute(
+            select(Hashtag.tag)
+            .join(PostHashtag, PostHashtag.hashtag_id == Hashtag.id)
+            .join(Post, Post.id == PostHashtag.post_id)
+            .where(
+                Post.author_user_id == profile.user_id,
+                Post.state == PostState.published,
+            )
+            .distinct()
+        )
+    ).scalars().all()
+
+    topics: set[str] = set()
+    for tag in rows:
+        topic = format_topic("hashtag", tag or "")
+        if topic:
+            topics.add(topic)
+    return topics
 
 
 async def _topics_from_interests(db: AsyncSession, profile: Profile) -> set[str]:
@@ -189,6 +230,7 @@ _TOPIC_BUILDERS: list[TopicBuilder] = [
     _topics_from_major,
     _topics_from_minor,
     _topics_from_interests,
+    _topics_from_hashtags,
 ]
 
 # Payload fields that affect Firebase topic membership.

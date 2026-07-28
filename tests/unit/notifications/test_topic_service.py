@@ -27,6 +27,51 @@ def test_format_topic_builds_prefixed_slug() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_hashtag_target_uuid_to_tag(mock_db, scalar_result) -> None:
+    from apps.notifications.services import topic_service as ts
+    from common.enums import NotificationTargetType
+
+    hashtag_id = uuid4()
+    hashtag = SimpleNamespace(id=hashtag_id, tag="machinelearning")
+    db = mock_db(scalar_result(hashtag))
+
+    resolved = await ts._resolve_target_value_for_topic(
+        db,
+        NotificationTargetType.hashtags,
+        str(hashtag_id),
+    )
+    assert resolved == "machinelearning"
+    assert format_topic("hashtag", resolved) == "hashtag_machinelearning"
+
+
+@pytest.mark.asyncio
+async def test_resolve_hashtag_target_accepts_tag_name(mock_db) -> None:
+    from apps.notifications.services import topic_service as ts
+    from common.enums import NotificationTargetType
+
+    resolved = await ts._resolve_target_value_for_topic(
+        mock_db(),
+        NotificationTargetType.hashtags,
+        "#FastAPI",
+    )
+    assert resolved == "fastapi"
+
+
+@pytest.mark.asyncio
+async def test_topics_from_hashtags_uses_published_posts(mock_db) -> None:
+    from apps.notifications.services import topic_service as ts
+
+    profile = SimpleNamespace(user_id=uuid4())
+    db = mock_db()
+    db.execute = AsyncMock(
+        return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: ["ai", "ml"]))
+    )
+
+    topics = await ts._topics_from_hashtags(db, profile)
+    assert topics == {"hashtag_ai", "hashtag_ml"}
+
+
+@pytest.mark.asyncio
 async def test_build_topics_combines_registered_builders(mock_db) -> None:
     db = mock_db()
     profile = SimpleNamespace(user_id=uuid4())
@@ -44,6 +89,7 @@ async def test_build_topics_combines_registered_builders(mock_db) -> None:
                 "interest_machine_learning",
             }
         ),
+        AsyncMock(return_value={"hashtag_ai"}),
     ]
     try:
         topics = await TopicService.build_topics(db, profile)
@@ -56,6 +102,7 @@ async def test_build_topics_combines_registered_builders(mock_db) -> None:
         "minor_data_science",
         "interest_artificial_intelligence",
         "interest_machine_learning",
+        "hashtag_ai",
     }
 
 

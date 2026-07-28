@@ -26,6 +26,57 @@ from apps.moderation.services.moderator_assignment_service import (
 
 logger = logging.getLogger(__name__)
 
+
+async def _capture_user_topics(db: AsyncSession, user_id: UUID) -> set[str]:
+    from apps.profiles.db_models.profile_db_model import Profile
+    from apps.notifications.services.topic_service import TopicService
+
+    profile = (
+        await db.execute(select(Profile).where(Profile.user_id == user_id))
+    ).scalar_one_or_none()
+    if profile is None:
+        return set()
+    return await TopicService.capture_topics(db, profile)
+
+
+async def _sync_user_topics_best_effort(
+    db: AsyncSession,
+    user_id: UUID,
+    *,
+    old_topics: set[str],
+) -> None:
+    from apps.profiles.db_models.profile_db_model import Profile
+    from apps.notifications.services.topic_service import TopicService
+
+    try:
+        profile = (
+            await db.execute(select(Profile).where(Profile.user_id == user_id))
+        ).scalar_one_or_none()
+        if profile is None:
+            return
+        await TopicService.sync_user_topics(
+            db,
+            user_id,
+            old_topics=old_topics,
+            profile=profile,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to sync Firebase topics after post change user_id=%s",
+            user_id,
+        )
+
+
+def _should_sync_topics_for_post_state(
+    post_state: PostState,
+    *,
+    previous_state: PostState | None = None,
+) -> bool:
+    if post_state == PostState.published:
+        return True
+    return previous_state == PostState.published
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -468,12 +519,19 @@ async def save_post_service(
                     replace=False,
                 )
 
+            old_topics = (
+                await _capture_user_topics(db, user_id)
+                if _should_sync_topics_for_post_state(post_state)
+                else set()
+            )
             await _sync_hashtags(post.id, content_dict, db)
             await _create_revision(post, user_id, db)
             await _assign_moderator_for_review(post, db)
 
             await db.commit()
             await db.refresh(post)
+            if _should_sync_topics_for_post_state(post_state):
+                await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
         except ApiError:
             await db.rollback()
             raise
@@ -530,6 +588,11 @@ async def save_post_service(
                 replace=True,
             )
 
+        old_topics = (
+            await _capture_user_topics(db, user_id)
+            if _should_sync_topics_for_post_state(post_state, previous_state=previous_state)
+            else set()
+        )
         await _sync_hashtags(post.id, content_dict, db)
         await _create_revision(post, user_id, db)
         await _assign_moderator_for_review(
@@ -538,6 +601,8 @@ async def save_post_service(
 
         await db.commit()
         await db.refresh(post)
+        if _should_sync_topics_for_post_state(post_state, previous_state=previous_state):
+            await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
     except ApiError:
         await db.rollback()
         raise
@@ -624,6 +689,11 @@ async def edit_post_service(
                 replace=True,
             )
 
+        old_topics = (
+            await _capture_user_topics(db, user_id)
+            if _should_sync_topics_for_post_state(post.state)
+            else set()
+        )
         # Re-sync hashtags from current caption and content_html
         await _sync_hashtags(post.id, merged_content, db)
 
@@ -632,6 +702,8 @@ async def edit_post_service(
 
         await db.commit()
         await db.refresh(post)
+        if _should_sync_topics_for_post_state(post.state):
+            await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
     except ApiError:
         await db.rollback()
         raise
@@ -676,6 +748,12 @@ async def publish_post_service(
     else:
         post.state = PostState.published
 
+    old_topics = (
+        await _capture_user_topics(db, user_id)
+        if _should_sync_topics_for_post_state(post.state, previous_state=previous_state)
+        else set()
+    )
+
     # Increment revision number and update timestamp
     post.revision_number += 1
     post.updated_at = utc_now()
@@ -690,6 +768,8 @@ async def publish_post_service(
 
         await db.commit()
         await db.refresh(post)
+        if _should_sync_topics_for_post_state(post.state, previous_state=previous_state):
+            await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
     except Exception as e:
         await db.rollback()
         raise ApiError("Failed to publish post")
