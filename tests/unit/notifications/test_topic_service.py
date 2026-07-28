@@ -27,6 +27,30 @@ def test_format_topic_builds_prefixed_slug() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_education_level_target_id_to_label(mock_db) -> None:
+    from apps.notifications.services import topic_service as ts
+    from common.enums import NotificationTargetType
+
+    resolved = await ts._resolve_target_value_for_topic(
+        mock_db(),
+        NotificationTargetType.education_level,
+        "1",
+    )
+    assert resolved == "Bachelors"
+    assert format_topic("education_level", resolved) == "education_level_bachelors"
+
+
+@pytest.mark.asyncio
+async def test_topics_from_education_level(mock_db) -> None:
+    from apps.notifications.services import topic_service as ts
+
+    profile = SimpleNamespace(user_id=uuid4(), edu_level="Bachelors")
+    assert await ts._topics_from_education_level(mock_db(), profile) == {
+        "education_level_bachelors"
+    }
+
+
+@pytest.mark.asyncio
 async def test_resolve_hashtag_target_uuid_to_tag(mock_db, scalar_result) -> None:
     from apps.notifications.services import topic_service as ts
     from common.enums import NotificationTargetType
@@ -83,6 +107,7 @@ async def test_build_topics_combines_registered_builders(mock_db) -> None:
         AsyncMock(return_value={"university_mit"}),
         AsyncMock(return_value={"major_computer_science"}),
         AsyncMock(return_value={"minor_data_science"}),
+        AsyncMock(return_value={"education_level_bachelors"}),
         AsyncMock(
             return_value={
                 "interest_artificial_intelligence",
@@ -100,6 +125,7 @@ async def test_build_topics_combines_registered_builders(mock_db) -> None:
         "university_mit",
         "major_computer_science",
         "minor_data_science",
+        "education_level_bachelors",
         "interest_artificial_intelligence",
         "interest_machine_learning",
         "hashtag_ai",

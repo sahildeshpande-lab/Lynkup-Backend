@@ -182,12 +182,7 @@ async def complete_onboarding(
         logger.exception("Stream user sync failed during onboarding for user_id=%s", user.id)
         raise ApiError(str(exc)) from exc
 
-    await TopicService.sync_user_topics(
-        db,
-        user.id,
-        old_topics=set(),
-        profile=profile,
-    )
+    await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
 
     user_data = await build_user_base_response(user, profile, db)
     return {"user": user_data}
@@ -212,6 +207,9 @@ async def update_profile_me_form(
         profile = Profile(user_id=current_user.id, first_name="", last_name="", completeness_score=0)
         db.add(profile)
         await db.flush()
+
+    topic_sync_needed = False
+    old_topics: set[str] = set()
 
     profile_data = {}
 
@@ -246,6 +244,8 @@ async def update_profile_me_form(
             profile_data["bannerPhotoUrl"] = generate_profile_image_url(profile.banner_photo_url)
 
     if academic_interests is not None:
+        topic_sync_needed = True
+        old_topics = await TopicService.capture_topics(db, profile)
         interests_list = []
         val = academic_interests.strip()
         if val.startswith("[") and val.endswith("]"):
@@ -268,6 +268,16 @@ async def update_profile_me_form(
     await db.commit()
     await db.refresh(current_user)
     await db.refresh(profile)
+
+    if topic_sync_needed:
+        from apps.notifications.services.topic_service import TopicService
+
+        await TopicService.sync_user_topics(
+            db,
+            current_user.id,
+            old_topics=old_topics,
+            profile=profile,
+        )
 
     user_data = await build_user_base_response(current_user, profile, db)
     return {"user": user_data}

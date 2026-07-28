@@ -77,6 +77,19 @@ def _should_sync_topics_for_post_state(
     return previous_state == PostState.published
 
 
+def _should_sync_topics_for_post(
+    post_state: PostState,
+    *,
+    previous_state: PostState | None = None,
+    hashtag_content_changed: bool = False,
+) -> bool:
+    if _should_sync_topics_for_post_state(post_state, previous_state=previous_state):
+        return True
+    return hashtag_content_changed and (
+        post_state == PostState.published or previous_state == PostState.published
+    )
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -643,6 +656,8 @@ async def edit_post_service(
     if post.author_user_id != user_id:
         raise ApiError("Post does not belong to the authenticated user")
 
+    previous_state = post.state
+
     # Validate media count if media payload is provided
     if payload.media is not None:
         try:
@@ -678,6 +693,15 @@ async def edit_post_service(
     post.revision_number += 1
     post.updated_at = utc_now()
 
+    hashtag_content_changed = payload.content is not None and (
+        payload.content.caption is not None or payload.content.content_html is not None
+    )
+    should_sync_topics = _should_sync_topics_for_post(
+        post.state,
+        previous_state=previous_state,
+        hashtag_content_changed=hashtag_content_changed,
+    )
+
     try:
         # Manage media attachments if provided
         if payload.media is not None:
@@ -690,9 +714,7 @@ async def edit_post_service(
             )
 
         old_topics = (
-            await _capture_user_topics(db, user_id)
-            if _should_sync_topics_for_post_state(post.state)
-            else set()
+            await _capture_user_topics(db, user_id) if should_sync_topics else set()
         )
         # Re-sync hashtags from current caption and content_html
         await _sync_hashtags(post.id, merged_content, db)
@@ -702,7 +724,7 @@ async def edit_post_service(
 
         await db.commit()
         await db.refresh(post)
-        if _should_sync_topics_for_post_state(post.state):
+        if should_sync_topics:
             await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
     except ApiError:
         await db.rollback()

@@ -121,15 +121,7 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
 
             profile = await _fetch_user_profile(db, user)
             if profile is not None:
-                # For pre-feature users we may not have prior Firebase subscriptions recorded,
-                # so treat "old_topics" as empty to subscribe to all expected topics.
-                new_topics = await TopicService.build_topics(db, profile)
-                await TopicService.sync_topics(
-                    db,
-                    user.id,
-                    old_topics=set(),
-                    new_topics=new_topics,
-                )
+                await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
         except Exception:
             logger.exception(
                 "Firebase topic sync failed during login (OTP flow) user_id=%s",
@@ -171,13 +163,7 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
 
         profile = await _fetch_user_profile(db, user)
         if profile is not None:
-            new_topics = await TopicService.build_topics(db, profile)
-            await TopicService.sync_topics(
-                db,
-                user.id,
-                old_topics=set(),
-                new_topics=new_topics,
-            )
+            await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
     except Exception:
         logger.exception(
             "Firebase topic sync failed during login (no-OTP flow) user_id=%s",
@@ -227,6 +213,19 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
             profile = (await db.execute(stmt_profile)).scalar_one_or_none()
             full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip() if profile else None
             await send_verification_success_email(user.email, full_name)
+
+        try:
+            from apps.notifications.services.topic_service import TopicService
+
+            stmt_profile = select(Profile).where(Profile.user_id == user.id)
+            profile = (await db.execute(stmt_profile)).scalar_one_or_none()
+            if profile is not None:
+                await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
+        except Exception:
+            logger.exception(
+                "Firebase topic sync failed during OTP verification user_id=%s",
+                user.id,
+            )
 
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()

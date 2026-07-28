@@ -574,24 +574,31 @@ async def _dispatch_topic(
         sorted(firebase_topics),
     )
 
-    recipient_user_ids = list(
-        dict.fromkeys(await resolve_topic_recipients(db, targets=targets))
-    )
-    logger.info(
-        "Topic campaign recipients resolved campaign_id=%s recipient_count=%s",
-        campaign.id,
-        len(recipient_user_ids),
-    )
-    await create_campaign_audience(
-        db,
-        campaign_id=campaign.id,
-        user_ids=recipient_user_ids,
-    )
-    logger.info(
-        "Audience audit written campaign_id=%s audience_count=%s",
-        campaign.id,
-        len(recipient_user_ids),
-    )
+    recipient_user_ids: list[UUID] = []
+    try:
+        recipient_user_ids = list(
+            dict.fromkeys(await resolve_topic_recipients(db, targets=targets))
+        )
+        logger.info(
+            "Topic campaign recipients resolved campaign_id=%s recipient_count=%s",
+            campaign.id,
+            len(recipient_user_ids),
+        )
+        await create_campaign_audience(
+            db,
+            campaign_id=campaign.id,
+            user_ids=recipient_user_ids,
+        )
+        logger.info(
+            "Audience audit written campaign_id=%s audience_count=%s",
+            campaign.id,
+            len(recipient_user_ids),
+        )
+    except Exception:
+        logger.exception(
+            "Topic campaign audience resolution failed campaign_id=%s",
+            campaign.id,
+        )
 
     await create_broadcast_notification(
         db,

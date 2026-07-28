@@ -12,6 +12,7 @@ from sqlmodel import select
 
 from apps.notifications.repositories.campaign_audience_repository import (
     get_active_fcm_tokens_for_users,
+    _resolve_edu_level,
 )
 from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
 from apps.profiles.db_models.country_db_model import Country
@@ -145,6 +146,9 @@ async def _resolve_target_value_for_topic(
             return ((hashtag.tag or "").strip().lower() or None) if hashtag else None
         return raw.lower()
 
+    if target_type == NotificationTargetType.education_level:
+        return _resolve_edu_level(value)
+
     return value
 
 
@@ -198,12 +202,28 @@ async def _topics_from_hashtags(db: AsyncSession, profile: Profile) -> set[str]:
     return topics
 
 
+async def _topics_from_education_level(_db: AsyncSession, profile: Profile) -> set[str]:
+    edu_level = (profile.edu_level or "").strip()
+    if not edu_level:
+        return set()
+    topic = format_topic("education_level", edu_level)
+    return {topic} if topic else set()
+
+
 async def _topics_from_interests(db: AsyncSession, profile: Profile) -> set[str]:
-    interest_ids = [
-        int(interest_id)
-        for interest_id in (profile.profile_interests_id or [])
-        if interest_id is not None
-    ]
+    interest_ids: list[int] = []
+    for interest_id in profile.profile_interests_id or []:
+        if interest_id is None:
+            continue
+        try:
+            interest_ids.append(int(interest_id))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Skipping invalid profile interest id user_id=%s value=%r",
+                profile.user_id,
+                interest_id,
+            )
+            continue
     if not interest_ids:
         return set()
 
@@ -229,6 +249,7 @@ _TOPIC_BUILDERS: list[TopicBuilder] = [
     _topics_from_university,
     _topics_from_major,
     _topics_from_minor,
+    _topics_from_education_level,
     _topics_from_interests,
     _topics_from_hashtags,
 ]
@@ -238,6 +259,7 @@ _TOPIC_PAYLOAD_FIELDS: tuple[str, ...] = (
     "major",
     "minor",
     "university_id",
+    "education_level_id",
     "academic_interests",
 )
 
@@ -333,6 +355,45 @@ class TopicService:
         except Exception:
             logger.exception(
                 "Firebase topic sync failed user_id=%s",
+                user_id,
+            )
+            return {
+                "topics_to_subscribe": [],
+                "topics_to_unsubscribe": [],
+                "token_count": 0,
+                "subscribe": None,
+                "unsubscribe": None,
+            }
+
+    @staticmethod
+    async def refresh_user_topic_subscriptions(
+        db: AsyncSession,
+        user_id: UUID,
+        profile: Profile,
+    ) -> dict[str, Any]:
+        """
+        Reconcile and (re)subscribe all expected topics for a user.
+
+        Uses a diff when topic membership changed, then idempotently subscribes
+        every expected topic so legacy users catch up after login/OTP even when
+        the stored profile has not changed since their last sync attempt.
+        """
+        try:
+            old_topics = await TopicService.capture_topics(db, profile)
+            new_topics = await TopicService.build_topics(db, profile)
+            result = await TopicService.sync_topics(
+                db,
+                user_id,
+                old_topics=old_topics,
+                new_topics=new_topics,
+            )
+            tokens = await get_active_fcm_tokens_for_users(db, [user_id])
+            if tokens and new_topics:
+                result["force_subscribe"] = TopicService.subscribe(tokens, new_topics)
+            return result
+        except Exception:
+            logger.exception(
+                "Firebase topic refresh failed user_id=%s",
                 user_id,
             )
             return {
