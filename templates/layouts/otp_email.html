@@ -1,0 +1,123 @@
+<!doctype html>
+<!--
+  KampuLynk OTP email layout
+  Fixes: 600px desktop / fluid mobile, table-based structure, inline CSS,
+  compact header/footer, reduced vertical gaps, client-safe OTP focus block.
+-->
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <title>{{title}}</title>
+  <!--[if mso]>
+  <noscript>
+    <xml>
+      <o:OfficeDocumentSettings>
+        <o:PixelsPerInch>96</o:PixelsPerInch>
+      </o:OfficeDocumentSettings>
+    </xml>
+  </noscript>
+  <![endif]-->
+  <style type="text/css">
+    /* Client resets */
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; border-collapse: collapse; }
+    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; display: block; }
+    body { margin: 0 !important; padding: 0 !important; width: 100% !important; height: 100% !important; }
+
+    /* Mobile: fluid width + tighter spacing */
+    @media only screen and (max-width: 600px) {
+      .email-wrapper { padding: 12px 8px !important; }
+      .email-container { width: 100% !important; max-width: 100% !important; }
+      .content-pad { padding: 20px 16px !important; }
+      .header-pad { padding: 16px 16px 12px !important; }
+      .footer-pad { padding: 16px 16px !important; }
+      .otp-box { width: 100% !important; max-width: 100% !important; }
+      .otp-digits { font-size: 30px !important; letter-spacing: 8px !important; }
+      .body-text { font-size: 15px !important; }
+      .hero-text { font-size: 15px !important; line-height: 1.5 !important; }
+    }
+
+    /* Dark mode (supported clients only; light mode unchanged elsewhere) */
+    @media (prefers-color-scheme: dark) {
+      .dm-bg-page { background-color: #1a2332 !important; }
+      .dm-bg-card { background-color: #0f172a !important; }
+      .dm-bg-content { background-color: #111827 !important; }
+      .dm-text-primary { color: #f1f5f9 !important; }
+      .dm-text-secondary { color: #94a3b8 !important; }
+      .dm-otp-box { background-color: #1e293b !important; border-color: #0B5FA5 !important; }
+      .dm-otp-digits { color: #f8fafc !important; }
+      .dm-footer { background-color: #071A35 !important; }
+    }
+  </style>
+</head>
+<body style="margin:0;padding:0;background-color:#E0E5ED;" class="dm-bg-page">
+  <!-- Outer wrapper: minimal vertical padding -->
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E0E5ED" class="dm-bg-page" style="background-color:#E0E5ED;">
+    <tr>
+      <td align="center" class="email-wrapper" style="padding:16px 12px;">
+        <!-- Fixed 600px container (fluid on mobile via media query) -->
+        <!--[if mso]>
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0"><tr><td>
+        <![endif]-->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="email-container dm-bg-card" style="max-width:600px;width:100%;background-color:#ffffff;">
+          <!-- Brand accent bar -->
+          <tr>
+            <td height="4" style="height:4px;line-height:4px;font-size:0;background-color:#00A74F;background-image:linear-gradient(90deg,#00A74F,#4473BD);">&nbsp;</td>
+          </tr>
+
+          <!-- Compact centered header / logo -->
+          <tr>
+            <td align="center" class="header-pad dm-bg-card" style="padding:20px 24px 12px;background-color:#ffffff;border-bottom:1px solid #EFEFEF;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center">
+                <tr>
+                  <td align="center" style="padding-bottom:8px;">
+                    <img src="{{logo_url}}" alt="KampuLynk" width="44" height="44" style="display:block;width:44px;height:44px;border:0;border-radius:8px;margin:0 auto;">
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="font-family:Arial,Helvetica,sans-serif;font-size:20px;font-weight:700;line-height:1.2;white-space:nowrap;">
+                    <span style="color:#0F82C8;">Kampu</span><span style="color:#10B14B;">Lynk</span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Short hero strip (reduced height vs legacy banner) -->
+          <tr>
+            <td align="center" class="hero-pad dm-footer" style="padding:14px 20px;background-color:#071A35;">
+              <p class="hero-text" style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:600;color:#ffffff;line-height:1.5;text-align:center;">
+                {{hero_text}}
+              </p>
+            </td>
+          </tr>
+
+          <!-- Main OTP content -->
+          <tr>
+            <td class="content-pad dm-bg-content" style="padding:24px 28px 20px;background-color:#F8FAFC;">
+              {{body_html}}
+            </td>
+          </tr>
+
+          <!-- Compact footer -->
+          <tr>
+            <td class="footer-pad dm-footer" style="padding:16px 24px 20px;background-color:#071A35;">
+              <p style="margin:0 0 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#94A3B8;line-height:1.5;text-align:center;">
+                This is an automated security notification from KampuLynk. If you did not request this code, you can safely ignore this email.
+              </p>
+              <p style="margin:0;padding-top:10px;border-top:1px solid #1E3A5F;font-family:Arial,Helvetica,sans-serif;font-size:10px;color:#64748B;line-height:1.5;text-align:center;">
+                &#169; KampuLynk. All rights reserved.
+              </p>
+            </td>
+          </tr>
+        </table>
+        <!--[if mso]></td></tr></table><![endif]-->
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

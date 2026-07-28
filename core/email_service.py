@@ -437,7 +437,7 @@ def _paragraphs(text: str) -> str:
 
 
 _VERIFICATION_HERO_TEXT = (
-    "Our misison is to connect and empower university students to achieve their educational goals."
+    "Our mission is to connect and empower university students to achieve their educational goals."
 )
 
 
@@ -451,19 +451,38 @@ def _otp_template_details(otp_purpose: str) -> tuple[str, str]:
 
 
 def _build_otp_display_html(otp: str, brand_blue: str) -> str:
-    """Build the OTP display as a full-width dashed card with large spaced digits.
-    Works for any OTP length; digits are space-separated for clarity.
-    """
+    """Table-based OTP card: centered digits, 34px type, letter-spaced for readability."""
     spaced = " ".join(escape(ch) for ch in otp)
     return (
-        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 8px 0 4px;">'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" '
+        'class="otp-box" style="margin:0 auto;max-width:360px;width:100%;">'
         "<tr>"
-        f'<td class="otp-card" align="center" style="padding: 28px 20px; background-color: #F8FAFC; border: 2px dashed {brand_blue}; border-radius: 12px;">'
-        f'<div class="otp-label" style="font-size: 10px; font-weight: 600; color: {brand_blue}; letter-spacing: 1.5px; text-transform: uppercase; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; margin-bottom: 12px;"></div>'
-        f'<span class="otp-font otp-digits" style="font-size: 30px; font-weight: 700; color: #0F172A; letter-spacing: 12px; font-family: \'Courier New\', Courier, monospace; display: inline-block; padding-left: 12px;">{spaced}</span>'
+        '<td align="center" class="otp-box dm-otp-box" style="'
+        f"padding:20px 16px;background-color:#FFFFFF;border:2px solid {brand_blue};"
+        'border-radius:10px;text-align:center;">'
+        '<p style="margin:0 0 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;'
+        f'font-weight:700;color:{brand_blue};letter-spacing:1px;text-transform:uppercase;line-height:1.4;">'
+        "Your verification code"
+        "</p>"
+        f'<span class="otp-digits dm-otp-digits" style="display:inline-block;margin:0 auto;'
+        "font-family:'Courier New',Courier,monospace;font-size:34px;font-weight:700;"
+        f'color:#0F172A;letter-spacing:10px;line-height:1.2;text-align:center;">{spaced}</span>'
         "</td>"
         "</tr>"
         "</table>"
+    )
+
+
+def _render_otp_email_layout(title: str, body_html: str, hero_text: str | None = None) -> str:
+    return _render_template(
+        "layouts/otp_email.html",
+        {
+            "title": title,
+            "hero_text": hero_text or _VERIFICATION_HERO_TEXT,
+            "body_html": body_html,
+            "logo_url": _resolve_logo_url(),
+        },
+        raw_keys={"body_html", "logo_url"},
     )
 
 
@@ -482,7 +501,7 @@ def build_otp_email_html(otp: str, otp_purpose: str = "email_verification") -> s
         },
         raw_keys={"otp_display"},
     )
-    return _render_email_layout(title, body_html, hero_text=hero_text)
+    return _render_otp_email_layout(title, body_html, hero_text=hero_text)
 
 
 def _notification_template_name(notification_type: str) -> str:
