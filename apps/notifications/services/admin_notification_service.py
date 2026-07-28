@@ -22,6 +22,7 @@ from apps.notifications.repositories.campaign_audience_repository import (
     create_campaign_audience,
     get_active_fcm_tokens_for_users,
     resolve_announcement_recipients,
+    resolve_topic_recipients,
 )
 from apps.notifications.repositories.notification_repository import (
     create_broadcast_notification,
@@ -573,6 +574,25 @@ async def _dispatch_topic(
         sorted(firebase_topics),
     )
 
+    recipient_user_ids = list(
+        dict.fromkeys(await resolve_topic_recipients(db, targets=targets))
+    )
+    logger.info(
+        "Topic campaign recipients resolved campaign_id=%s recipient_count=%s",
+        campaign.id,
+        len(recipient_user_ids),
+    )
+    await create_campaign_audience(
+        db,
+        campaign_id=campaign.id,
+        user_ids=recipient_user_ids,
+    )
+    logger.info(
+        "Audience audit written campaign_id=%s audience_count=%s",
+        campaign.id,
+        len(recipient_user_ids),
+    )
+
     await create_broadcast_notification(
         db,
         owner_user_id=campaign.created_by_admin_id,
@@ -592,7 +612,6 @@ async def _dispatch_topic(
     )
     logger.info("Broadcast notification created campaign_id=%s", campaign.id)
 
-    # TOPIC campaigns do not resolve users — Firebase topic fan-out delivers.
     push_result = _send_topic_push(campaign, firebase_topics)
     logger.info(
         "Topic push sent campaign_id=%s successful_count=%s failed_count=%s",

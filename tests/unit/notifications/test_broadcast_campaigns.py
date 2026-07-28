@@ -325,7 +325,7 @@ async def test_dispatch_announcement_creates_single_broadcast(mock_db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_topic_uses_firebase_topics_not_user_resolution(mock_db) -> None:
+async def test_dispatch_topic_uses_firebase_topics_not_token_push(mock_db) -> None:
     db = mock_db()
     campaign = _campaign(
         campaign_type=NotificationCampaignType.topic,
@@ -337,6 +337,7 @@ async def test_dispatch_topic_uses_firebase_topics_not_user_resolution(mock_db) 
         },
     )
     firebase_topics = {"major_computer_science", "interest_ai"}
+    recipient_ids = [uuid4(), uuid4()]
 
     with (
         patch.object(admin_svc, "_get_campaign", AsyncMock(return_value=campaign)),
@@ -345,6 +346,11 @@ async def test_dispatch_topic_uses_firebase_topics_not_user_resolution(mock_db) 
             "resolve_firebase_topics_from_targets",
             AsyncMock(return_value=firebase_topics),
         ) as resolve_topics,
+        patch.object(
+            admin_svc,
+            "resolve_topic_recipients",
+            AsyncMock(return_value=recipient_ids),
+        ) as resolve_recipients,
         patch.object(
             admin_svc,
             "create_broadcast_notification",
@@ -367,6 +373,10 @@ async def test_dispatch_topic_uses_firebase_topics_not_user_resolution(mock_db) 
         ) as audience,
         patch.object(
             admin_svc,
+            "send_push_notifications",
+        ) as token_push,
+        patch.object(
+            admin_svc,
             "_update_campaign_status",
             AsyncMock(return_value=campaign),
         ),
@@ -374,12 +384,18 @@ async def test_dispatch_topic_uses_firebase_topics_not_user_resolution(mock_db) 
         await admin_svc.dispatch_campaign(db, campaign.id)
 
     resolve_topics.assert_awaited_once()
+    resolve_recipients.assert_awaited_once()
+    audience.assert_awaited_once_with(
+        db,
+        campaign_id=campaign.id,
+        user_ids=recipient_ids,
+    )
     broadcast.assert_awaited_once()
     stored_topics = broadcast.await_args.kwargs["deep_link_payload"]["firebase_topics"]
     assert set(stored_topics) == firebase_topics
     topic_push.assert_called_once()
     resolve_users.assert_not_awaited()
-    audience.assert_not_awaited()
+    token_push.assert_not_called()
 
 
 @pytest.mark.asyncio
