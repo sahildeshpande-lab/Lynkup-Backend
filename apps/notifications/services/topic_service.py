@@ -327,6 +327,10 @@ class TopicService:
         }
 
         if not topics_to_subscribe and not topics_to_unsubscribe:
+            print(
+                f"[FCM TOPIC SYNC SKIP] no changes user_id={user_id} "
+                f"new_topics={sorted(new_topics)}"
+            )
             logger.info(
                 "Firebase topic sync skipped (no changes) user_id=%s",
                 user_id,
@@ -344,11 +348,18 @@ class TopicService:
 
         result["token_count"] = len(tokens)
         if not tokens:
+            print(f"[FCM TOPIC SYNC SKIP] no active FCM tokens user_id={user_id}")
             logger.info(
                 "Firebase topic sync skipped (no active FCM tokens) user_id=%s",
                 user_id,
             )
             return result
+
+        print(
+            f"[FCM TOPIC SYNC] user_id={user_id} token_count={len(tokens)} "
+            f"subscribe={sorted(topics_to_subscribe)} "
+            f"unsubscribe={sorted(topics_to_unsubscribe)}"
+        )
 
         if topics_to_subscribe:
             result["subscribe"] = TopicService.subscribe(tokens, topics_to_subscribe)
@@ -381,6 +392,10 @@ class TopicService:
         failed = 0
 
         if not cleaned_tokens or not cleaned_topics:
+            print(
+                f"[FCM TOPIC {operation.upper()} SKIP] "
+                f"tokens={len(cleaned_tokens)} topics={cleaned_topics}"
+            )
             return {
                 "successful_count": 0,
                 "failed_count": 0,
@@ -403,9 +418,18 @@ class TopicService:
 
         for topic in cleaned_topics:
             try:
+                print(
+                    f"[FCM TOPIC {operation.upper()}] topic={topic} "
+                    f"token_count={len(cleaned_tokens)} "
+                    f"sample_tokens={cleaned_tokens[:2]}"
+                )
                 response = api(cleaned_tokens, topic)
                 failure_count = int(getattr(response, "failure_count", 0) or 0)
                 success_count = int(getattr(response, "success_count", 0) or 0)
+                print(
+                    f"[FCM TOPIC {operation.upper()} RESULT] topic={topic} "
+                    f"success_count={success_count} failure_count={failure_count}"
+                )
                 if failure_count:
                     failed += 1
                     logger.warning(
@@ -423,8 +447,12 @@ class TopicService:
                         topic,
                         len(cleaned_tokens),
                     )
-            except Exception:
+            except Exception as exc:
                 failed += 1
+                print(
+                    f"[FCM TOPIC {operation.upper()} ERROR] topic={topic} "
+                    f"token_count={len(cleaned_tokens)} error={exc}"
+                )
                 logger.exception(
                     "Firebase topic %s failed topic=%s token_count=%s",
                     operation,

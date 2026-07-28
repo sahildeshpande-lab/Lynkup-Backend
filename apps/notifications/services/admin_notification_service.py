@@ -567,6 +567,10 @@ async def _dispatch_topic(
 ) -> None:
     targets = _parse_stored_targets(campaign.deep_link_payload)
     firebase_topics = await resolve_firebase_topics_from_targets(db, targets)
+    print(
+        f"[TOPIC CAMPAIGN] campaign_id={campaign.id} "
+        f"firebase_topics={sorted(firebase_topics)}"
+    )
     logger.info(
         "Topic campaign firebase topics resolved campaign_id=%s topics=%s",
         campaign.id,
@@ -594,6 +598,7 @@ async def _dispatch_topic(
 
     # TOPIC campaigns do not resolve users — Firebase topic fan-out delivers.
     push_result = _send_topic_push(campaign, firebase_topics)
+    print(f"[TOPIC CAMPAIGN PUSH RESULT] campaign_id={campaign.id} result={push_result}")
     logger.info(
         "Topic push sent campaign_id=%s successful_count=%s failed_count=%s",
         campaign.id,
