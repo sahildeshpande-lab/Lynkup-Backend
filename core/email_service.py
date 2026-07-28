@@ -12,6 +12,8 @@ from uuid import UUID
 from core.email.config import _PLACEHOLDER_FROM_EMAIL, settings as email_settings
 
 logger = logging.getLogger(__name__)
+# TEMP: silence email_service console noise; remove when debugging email flows again.
+logger.disabled = True
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "templates"
 BRAND_COLORS = {

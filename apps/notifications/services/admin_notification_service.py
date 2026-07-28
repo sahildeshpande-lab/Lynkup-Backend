@@ -600,7 +600,7 @@ async def _dispatch_topic(
             campaign.id,
         )
 
-    await create_broadcast_notification(
+    notification = await create_broadcast_notification(
         db,
         owner_user_id=campaign.created_by_admin_id,
         notification_type_id=campaign.notification_type_id,
@@ -617,9 +617,23 @@ async def _dispatch_topic(
             ),
         },
     )
+    data_payload = NotificationPayloadBuilder.build(
+        notification_type=NotificationCampaignType.topic.value,
+        notification_id=notification.id,
+        extra=notification.deep_link_payload,
+    )
+    notification.deep_link_payload = data_payload
+    db.add(notification)
+    await db.flush()
     logger.info("Broadcast notification created campaign_id=%s", campaign.id)
 
-    push_result = _send_topic_push(campaign, firebase_topics)
+    # Send one push per user (deduped FCM tokens). Topic fan-out would deliver
+    # multiple notifications when a user matches university + major + minor, etc.
+    if recipient_user_ids:
+        fcm_tokens = await get_active_fcm_tokens_for_users(db, recipient_user_ids)
+        push_result = _send_token_push(campaign, fcm_tokens, data=data_payload)
+    else:
+        push_result = _send_topic_push(campaign, firebase_topics)
     logger.info(
         "Topic push sent campaign_id=%s successful_count=%s failed_count=%s",
         campaign.id,

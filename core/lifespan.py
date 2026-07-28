@@ -28,6 +28,12 @@ async def lifespan(app: FastAPI):
     # Load email settings from .env early so SendGrid config is available.
     from core.email.config import settings as email_settings
 
+    # Recommendation keyword extraction (spaCy + KeyBERT preload) — disabled for now.
+    # from apps.recommendation.services import algorithm as recommendation_algorithm
+    # logger.info(
+    #     "Recommendation models loaded: spacy=%s",
+    #     recommendation_algorithm.nlp.meta.get("name"),
+    # )
 
     # if email_settings.is_sendgrid_configured:
     #     logger.info("SendGrid email delivery is configured.")

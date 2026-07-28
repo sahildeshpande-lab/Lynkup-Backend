@@ -325,7 +325,7 @@ async def test_dispatch_announcement_creates_single_broadcast(mock_db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_topic_uses_firebase_topics_not_token_push(mock_db) -> None:
+async def test_dispatch_topic_sends_one_deduped_token_push_per_recipient(mock_db) -> None:
     db = mock_db()
     campaign = _campaign(
         campaign_type=NotificationCampaignType.topic,
@@ -338,6 +338,7 @@ async def test_dispatch_topic_uses_firebase_topics_not_token_push(mock_db) -> No
     )
     firebase_topics = {"major_computer_science", "interest_ai"}
     recipient_ids = [uuid4(), uuid4()]
+    notification_id = uuid4()
 
     with (
         patch.object(admin_svc, "_get_campaign", AsyncMock(return_value=campaign)),
@@ -354,13 +355,28 @@ async def test_dispatch_topic_uses_firebase_topics_not_token_push(mock_db) -> No
         patch.object(
             admin_svc,
             "create_broadcast_notification",
-            AsyncMock(return_value=SimpleNamespace(id=uuid4())),
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=notification_id,
+                    deep_link_payload={
+                        "broadcast": True,
+                        "campaign_type": "TOPIC",
+                        "campaign_id": str(campaign.id),
+                        "firebase_topics": sorted(firebase_topics),
+                    },
+                )
+            ),
         ) as broadcast,
         patch.object(
             admin_svc,
-            "send_push_to_topics",
-            return_value={"successful_count": 2, "failed_count": 0, "failed_topics": []},
-        ) as topic_push,
+            "get_active_fcm_tokens_for_users",
+            AsyncMock(return_value=["t1", "t2"]),
+        ) as load_tokens,
+        patch.object(
+            admin_svc,
+            "send_push_notifications",
+            return_value={"successful_count": 2, "failed_count": 0},
+        ) as token_push,
         patch.object(
             admin_svc,
             "resolve_announcement_recipients",
@@ -373,8 +389,8 @@ async def test_dispatch_topic_uses_firebase_topics_not_token_push(mock_db) -> No
         ) as audience,
         patch.object(
             admin_svc,
-            "send_push_notifications",
-        ) as token_push,
+            "send_push_to_topics",
+        ) as topic_push,
         patch.object(
             admin_svc,
             "_update_campaign_status",
@@ -393,9 +409,10 @@ async def test_dispatch_topic_uses_firebase_topics_not_token_push(mock_db) -> No
     broadcast.assert_awaited_once()
     stored_topics = broadcast.await_args.kwargs["deep_link_payload"]["firebase_topics"]
     assert set(stored_topics) == firebase_topics
-    topic_push.assert_called_once()
+    load_tokens.assert_awaited_once_with(db, recipient_ids)
+    token_push.assert_called_once()
     resolve_users.assert_not_awaited()
-    token_push.assert_not_called()
+    topic_push.assert_not_called()
 
 
 @pytest.mark.asyncio
