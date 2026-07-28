@@ -212,19 +212,16 @@ def send_push_to_topic(
         topic=topic_name,
         notification=messaging.Notification(title=title, body=body),
         data=_stringify_fcm_data(data),
-        android=messaging.AndroidConfig(priority="high",notification=messaging.AndroidNotification(channel_id="kampulynk_alerts_v3",sound="default",),
-                                        ),
-        apns=messaging.APNSConfig(payload=messaging.APNSPayload(aps=messaging.APNSPayload(aps=messaging.Aps(sound="default"))))
+        android=messaging.AndroidConfig(priority="high",notification=messaging.AndroidNotification(channel_id="kampulynk_alerts_v3",sound="default",
+                                        ),),
+        apns=messaging.APNSConfig(payload=messaging.APNSPayload(aps=messaging.Aps(sound="default")))
     )
 
     try:
-        print(f"[FCM TOPIC SEND] topic={topic_name} title={title!r} body={body!r}")
         message_id = messaging.send(message)
-        print(f"[FCM TOPIC SEND OK] topic={topic_name} message_id={message_id}")
         logger.info("FCM topic message sent successfully: topic=%s id=%s", topic_name, message_id)
         return message_id
-    except Exception as exc:
-        print(f"[FCM TOPIC SEND ERROR] topic={topic_name} error={exc}")
+    except Exception:
         logger.exception("FCM topic push failed: topic=%s", topic_name)
         raise
 
