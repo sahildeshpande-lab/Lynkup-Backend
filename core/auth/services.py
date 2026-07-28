@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -61,10 +62,22 @@ def delete_firebase_user(uid: str):
 
 
 def _stringify_fcm_data(data: dict[str, Any] | None) -> dict[str, str] | None:
-    """FCM data payloads require string keys and values."""
+    """FCM data payloads require string keys and values.
+
+    Nested dict/list values (e.g. deep_link) are JSON-serialized.
+    """
     if data is None:
         return None
-    return {str(key): "" if value is None else str(value) for key, value in data.items()}
+
+    result: dict[str, str] = {}
+    for key, value in data.items():
+        if value is None:
+            result[str(key)] = ""
+        elif isinstance(value, (dict, list)):
+            result[str(key)] = json.dumps(value, separators=(",", ":"), default=str)
+        else:
+            result[str(key)] = str(value)
+    return result
 
 
 def _is_invalid_fcm_token_error(exc: BaseException) -> bool:
@@ -107,6 +120,14 @@ def send_push_notification(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=_stringify_fcm_data(data),
+        android=messaging.AndroidConfig
+        (
+            priority="high",
+            notification=messaging.AndroidNotification
+                (channel_id="kampulynk_alerts_v3",sound="default",
+                ),
+            ),
+        apns=messaging.APNSConfig(payload=messaging.APNSPayload(aps=messaging.Aps(sound="default")))
     )
 
     try:
@@ -191,6 +212,9 @@ def send_push_to_topic(
         topic=topic_name,
         notification=messaging.Notification(title=title, body=body),
         data=_stringify_fcm_data(data),
+        android=messaging.AndroidConfig(priority="high",notification=messaging.AndroidNotification(channel_id="kampulynk_alerts_v3",sound="default",),
+                                        ),
+        apns=messaging.APNSConfig(payload=messaging.APNSPayload(aps=messaging.APNSPayload(aps=messaging.Aps(sound="default"))))
     )
 
     try:

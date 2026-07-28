@@ -115,8 +115,8 @@ async def send_connection_request(db: AsyncSession, sender_id: UUID, receiver_id
             db,
             recipient_user_id=receiver_id,
             notification_type="CONNECTION_REQUEST",
-            title="New Connection Request",
-            body=f"{sender_name} wants to connect with you.",
+            title="Connection Request",
+            body=f"{sender_name} sent you a connection request.",
             sender_user_id=sender_id,
         )
     except Exception:

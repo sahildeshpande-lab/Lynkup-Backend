@@ -5,6 +5,7 @@ from .admin_notification_service import (
     list_campaigns,
     update_campaign,
 )
+from .notification_payload_builder import NotificationPayloadBuilder
 from .notification_service import (
     create_notification,
     get_preferences,
@@ -16,6 +17,7 @@ from .notification_service import (
 from .topic_service import TopicService
 
 __all__ = [
+    "NotificationPayloadBuilder",
     "TopicService",
     "create_campaign",
     "create_notification",

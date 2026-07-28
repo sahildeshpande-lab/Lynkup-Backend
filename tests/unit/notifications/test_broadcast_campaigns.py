@@ -284,7 +284,16 @@ async def test_dispatch_announcement_creates_single_broadcast(mock_db) -> None:
         patch.object(
             admin_svc,
             "create_broadcast_notification",
-            AsyncMock(return_value=SimpleNamespace(id=uuid4())),
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=uuid4(),
+                    deep_link_payload={
+                        "broadcast": True,
+                        "campaign_type": "ANNOUNCEMENT",
+                        "campaign_id": str(campaign.id),
+                    },
+                )
+            ),
         ) as broadcast,
         patch.object(
             admin_svc,
@@ -309,6 +318,10 @@ async def test_dispatch_announcement_creates_single_broadcast(mock_db) -> None:
     assert broadcast.await_args.kwargs["campaign_id"] == campaign.id
     assert broadcast.await_args.kwargs["owner_user_id"] == campaign.created_by_admin_id
     push.assert_called_once()
+    fcm_data = push.call_args.args[3]
+    assert fcm_data["notification_type"] == "ANNOUNCEMENT"
+    assert "deep_link" in fcm_data
+    assert '"screen":"notifications"' in fcm_data["deep_link"]
 
 
 @pytest.mark.asyncio

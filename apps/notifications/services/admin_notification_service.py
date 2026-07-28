@@ -42,6 +42,9 @@ from apps.notifications.schemas import (
     UpdateCampaignResponse,
 )
 from apps.notifications.services.topic_service import resolve_firebase_topics_from_targets
+from apps.notifications.services.notification_payload_builder import (
+    NotificationPayloadBuilder,
+)
 from common.enums import (
     NotificationCampaignStatus,
     NotificationCampaignType,
@@ -525,7 +528,7 @@ async def _dispatch_announcement(
         len(recipient_user_ids),
     )
 
-    await create_broadcast_notification(
+    notification = await create_broadcast_notification(
         db,
         owner_user_id=campaign.created_by_admin_id,
         notification_type_id=campaign.notification_type_id,
@@ -538,10 +541,18 @@ async def _dispatch_announcement(
             "campaign_id": str(campaign.id),
         },
     )
+    data_payload = NotificationPayloadBuilder.build(
+        notification_type=NotificationCampaignType.announcement.value,
+        notification_id=notification.id,
+        extra=notification.deep_link_payload,
+    )
+    notification.deep_link_payload = data_payload
+    db.add(notification)
+    await db.flush()
     logger.info("Broadcast notification created campaign_id=%s", campaign.id)
 
     fcm_tokens = await get_active_fcm_tokens_for_users(db, recipient_user_ids)
-    push_result = _send_token_push(campaign, fcm_tokens)
+    push_result = _send_token_push(campaign, fcm_tokens, data=data_payload)
     logger.info(
         "Announcement push sent campaign_id=%s successful_count=%s failed_count=%s",
         campaign.id,
@@ -594,11 +605,13 @@ async def _dispatch_topic(
 def _send_token_push(
     campaign: NotificationCampaign,
     fcm_tokens: list[str],
+    *,
+    data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not fcm_tokens:
         return {"successful_count": 0, "failed_count": 0, "failed_tokens": []}
 
-    data = {
+    payload = data or {
         "notification_type": (
             campaign.campaign_type.value
             if hasattr(campaign.campaign_type, "value")
@@ -610,7 +623,7 @@ def _send_token_push(
         fcm_tokens,
         campaign.title,
         campaign.message,
-        data,
+        NotificationPayloadBuilder.for_fcm(payload),
     )
 
 

@@ -35,6 +35,9 @@ from apps.notifications.schemas import (
     UpdateNotificationPreferencesRequest,
 )
 from apps.notifications.services.topic_service import TopicService
+from apps.notifications.services.notification_payload_builder import (
+    NotificationPayloadBuilder,
+)
 from common.pagination import build_paginated_response
 from common.responses import error_response, success_response
 from core.auth.services import send_push_notifications
@@ -405,7 +408,6 @@ async def create_notification(
     Respects the recipient's notification preferences. Never raises for push
     delivery failures — callers (e.g. connections) should still succeed.
     """
-    _ = sender_user_id
     type_name = notification_type.strip().upper()
     notification_type_row = await get_notification_type_by_name(db, type_name)
     if notification_type_row is None:
@@ -420,6 +422,12 @@ async def create_notification(
     category_enabled = await _is_category_enabled(db, preference, type_name)
 
     notification: Notification | None = None
+    data_payload: dict[str, Any] = NotificationPayloadBuilder.build(
+        notification_type=type_name,
+        notification_id=None,
+        sender_user_id=sender_user_id,
+    )
+
     if preference.in_app_enabled and category_enabled:
         notification = await persist_notification(
             db,
@@ -430,16 +438,25 @@ async def create_notification(
             deep_link_payload=None,
             campaign_id=campaign_id,
         )
+        data_payload = NotificationPayloadBuilder.build(
+            notification_type=type_name,
+            notification_id=notification.id,
+            sender_user_id=sender_user_id,
+        )
+        notification.deep_link_payload = data_payload
+        db.add(notification)
+        await db.flush()
 
     if preference.push_enabled and category_enabled:
         try:
             tokens = await get_active_fcm_tokens_for_users(db, [recipient_user_id])
             if tokens:
-                data = {
-                    "notification_type": type_name,
-                    "notification_id": str(notification.id) if notification else "",
-                }
-                result = send_push_notifications(tokens, title, body, data)
+                result = send_push_notifications(
+                    tokens,
+                    title,
+                    body,
+                    NotificationPayloadBuilder.for_fcm(data_payload),
+                )
                 logger.info(
                     "Push sent type=%s recipient_user_id=%s successful=%s failed=%s",
                     type_name,
