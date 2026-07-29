@@ -465,11 +465,11 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
     return (
         '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 8px 0 4px; border-collapse:collapse;">'
         "<tr>"
-        f'<td class="otp-card" width="100%" style="padding:24px 24px; background-color: #F8FAFC; border: 2px dashed {brand_blue}; border-radius: 12px; width: 100%; text-align:center;">'
+        f'<td class="otp-card" width="100%" style="padding:24px; background-color: #F8FAFC; border: 2px dashed {brand_blue}; border-radius: 12px; text-align:center;">'
         f'<p class="otp-label" style="font-size: 10px; font-weight: 600; color: {brand_blue}; letter-spacing: 2px; text-transform: uppercase; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; margin: 0 0 16px; text-align:center;">'
         "ONE-TIME PASSWORD"
         "</p>"
-        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" align="center" style="border-collapse:collapse; white-space:nowrap;">'
+        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin:0 auto; border-collapse:collapse;">'
         "<tr>"
         f"{digit_cells}"
         "</tr>"
