@@ -65,8 +65,8 @@ def test_build_search_query_prioritizes_and_deduplicates_terms() -> None:
     query = build_search_query(extracted_keywords)
 
     assert query == (
-        "Artificial Intelligence Data Science Deep Learning Rag Llm Machinelearning Ai Nlp "
-        "Semantic Search Vector Database"
+        "Artificial Intelligence Data Science Deep Learning Rag Llm "
+        "Semantic Search Vector Database Machinelearning Ai Nlp"
     )
 
 
@@ -102,22 +102,24 @@ async def test_search_papers_returns_raw_response() -> None:
         "apps.recommendation.services.semantic_scholar_service.httpx.AsyncClient.get",
         new=AsyncMock(return_value=mock_response),
     ) as mock_get:
-        result = await search_papers("Machine Learning")
+        result, status_code = await search_papers("Machine Learning")
 
     assert result == raw_payload
+    assert status_code == 200
     mock_get.assert_awaited_once()
     call_kwargs = mock_get.await_args.kwargs
     assert call_kwargs["params"]["query"] == "Machine Learning"
-    assert call_kwargs["params"]["limit"] == 20
+    assert call_kwargs["params"]["limit"] == 10
     assert call_kwargs["params"]["year"] == "2023-"
     assert "paperId" in call_kwargs["params"]["fields"]
 
 
 @pytest.mark.asyncio
 async def test_search_papers_empty_query_returns_empty_data() -> None:
-    result = await search_papers("   ")
+    result, status_code = await search_papers("   ")
 
     assert result == {"data": [], "total": 0}
+    assert status_code is None
 
 
 @pytest.mark.asyncio
@@ -135,9 +137,10 @@ async def test_search_papers_api_error_returns_empty_data() -> None:
         "apps.recommendation.services.semantic_scholar_service.httpx.AsyncClient.get",
         new=AsyncMock(return_value=mock_response),
     ):
-        result = await search_papers("covid")
+        result, status_code = await search_papers("covid")
 
     assert result == {"data": [], "total": 0}
+    assert status_code == 429
 
 
 @pytest.mark.asyncio
@@ -146,6 +149,7 @@ async def test_search_papers_request_error_returns_empty_data() -> None:
         "apps.recommendation.services.semantic_scholar_service.httpx.AsyncClient.get",
         new=AsyncMock(side_effect=httpx.RequestError("connection failed")),
     ):
-        result = await search_papers("covid")
+        result, status_code = await search_papers("covid")
 
     assert result == {"data": [], "total": 0}
+    assert status_code is None

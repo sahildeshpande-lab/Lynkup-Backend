@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -7,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from apps.accounts.db_models import User
 from apps.recommendation import routes as recommendation_routes
+from core.database.session import get_session
 from core.security.auth import get_current_user
 from entrypoints.api import app
 
@@ -25,14 +28,40 @@ async def _override_user():
     return user
 
 
+async def _override_session_with_keywords():
+    profile = SimpleNamespace(
+        user_id=USER_ID,
+        extracted_keywords={
+            "major": ["Artificial Intelligence"],
+            "minor": ["Data Science"],
+            "interests": ["Deep Learning"],
+            "engagement_keywords": {"rag": 4},
+            "content_keywords": {"semantic search": 5},
+            "hashtags": {"machinelearning": 3},
+        },
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(
+        return_value=SimpleNamespace(scalar_one_or_none=lambda: profile)
+    )
+    yield db
+
+
+async def _override_session_without_keywords():
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: None))
+    yield db
+
+
 @pytest.fixture(autouse=True)
 def _setup_overrides():
     app.dependency_overrides[get_current_user] = _override_user
     yield
     app.dependency_overrides.pop(get_current_user, None)
+    app.dependency_overrides.pop(get_session, None)
 
 
-def test_search_profile_papers_returns_raw_semantic_scholar_response(monkeypatch) -> None:
+def test_search_recommendation_papers_returns_raw_semantic_scholar_response(monkeypatch) -> None:
     raw_response = {
         "total": 1,
         "token": "next-token",
@@ -46,14 +75,15 @@ def test_search_profile_papers_returns_raw_semantic_scholar_response(monkeypatch
     }
 
     async def _mock_search_papers(query: str, **kwargs):
-        assert query == "machine learning fraud detection"
-        return raw_response
+        assert "Artificial Intelligence" in query
+        assert "Semantic Search" in query
+        return raw_response, 200
 
     monkeypatch.setattr(recommendation_routes, "search_papers", _mock_search_papers)
+    app.dependency_overrides[get_session] = _override_session_with_keywords
 
     response = client.get(
         "/api/v1/recommendations/papers",
-        params={"query": "machine learning fraud detection"},
         headers={"Authorization": "Bearer test-token"},
     )
 
@@ -64,15 +94,15 @@ def test_search_profile_papers_returns_raw_semantic_scholar_response(monkeypatch
     assert body["data"] == raw_response
 
 
-def test_search_profile_papers_returns_empty_message_when_no_papers(monkeypatch) -> None:
+def test_search_recommendation_papers_returns_empty_message_when_no_papers(monkeypatch) -> None:
     async def _mock_search_papers(query: str, **kwargs):
-        return {"data": [], "total": 0}
+        return {"data": [], "total": 0}, 200
 
     monkeypatch.setattr(recommendation_routes, "search_papers", _mock_search_papers)
+    app.dependency_overrides[get_session] = _override_session_with_keywords
 
     response = client.get(
         "/api/v1/recommendations/papers",
-        params={"query": "covid"},
         headers={"Authorization": "Bearer test-token"},
     )
 
@@ -83,7 +113,9 @@ def test_search_profile_papers_returns_empty_message_when_no_papers(monkeypatch)
     assert body["data"] == {"data": [], "total": 0}
 
 
-def test_search_profile_papers_requires_query_parameter() -> None:
+def test_search_recommendation_papers_without_profile_keywords() -> None:
+    app.dependency_overrides[get_session] = _override_session_without_keywords
+
     response = client.get(
         "/api/v1/recommendations/papers",
         headers={"Authorization": "Bearer test-token"},
@@ -92,14 +124,13 @@ def test_search_profile_papers_requires_query_parameter() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] is False
+    assert body["message"] == "No profile keywords available for recommendations"
+    assert body["data"] == {"data": [], "total": 0}
 
 
-def test_search_profile_papers_requires_authentication() -> None:
+def test_search_recommendation_papers_requires_authentication() -> None:
     app.dependency_overrides.pop(get_current_user, None)
 
-    response = client.get(
-        "/api/v1/recommendations/papers",
-        params={"query": "machine learning"},
-    )
+    response = client.get("/api/v1/recommendations/papers")
 
     assert response.status_code == 401

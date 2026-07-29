@@ -31,13 +31,29 @@ def test_initialize_models_is_idempotent(monkeypatch) -> None:
 
     fake_spacy = type("FakeSpacy", (), {"load": staticmethod(fake_load)})()
 
+    class FakeSentenceTransformer:
+        init_count = 0
+
+        def __init__(self, _model_name: str) -> None:
+            FakeSentenceTransformer.init_count += 1
+
     class FakeKeyBERT:
         init_count = 0
 
-        def __init__(self, **kwargs) -> None:
+        def __init__(self, *, model=None, **kwargs) -> None:
             FakeKeyBERT.init_count += 1
+            self.model = model
 
     monkeypatch.setitem(__import__("sys").modules, "spacy", fake_spacy)
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "sentence_transformers",
+        type(
+            "FakeSentenceTransformersModule",
+            (),
+            {"SentenceTransformer": FakeSentenceTransformer},
+        )(),
+    )
     monkeypatch.setitem(
         __import__("sys").modules,
         "keybert",
@@ -48,6 +64,7 @@ def test_initialize_models_is_idempotent(monkeypatch) -> None:
     algorithm.initialize_models()
 
     assert load_calls["count"] == 1
+    assert FakeSentenceTransformer.init_count == 1
     assert FakeKeyBERT.init_count == 1
     assert algorithm.nlp is fake_nlp
     assert algorithm.kw_model is not None

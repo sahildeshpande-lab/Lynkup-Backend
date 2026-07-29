@@ -3,6 +3,8 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import asyncio
 import logging
+import time
+from datetime import datetime, timezone
 from fastapi import FastAPI
 
 from core.database.config import settings as db_settings
@@ -10,9 +12,14 @@ from core.database.init import init_db
 from core.database.migrations import run_db_migrations_programmatically
 
 
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger = logging.getLogger(__name__)
+    startup_started = time.perf_counter()
 
     if db_settings.auto_init_db:
         await init_db()
@@ -28,18 +35,47 @@ async def lifespan(app: FastAPI):
     # Load email settings from .env early so SendGrid config is available.
     from core.email.config import settings as email_settings
 
-    logger.info("Importing recommendation algorithm module...")
+    logger.info("[%s] Importing recommendation algorithm module...", _timestamp())
     from apps.recommendation.services import algorithm as recommendation_algorithm
 
-    logger.info("Recommendation algorithm module imported successfully.")
+    logger.info("[%s] Recommendation algorithm module imported successfully.", _timestamp())
 
+    def _initialize_recommendation_models_in_thread() -> None:
+        thread_logger = logging.getLogger(__name__)
+        thread_logger.info(
+            "[%s] Recommendation model initialization worker thread started.",
+            _timestamp(),
+        )
+        recommendation_algorithm.initialize_models()
+        thread_logger.info(
+            "[%s] Recommendation model initialization worker thread finished.",
+            _timestamp(),
+        )
+
+    model_init_started = time.perf_counter()
     try:
-        logger.info("Loading recommendation models...")
-        await asyncio.to_thread(recommendation_algorithm.initialize_models)
-        logger.info("Recommendation models loaded successfully.")
+        logger.info("[%s] Submitting recommendation model initialization to worker thread...", _timestamp())
+        await asyncio.to_thread(_initialize_recommendation_models_in_thread)
+        logger.info(
+            "[%s] Recommendation model worker thread completed (%.2f sec).",
+            _timestamp(),
+            time.perf_counter() - model_init_started,
+        )
+        logger.info("[%s] Recommendation models loaded successfully.", _timestamp())
     except Exception:
-        logger.exception("Recommendation model initialization failed during application startup.")
+        logger.exception(
+            "[%s] Recommendation model initialization failed during application startup "
+            "after %.2f sec.",
+            _timestamp(),
+            time.perf_counter() - model_init_started,
+        )
         raise
+
+    logger.info(
+        "[%s] Recommendation startup phase completed (Total: %.2f sec).",
+        _timestamp(),
+        time.perf_counter() - startup_started,
+    )
 
     if email_settings.is_sendgrid_configured:
         logger.info("SendGrid email delivery is configured.")
@@ -52,7 +88,11 @@ async def lifespan(app: FastAPI):
     from core.email_service import cron_send_emails
     email_cron_task = asyncio.create_task(cron_send_emails())
 
-    logger.info("Application Started Successfully")
+    logger.info(
+        "[%s] Application Started Successfully (Total startup: %.2f sec).",
+        _timestamp(),
+        time.perf_counter() - startup_started,
+    )
     yield
 
     # Cancel the task on shutdown

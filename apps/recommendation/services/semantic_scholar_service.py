@@ -14,7 +14,7 @@ PAPER_SEARCH_BULK_PATH = "/paper/search/bulk"
 PAPER_SEARCH_FIELDS = (
     "paperId,title,url,authors,venue,publicationTypes,publicationDate,citationCount,openAccessPdf"
 )
-DEFAULT_SEARCH_LIMIT = 20
+DEFAULT_SEARCH_LIMIT = 10
 DEFAULT_YEAR_FILTER = "2023-"
 REQUEST_TIMEOUT_SECONDS = 30.0
 
@@ -65,9 +65,13 @@ def build_search_query(extracted_keywords: dict[str, Any] | None) -> str:
     """
     Build a single Semantic Scholar search query from profile keyword data.
 
-    Terms are collected in priority order: major, minor, interests, then the
-    top-scoring engagement keywords, hashtags, and content keywords. Duplicates
-    are removed case-insensitively.
+    Priority order:
+    major, minor, interests, engagement keywords (by score), content keywords
+    (by score), hashtags (lowest priority). Duplicate topics are merged
+    case-insensitively.
+
+    TODO: Limit to only the highest-ranked topics instead of including all
+    available keyword groups in one query.
     """
     if not extracted_keywords:
         return ""
@@ -90,11 +94,11 @@ def build_search_query(extracted_keywords: dict[str, Any] | None) -> str:
     engagement_keywords = coerce_keyword_scores(extracted_keywords.get("engagement_keywords"))
     add_terms(get_top_keywords(engagement_keywords, top_n=3))
 
-    hashtags = coerce_keyword_scores(extracted_keywords.get("hashtags"))
-    add_terms(get_top_keywords(hashtags, top_n=3))
-
     content_keywords = coerce_keyword_scores(extracted_keywords.get("content_keywords"))
     add_terms(get_top_keywords(content_keywords, top_n=3))
+
+    hashtags = coerce_keyword_scores(extracted_keywords.get("hashtags"))
+    add_terms(get_top_keywords(hashtags, top_n=3))
 
     return " ".join(terms)
 
@@ -119,16 +123,17 @@ async def search_papers(
     *,
     limit: int = DEFAULT_SEARCH_LIMIT,
     year: str = DEFAULT_YEAR_FILTER,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int | None]:
     """
     Search Semantic Scholar papers using the bulk search endpoint.
 
-    Returns the raw JSON response on success. On empty query, API failure, or
-    invalid JSON, returns ``{"data": [], "total": 0}`` after logging.
+    Returns the raw JSON payload and upstream HTTP status code. On empty query,
+    network failure, timeout, API error, or invalid JSON, returns an empty
+    payload with ``{"data": [], "total": 0}`` after logging.
     """
     normalized_query = query.strip()
     if not normalized_query:
-        return dict(_EMPTY_RESPONSE)
+        return dict(_EMPTY_RESPONSE), None
 
     params = {
         "query": normalized_query,
@@ -148,7 +153,7 @@ async def search_papers(
             normalized_query,
             _api_key_is_configured(),
         )
-        return dict(_EMPTY_RESPONSE)
+        return dict(_EMPTY_RESPONSE), None
     except httpx.RequestError as exc:
         logger.warning(
             "Semantic Scholar API request failed query=%r api_key_configured=%s error=%s",
@@ -156,7 +161,7 @@ async def search_papers(
             _api_key_is_configured(),
             exc,
         )
-        return dict(_EMPTY_RESPONSE)
+        return dict(_EMPTY_RESPONSE), None
 
     if response.status_code >= 400:
         error_message = _extract_error_message(response)
@@ -167,22 +172,24 @@ async def search_papers(
             _api_key_is_configured(),
             error_message,
         )
-        return dict(_EMPTY_RESPONSE)
+        return dict(_EMPTY_RESPONSE), response.status_code
 
     try:
         payload = response.json()
     except ValueError:
         logger.warning(
-            "Semantic Scholar API returned invalid JSON query=%r",
+            "Semantic Scholar API returned invalid JSON query=%r status=%s",
             normalized_query,
+            response.status_code,
         )
-        return dict(_EMPTY_RESPONSE)
+        return dict(_EMPTY_RESPONSE), response.status_code
 
     if not isinstance(payload, dict):
         logger.warning(
-            "Semantic Scholar API returned unexpected payload type query=%r",
+            "Semantic Scholar API returned unexpected payload type query=%r status=%s",
             normalized_query,
+            response.status_code,
         )
-        return dict(_EMPTY_RESPONSE)
+        return dict(_EMPTY_RESPONSE), response.status_code
 
-    return payload
+    return payload, response.status_code
