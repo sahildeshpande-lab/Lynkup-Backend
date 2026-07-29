@@ -142,3 +142,18 @@ class AdminPublishPostRequest(BaseModel):
     post_id: UUID
     status: Literal["published", "flagged", "rejected", "reinstate"] = "published"
 
+
+class RecommendationSettingsResponse(BaseModel):
+    is_enabled: bool
+    generation_frequency_days: int
+    max_recommendations: int
+    updated_at: datetime | None
+    updated_by: UUID | None
+
+
+class RecommendationSettingsUpdateRequest(BaseModel):
+    # All fields optional; only provided fields are updated.
+    is_enabled: bool | None = None
+    generation_frequency_days: int | None = Field(default=None, ge=1, le=365)
+    max_recommendations: int | None = Field(default=None, ge=1, le=50)
+

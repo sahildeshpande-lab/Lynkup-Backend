@@ -176,21 +176,3 @@ def extract_post_keywords(text: str) -> dict:
 if __name__ == "__main__":
 
     initialize_models()
-
-    text = """
-    I am currently learning FastAPI, Python, Machine Learning,
-    Natural Language Processing and Large Language Models.
-    I love building AI applications with Semantic Search.
-    #Python #MachineLearning #FastAPI #AI
-    """
-
-    result = extract_post_keywords(text)
-
-    print("Processed Text:")
-    print(result["processed_text"])
-
-    print("\nHashtags:")
-    print(result["hashtags"])
-
-    print("\nKeywords:")
-    print(result["keywords"])

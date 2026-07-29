@@ -23,6 +23,7 @@ from .schemas import (
     AdminForgotPasswordRequest,
     AdminResetPasswordRequest,
     AdminPublishPostRequest,
+    RecommendationSettingsUpdateRequest,
 )
 from apps.accounts.schemas import EmailSignupRequest, RefreshTokenRequest, AdminAuthResponse
 from apps.profiles.schemas import CompletenessWeightsUpdateRequest, UpdateProfileRequest
@@ -381,4 +382,54 @@ async def admin_publish_or_flag_post(
         status=True,
         message=_status_messages.get(payload.status, "Post updated successfully"),
         data=format_post_detail(post, viewer_user_id=current_user.id),
+    )
+
+
+@router.get("/admin/recommendation-settings", response_model=ApiResponse)
+async def get_recommendation_settings(
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_admin),
+) -> ApiResponse:
+    from apps.recommendation.services import RecommendationSettingsService
+
+    _ = current_user  # auth context only
+    settings = await RecommendationSettingsService().get_settings(db)
+
+    return ApiResponse(
+        message="Recommendation settings fetched",
+        data={
+            "is_enabled": settings.is_enabled,
+            "generation_frequency_days": settings.generation_frequency_days,
+            "max_recommendations": settings.max_recommendations,
+            "updated_at": settings.updated_at,
+            "updated_by": settings.updated_by,
+        },
+    )
+
+
+@router.patch("/admin/recommendation-settings", response_model=ApiResponse)
+async def patch_recommendation_settings(
+    payload: RecommendationSettingsUpdateRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_admin),
+) -> ApiResponse:
+    from apps.recommendation.services import RecommendationSettingsService
+
+    updated = await RecommendationSettingsService().update_settings(
+        db,
+        admin_user_id=current_user.id,
+        is_enabled=payload.is_enabled,
+        generation_frequency_days=payload.generation_frequency_days,
+        max_recommendations=payload.max_recommendations,
+    )
+
+    return ApiResponse(
+        message="Recommendation settings updated",
+        data={
+            "is_enabled": updated.is_enabled,
+            "generation_frequency_days": updated.generation_frequency_days,
+            "max_recommendations": updated.max_recommendations,
+            "updated_at": updated.updated_at,
+            "updated_by": updated.updated_by,
+        },
     )

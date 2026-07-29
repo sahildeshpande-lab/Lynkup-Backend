@@ -49,6 +49,16 @@ class Profile(SQLModel, table=True):
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
 
+    # Learning recommendation persistence (cron snapshot storage).
+    learning_recommendations: dict | None = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
+    recommendations_updated_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
     updated_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
 
 

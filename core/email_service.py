@@ -451,27 +451,50 @@ def _otp_template_details(otp_purpose: str) -> tuple[str, str]:
 
 
 def _build_otp_display_html(otp: str, brand_blue: str) -> str:
-    """Build the OTP display as a full-width dashed card with large spaced digits.
-    Works for any OTP length; digits are rendered as separate table cells for
-    consistent rendering across Gmail/Apple Mail/Outlook.
+    """Build a content-sized OTP card, horizontally centered in the email body.
+
+    Digits are rendered as separate table cells so any OTP length (4/5/6/8)
+    works consistently across Gmail, Apple Mail, Outlook, Yahoo, and Samsung Mail.
     """
     digits = [escape(ch) for ch in str(otp or "")]
 
     digit_cells = "".join(
-        f'<td align="center" style="padding: 0 6px; font-size: 30px; font-weight: 700; color: #0F172A; font-family: \'Courier New\', Courier, monospace; line-height: 1;">{digit}</td>'
+        (
+            '<td align="center" '
+            'style="padding:0 6px; font-size:30px; font-weight:700; color:#0F172A; '
+            "font-family:'Courier New', Courier, monospace; line-height:1;\""
+            f">{digit}</td>"
+        )
         for digit in digits
     )
 
     return (
-        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 8px 0 4px; border-collapse:collapse;">'
+        # Parent: full-width table whose single cell centers the card.
+        '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" '
+        'style="margin:8px 0 4px; border-collapse:collapse;">'
         "<tr>"
-        f'<td class="otp-card" width="100%" style="padding:24px; background-color: #F8FAFC; border: 2px dashed {brand_blue}; border-radius: 12px; text-align:center;">'
-        f'<p class="otp-label" style="font-size: 10px; font-weight: 600; color: {brand_blue}; letter-spacing: 2px; text-transform: uppercase; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; margin: 0 0 16px; text-align:center;">'
+        '<td align="center" style="padding:0; margin:0;">'
+        # Nested card: content-sized, centered (no width:100%).
+        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" '
+        'align="center" style="margin:0 auto; border-collapse:collapse;">'
+        "<tr>"
+        f'<td class="otp-card" align="center" '
+        f'style="padding:24px; background-color:#F8FAFC; border:2px dashed {brand_blue}; '
+        'border-radius:12px; text-align:center;">'
+        f'<p class="otp-label" style="font-size:10px; font-weight:600; color:{brand_blue}; '
+        "letter-spacing:2px; text-transform:uppercase; "
+        "font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; "
+        'margin:0 0 16px; text-align:center;">'
         "ONE-TIME PASSWORD"
         "</p>"
-        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin:0 auto; border-collapse:collapse;">'
+        # Digits table: also centered inside the card.
+        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" '
+        'align="center" style="margin:0 auto; border-collapse:collapse;">'
         "<tr>"
         f"{digit_cells}"
+        "</tr>"
+        "</table>"
+        "</td>"
         "</tr>"
         "</table>"
         "</td>"
