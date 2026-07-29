@@ -65,8 +65,8 @@ def test_build_search_query_prioritizes_and_deduplicates_terms() -> None:
     query = build_search_query(extracted_keywords)
 
     assert query == (
-        "Artificial Intelligence Data Science Deep Learning Rag Llm "
-        "Semantic Search Vector Database Machinelearning Ai Nlp"
+        "artificial intelligence data science deep learning rag llm "
+        "semantic search vector database machinelearning ai nlp"
     )
 
 
@@ -108,7 +108,7 @@ async def test_search_papers_returns_raw_response() -> None:
     assert status_code == 200
     mock_get.assert_awaited_once()
     call_kwargs = mock_get.await_args.kwargs
-    assert call_kwargs["params"]["query"] == "Machine Learning"
+    assert call_kwargs["params"]["query"] == "machine learning"
     assert call_kwargs["params"]["limit"] == 10
     assert call_kwargs["params"]["year"] == "2023-"
     assert "paperId" in call_kwargs["params"]["fields"]

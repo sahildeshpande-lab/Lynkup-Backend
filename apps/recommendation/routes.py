@@ -50,6 +50,18 @@ async def search_recommendation_papers(
 
     result, status_code = await search_papers(normalized_query)
 
+    if status_code == 429:
+        logger.warning(
+            "[semantic-scholar] rate limit exceeded user_id=%s query=%r",
+            current_user.id,
+            normalized_query,
+        )
+        return ApiResponse(
+            status=False,
+            message="Semantic Scholar rate limit exceeded. Please try again in a few seconds.",
+            data={"data": [], "total": 0},
+        )
+
     raw_papers = result.get("data") if isinstance(result, dict) else None
     papers_found = len(raw_papers) if isinstance(raw_papers, list) else 0
 

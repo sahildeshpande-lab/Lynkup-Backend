@@ -16,6 +16,7 @@ PAPER_SEARCH_FIELDS = (
 )
 DEFAULT_SEARCH_LIMIT = 10
 DEFAULT_YEAR_FILTER = "2023-"
+MAX_QUERY_TERMS = 10
 REQUEST_TIMEOUT_SECONDS = 30.0
 
 _EMPTY_RESPONSE: dict[str, Any] = {"data": [], "total": 0}
@@ -47,7 +48,8 @@ def _normalize_for_dedup(term: str) -> str:
 
 
 def _format_search_term(term: str) -> str:
-    return " ".join(word.capitalize() for word in term.strip().split())
+    """Normalize a search term to lowercase for Semantic Scholar queries."""
+    return _normalize_for_dedup(term)
 
 
 def _as_string_list(value: Any) -> list[str]:
@@ -81,6 +83,8 @@ def build_search_query(extracted_keywords: dict[str, Any] | None) -> str:
 
     def add_terms(raw_values: list[str]) -> None:
         for value in raw_values:
+            if len(terms) >= MAX_QUERY_TERMS:
+                return
             normalized = _normalize_for_dedup(value)
             if not normalized or normalized in seen:
                 continue
@@ -131,7 +135,7 @@ async def search_papers(
     network failure, timeout, API error, or invalid JSON, returns an empty
     payload with ``{"data": [], "total": 0}`` after logging.
     """
-    normalized_query = query.strip()
+    normalized_query = " ".join(query.strip().lower().split())
     if not normalized_query:
         return dict(_EMPTY_RESPONSE), None
 
@@ -162,6 +166,14 @@ async def search_papers(
             exc,
         )
         return dict(_EMPTY_RESPONSE), None
+
+    if response.status_code == 429:
+        logger.warning(
+            "Semantic Scholar rate limit exceeded query=%r api_key_configured=%s",
+            normalized_query,
+            _api_key_is_configured(),
+        )
+        return dict(_EMPTY_RESPONSE), response.status_code
 
     if response.status_code >= 400:
         error_message = _extract_error_message(response)

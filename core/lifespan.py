@@ -35,51 +35,52 @@ async def lifespan(app: FastAPI):
     # Load email settings from .env early so SendGrid config is available.
     from core.email.config import settings as email_settings
 
-    logger.info("[%s] Importing recommendation algorithm module...", _timestamp())
-    from apps.recommendation.services import algorithm as recommendation_algorithm
-
-    logger.info("[%s] Recommendation algorithm module imported successfully.", _timestamp())
-
-    def _initialize_spacy_in_thread() -> None:
-        thread_logger = logging.getLogger(__name__)
-        thread_logger.info(
-            "[%s] spaCy initialization worker thread started.",
-            _timestamp(),
-        )
-        recommendation_algorithm.initialize_models()
-        thread_logger.info(
-            "[%s] spaCy initialization worker thread finished. "
-            "KeyBERT deferred to first keyword extraction request.",
-            _timestamp(),
-        )
-
-    spacy_init_started = time.perf_counter()
-    try:
-        logger.info("[%s] Submitting spaCy initialization to worker thread...", _timestamp())
-        await asyncio.to_thread(_initialize_spacy_in_thread)
-        logger.info(
-            "[%s] spaCy initialization worker thread completed (%.2f sec).",
-            _timestamp(),
-            time.perf_counter() - spacy_init_started,
-        )
-        logger.info(
-            "[%s] spaCy model loaded successfully during startup. "
-            "KeyBERT/SentenceTransformer will load lazily on first use.",
-            _timestamp(),
-        )
-    except Exception:
-        logger.exception(
-            "[%s] spaCy initialization failed during application startup after %.2f sec.",
-            _timestamp(),
-            time.perf_counter() - spacy_init_started,
-        )
-        raise
-
-    logger.info(
-        "[%s] Recommendation startup phase completed (Total: %.2f sec).",
-        _timestamp(),
-        time.perf_counter() - startup_started,
-    )
+    # Temporarily disabled: recommendation model startup (spaCy).
+    # logger.info("[%s] Importing recommendation algorithm module...", _timestamp())
+    # from apps.recommendation.services import algorithm as recommendation_algorithm
+    #
+    # logger.info("[%s] Recommendation algorithm module imported successfully.", _timestamp())
+    #
+    # def _initialize_spacy_in_thread() -> None:
+    #     thread_logger = logging.getLogger(__name__)
+    #     thread_logger.info(
+    #         "[%s] spaCy initialization worker thread started.",
+    #         _timestamp(),
+    #     )
+    #     recommendation_algorithm.initialize_models()
+    #     thread_logger.info(
+    #         "[%s] spaCy initialization worker thread finished. "
+    #         "KeyBERT deferred to first keyword extraction request.",
+    #         _timestamp(),
+    #     )
+    #
+    # spacy_init_started = time.perf_counter()
+    # try:
+    #     logger.info("[%s] Submitting spaCy initialization to worker thread...", _timestamp())
+    #     await asyncio.to_thread(_initialize_spacy_in_thread)
+    #     logger.info(
+    #         "[%s] spaCy initialization worker thread completed (%.2f sec).",
+    #         _timestamp(),
+    #         time.perf_counter() - spacy_init_started,
+    #     )
+    #     logger.info(
+    #         "[%s] spaCy model loaded successfully during startup. "
+    #         "KeyBERT/SentenceTransformer will load lazily on first use.",
+    #         _timestamp(),
+    #     )
+    # except Exception:
+    #     logger.exception(
+    #         "[%s] spaCy initialization failed during application startup after %.2f sec.",
+    #         _timestamp(),
+    #         time.perf_counter() - spacy_init_started,
+    #     )
+    #     raise
+    #
+    # logger.info(
+    #     "[%s] Recommendation startup phase completed (Total: %.2f sec).",
+    #     _timestamp(),
+    #     time.perf_counter() - startup_started,
+    # )
 
     if email_settings.is_sendgrid_configured:
         logger.info("SendGrid email delivery is configured.")

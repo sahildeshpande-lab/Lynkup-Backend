@@ -75,8 +75,8 @@ def test_search_recommendation_papers_returns_raw_semantic_scholar_response(monk
     }
 
     async def _mock_search_papers(query: str, **kwargs):
-        assert "Artificial Intelligence" in query
-        assert "Semantic Search" in query
+        assert "artificial intelligence" in query
+        assert "semantic search" in query
         return raw_response, 200
 
     monkeypatch.setattr(recommendation_routes, "search_papers", _mock_search_papers)
@@ -110,6 +110,25 @@ def test_search_recommendation_papers_returns_empty_message_when_no_papers(monke
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "No papers found"
+    assert body["data"] == {"data": [], "total": 0}
+
+
+def test_search_recommendation_papers_returns_rate_limit_message(monkeypatch) -> None:
+    async def _mock_search_papers(query: str, **kwargs):
+        return {"data": [], "total": 0}, 429
+
+    monkeypatch.setattr(recommendation_routes, "search_papers", _mock_search_papers)
+    app.dependency_overrides[get_session] = _override_session_with_keywords
+
+    response = client.get(
+        "/api/v1/recommendations/papers",
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is False
+    assert "rate limit" in body["message"].lower()
     assert body["data"] == {"data": [], "total": 0}
 
 
