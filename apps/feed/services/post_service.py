@@ -17,7 +17,7 @@ from core.images import generate_download_url, generate_profile_image_url
 from apps.connections.services.connection_service import is_blocked
 
 from .media_service import _verify_and_attach_media
-# from apps.recommendation.services.post_keyword_service import log_post_keywords_best_effort
+from apps.recommendation.services.post_keyword_service import log_post_keywords_best_effort
 
 from .revision_service import _build_content_dict, _create_revision, _sync_hashtags
 from apps.moderation.services.moderator_assignment_service import (
@@ -545,7 +545,7 @@ async def save_post_service(
 
             await db.commit()
             await db.refresh(post)
-            # await log_post_keywords_best_effort(post.id, content_dict, user_id=user_id, db=db)
+            await log_post_keywords_best_effort(post.id, content_dict, user_id=user_id, db=db)
             if _should_sync_topics_for_post_state(post_state):
                 await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
         except ApiError:
@@ -617,7 +617,7 @@ async def save_post_service(
 
         await db.commit()
         await db.refresh(post)
-        # await log_post_keywords_best_effort(post.id, content_dict, user_id=user_id, db=db)
+        await log_post_keywords_best_effort(post.id, content_dict, user_id=user_id, db=db)
         if _should_sync_topics_for_post_state(post_state, previous_state=previous_state):
             await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
     except ApiError:
@@ -728,7 +728,7 @@ async def edit_post_service(
 
         await db.commit()
         await db.refresh(post)
-        # await log_post_keywords_best_effort(post.id, merged_content, user_id=user_id, db=db)
+        await log_post_keywords_best_effort(post.id, merged_content, user_id=user_id, db=db)
         if should_sync_topics:
             await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
     except ApiError:

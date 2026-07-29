@@ -458,9 +458,21 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
     return (
         '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 8px 0 4px;">'
         "<tr>"
-        f'<td class="otp-card" align="center" style="padding: 28px 20px; background-color: #F8FAFC; border: 2px dashed {brand_blue}; border-radius: 12px;">'
-        f'<div class="otp-label" style="font-size: 10px; font-weight: 600; color: {brand_blue}; letter-spacing: 1.5px; text-transform: uppercase; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; margin-bottom: 12px;"></div>'
-        f'<span class="otp-font otp-digits" style="font-size: 30px; font-weight: 700; color: #0F172A; letter-spacing: 12px; font-family: \'Courier New\', Courier, monospace; display: inline-block; padding-left: 12px;">{spaced}</span>'
+        f'<td class="otp-card" align="center" style="padding: 20px 16px; background-color: #F8FAFC; border: 2px dashed {brand_blue}; border-radius: 12px;">'
+
+        f'<div class="otp-label" style="font-size: 10px; font-weight: 600; color: {brand_blue}; letter-spacing: 2px; text-transform: uppercase; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; margin-bottom: 16px;">'
+        "ONE-TIME PASSWORD"
+        "</div>"
+
+        '<div style="text-align: center; white-space: nowrap;">'
+
+        f'<span class="otp-font" style="display: inline-block; font-size: 30px; font-weight: 700; color: #0F172A; font-family: \'Courier New\', Courier, monospace; margin: 0 6px;">{otp[0]}</span>'
+        f'<span class="otp-font" style="display: inline-block; font-size: 30px; font-weight: 700; color: #0F172A; font-family: \'Courier New\', Courier, monospace; margin: 0 6px;">{otp[1]}</span>'
+        f'<span class="otp-font" style="display: inline-block; font-size: 30px; font-weight: 700; color: #0F172A; font-family: \'Courier New\', Courier, monospace; margin: 0 6px;">{otp[2]}</span>'
+        f'<span class="otp-font" style="display: inline-block; font-size: 30px; font-weight: 700; color: #0F172A; font-family: \'Courier New\', Courier, monospace; margin: 0 6px;">{otp[3]}</span>'
+       
+
+        "</div>"
         "</td>"
         "</tr>"
         "</table>"

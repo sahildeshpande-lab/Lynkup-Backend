@@ -6,9 +6,9 @@ import httpx
 import pytest
 
 from apps.recommendation.services.semantic_scholar_service import (
-    SemanticScholarAPIError,
     _api_key_is_configured,
     _build_headers,
+    build_search_query,
     search_papers,
 )
 
@@ -37,72 +37,115 @@ def test_build_headers_omits_api_key_when_missing(monkeypatch) -> None:
     assert _api_key_is_configured() is False
 
 
+def test_build_search_query_prioritizes_and_deduplicates_terms() -> None:
+    extracted_keywords = {
+        "major": ["Artificial Intelligence"],
+        "minor": ["Data Science"],
+        "interests": [
+            "Artificial Intelligence",
+            "Deep Learning",
+            "Data Science",
+        ],
+        "hashtags": {
+            "machinelearning": 3,
+            "ai": 2,
+            "nlp": 1,
+        },
+        "engagement_keywords": {
+            "rag": 4,
+            "llm": 2,
+        },
+        "content_keywords": {
+            "semantic search": 5,
+            "vector database": 3,
+            "rag": 1,
+        },
+    }
+
+    query = build_search_query(extracted_keywords)
+
+    assert query == (
+        "Artificial Intelligence Data Science Deep Learning Rag Llm Machinelearning Ai Nlp "
+        "Semantic Search Vector Database"
+    )
+
+
+def test_build_search_query_returns_empty_string_for_missing_profile() -> None:
+    assert build_search_query(None) == ""
+    assert build_search_query({}) == ""
+
+
 @pytest.mark.asyncio
-async def test_search_papers_success() -> None:
+async def test_search_papers_returns_raw_response() -> None:
+    raw_payload = {
+        "total": 1,
+        "token": "next-token",
+        "data": [
+            {
+                "paperId": "abc123",
+                "title": "Test Paper",
+                "url": "https://example.com/paper",
+                "citationCount": 10,
+            }
+        ],
+    }
     mock_response = httpx.Response(
         200,
-        json={
-            "total": 1,
-            "offset": 0,
-            "next": 1,
-            "data": [
-                {
-                    "paperId": "abc123",
-                    "title": "Test Paper",
-                    "authors": [{"authorId": "1", "name": "Jane Doe"}],
-                    "year": 2024,
-                    "abstract": "An abstract",
-                    "url": "https://example.com/paper",
-                    "citationCount": 10,
-                }
-            ],
-        },
-        request=httpx.Request("GET", "https://api.semanticscholar.org/graph/v1/paper/search"),
+        json=raw_payload,
+        request=httpx.Request(
+            "GET",
+            "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+        ),
     )
 
     with patch(
         "apps.recommendation.services.semantic_scholar_service.httpx.AsyncClient.get",
         new=AsyncMock(return_value=mock_response),
-    ):
-        result = await search_papers("machine learning", limit=10)
+    ) as mock_get:
+        result = await search_papers("Machine Learning")
 
-    assert result.total == 1
-    assert result.offset == 0
-    assert result.next == 1
-    assert len(result.papers) == 1
-    assert result.papers[0].paperId == "abc123"
-    assert result.papers[0].title == "Test Paper"
-    assert result.papers[0].authors[0].name == "Jane Doe"
-    assert result.papers[0].citationCount == 10
-
-
-@pytest.mark.asyncio
-async def test_search_papers_empty_query_raises() -> None:
-    with pytest.raises(SemanticScholarAPIError, match="Search query is required"):
-        await search_papers("   ")
+    assert result == raw_payload
+    mock_get.assert_awaited_once()
+    call_kwargs = mock_get.await_args.kwargs
+    assert call_kwargs["params"]["query"] == "Machine Learning"
+    assert call_kwargs["params"]["limit"] == 20
+    assert call_kwargs["params"]["year"] == "2023-"
+    assert "paperId" in call_kwargs["params"]["fields"]
 
 
 @pytest.mark.asyncio
-async def test_search_papers_api_error_status() -> None:
+async def test_search_papers_empty_query_returns_empty_data() -> None:
+    result = await search_papers("   ")
+
+    assert result == {"data": [], "total": 0}
+
+
+@pytest.mark.asyncio
+async def test_search_papers_api_error_returns_empty_data() -> None:
     mock_response = httpx.Response(
         429,
         json={"message": "Rate limit exceeded"},
-        request=httpx.Request("GET", "https://api.semanticscholar.org/graph/v1/paper/search"),
+        request=httpx.Request(
+            "GET",
+            "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+        ),
     )
 
     with patch(
         "apps.recommendation.services.semantic_scholar_service.httpx.AsyncClient.get",
         new=AsyncMock(return_value=mock_response),
     ):
-        with pytest.raises(SemanticScholarAPIError, match="Rate limit exceeded"):
-            await search_papers("covid")
+        result = await search_papers("covid")
+
+    assert result == {"data": [], "total": 0}
 
 
 @pytest.mark.asyncio
-async def test_search_papers_request_error() -> None:
+async def test_search_papers_request_error_returns_empty_data() -> None:
     with patch(
         "apps.recommendation.services.semantic_scholar_service.httpx.AsyncClient.get",
         new=AsyncMock(side_effect=httpx.RequestError("connection failed")),
     ):
-        with pytest.raises(SemanticScholarAPIError, match="Unable to reach Semantic Scholar API"):
-            await search_papers("covid")
+        result = await search_papers("covid")
+
+    assert result == {"data": [], "total": 0}

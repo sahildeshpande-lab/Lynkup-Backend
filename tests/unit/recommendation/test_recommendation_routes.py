@@ -1,58 +1,59 @@
 from __future__ import annotations
 
+from uuid import UUID
+
+import pytest
 from fastapi.testclient import TestClient
 
 from apps.accounts.db_models import User
 from apps.recommendation import routes as recommendation_routes
-from apps.recommendation.schemas import SemanticScholarPaper, SemanticScholarSearchData
-from apps.recommendation.services import SemanticScholarAPIError
-from core.security.auth import get_current_admin
+from core.security.auth import get_current_user
 from entrypoints.api import app
 
 client = TestClient(app)
 
+USER_ID = UUID("11111111-1111-1111-1111-111111111111")
 
-async def _override_admin():
+
+async def _override_user():
     user = User(
-        id="11111111-1111-1111-1111-111111111111",
-        email="admin@example.com",
-        firebase_uid="admin-uid",
+        id=USER_ID,
+        email="user@example.com",
+        firebase_uid="user-uid",
     )
-    user.role = "superadmin"
+    user.role = "user"
     return user
 
 
-def setup_module() -> None:
-    app.dependency_overrides[get_current_admin] = _override_admin
+@pytest.fixture(autouse=True)
+def _setup_overrides():
+    app.dependency_overrides[get_current_user] = _override_user
+    yield
+    app.dependency_overrides.pop(get_current_user, None)
 
 
-def teardown_module() -> None:
-    app.dependency_overrides.pop(get_current_admin, None)
+def test_search_profile_papers_returns_raw_semantic_scholar_response(monkeypatch) -> None:
+    raw_response = {
+        "total": 1,
+        "token": "next-token",
+        "data": [
+            {
+                "paperId": "abc123",
+                "title": "Test Paper",
+                "citationCount": 3,
+            }
+        ],
+    }
 
+    async def _mock_search_papers(query: str, **kwargs):
+        assert query == "machine learning fraud detection"
+        return raw_response
 
-def test_ai_scholar_test_route_success(monkeypatch) -> None:
-    async def _mock_search(query: str, limit: int = 10):
-        assert query == "machine learning"
-        assert limit == 5
-        return SemanticScholarSearchData(
-            total=1,
-            offset=0,
-            next=1,
-            papers=[
-                SemanticScholarPaper(
-                    paperId="abc123",
-                    title="Test Paper",
-                    year=2024,
-                    citationCount=3,
-                )
-            ],
-        )
-
-    monkeypatch.setattr(recommendation_routes, "search_papers", _mock_search)
+    monkeypatch.setattr(recommendation_routes, "search_papers", _mock_search_papers)
 
     response = client.get(
-        "/api/v1/admin/ai-scholar/test",
-        params={"query": "machine learning", "limit": 5},
+        "/api/v1/recommendations/papers",
+        params={"query": "machine learning fraud detection"},
         headers={"Authorization": "Bearer test-token"},
     )
 
@@ -60,35 +61,45 @@ def test_ai_scholar_test_route_success(monkeypatch) -> None:
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Papers fetched successfully"
-    assert body["data"]["total"] == 1
-    assert body["data"]["papers"][0]["paperId"] == "abc123"
+    assert body["data"] == raw_response
 
 
-def test_ai_scholar_test_route_handles_api_error(monkeypatch) -> None:
-    async def _mock_search(query: str, limit: int = 10):
-        raise SemanticScholarAPIError("Semantic Scholar API request timed out")
+def test_search_profile_papers_returns_empty_message_when_no_papers(monkeypatch) -> None:
+    async def _mock_search_papers(query: str, **kwargs):
+        return {"data": [], "total": 0}
 
-    monkeypatch.setattr(recommendation_routes, "search_papers", _mock_search)
+    monkeypatch.setattr(recommendation_routes, "search_papers", _mock_search_papers)
 
     response = client.get(
-        "/api/v1/admin/ai-scholar/test",
+        "/api/v1/recommendations/papers",
         params={"query": "covid"},
         headers={"Authorization": "Bearer test-token"},
     )
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] is False
-    assert body["message"] == "Semantic Scholar API request timed out"
-    assert body["data"] is None
+    assert body["status"] is True
+    assert body["message"] == "No papers found"
+    assert body["data"] == {"data": [], "total": 0}
 
 
-def test_ai_scholar_test_route_requires_query() -> None:
+def test_search_profile_papers_requires_query_parameter() -> None:
     response = client.get(
-        "/api/v1/admin/ai-scholar/test",
+        "/api/v1/recommendations/papers",
         headers={"Authorization": "Bearer test-token"},
     )
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] is False
+
+
+def test_search_profile_papers_requires_authentication() -> None:
+    app.dependency_overrides.pop(get_current_user, None)
+
+    response = client.get(
+        "/api/v1/recommendations/papers",
+        params={"query": "machine learning"},
+    )
+
+    assert response.status_code == 401

@@ -52,6 +52,14 @@ class Post(SQLModel, table=True):
     repost_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
     share_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
     comment_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
+    extracted_keywords: dict | None = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
+    keywords_updated_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
     attachments: List["PostAttachment"] = Relationship(
         sa_relationship=relationship("PostAttachment", back_populates="post", cascade="all, delete-orphan", lazy="selectin")

@@ -29,6 +29,7 @@ tech_stackl
 .agents
 sonar-project.properties
 extraction.json
+post_keywords.json
 entrypoints/static/uploads/*
 apps/recommendation/services/algorithm.py
 

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -12,7 +11,7 @@ from apps.recommendation.services.post_keyword_service import (
     build_post_plain_text,
     build_post_recommendation_payload,
     log_post_keywords_best_effort,
-    persist_post_extraction,
+    persist_profile_extracted_keywords,
 )
 
 
@@ -36,19 +35,10 @@ async def test_build_post_recommendation_payload_merges_keyword_scores(
         major="Artificial Intelligence",
         minor="Data Science",
         profile_interests_id=[1],
-    )
-
-    extraction_path = Path(__file__).resolve().parents[2] / "tmp_test_extractions" / f"extraction-{uuid4()}.json"
-    extraction_path.parent.mkdir(parents=True, exist_ok=True)
-    extraction_path.write_text(
-        json.dumps(
-            {
-                "user_id": str(user_id),
-                "content_keywords": {"existing keyword": 2},
-                "hashtags": {"ai": 3},
-            }
-        ),
-        encoding="utf-8",
+        extracted_keywords={
+            "content_keywords": {"existing keyword": 2},
+            "hashtags": {"ai": 3},
+        },
     )
 
     db = mock_db()
@@ -64,35 +54,32 @@ async def test_build_post_recommendation_payload_merges_keyword_scores(
         "keywords": ["existing keyword", "vector database"],
     }
 
-    try:
-        with patch(
-            "apps.recommendation.services.post_keyword_service._extract_keywords_sync",
-            return_value=fake_result,
-        ):
-            payload = await build_post_recommendation_payload(
-                db,
-                user_id=user_id,
-                content={"caption": "Learning #FastAPI"},
-                extraction_path=extraction_path,
-            )
+    with patch(
+        "apps.recommendation.services.post_keyword_service._extract_keywords_sync",
+        return_value=fake_result,
+    ):
+        payload = await build_post_recommendation_payload(
+            db,
+            user_id=user_id,
+            content={"caption": "Learning #FastAPI"},
+        )
 
-        assert payload == {
-            "major": ["Artificial Intelligence"],
-            "minor": ["Data Science"],
-            "interests": ["Machine Learning"],
-            "hashtags": {"ai": 3, "fastapi": 1},
-            "engagement_keywords": {},
-            "content_keywords": {"existing keyword": 3, "vector database": 1},
-        }
-    finally:
-        extraction_path.unlink(missing_ok=True)
+    assert payload == {
+        "major": ["Artificial Intelligence"],
+        "minor": ["Data Science"],
+        "interests": ["Machine Learning"],
+        "hashtags": {"ai": 3, "fastapi": 1},
+        "engagement_keywords": {},
+        "content_keywords": {"existing keyword": 3, "vector database": 1},
+        "_post_snapshot": {
+            "content_keywords": {"existing keyword": 1, "vector database": 1},
+            "hashtags": {"fastapi": 1},
+        },
+    }
 
 
 @pytest.mark.asyncio
-async def test_persist_post_extraction_writes_single_object_with_updated_at() -> None:
-    base = Path(__file__).resolve().parents[2] / "tmp_test_extractions"
-    base.mkdir(parents=True, exist_ok=True)
-    path = base / f"extraction-{uuid4()}.json"
+async def test_persist_profile_extracted_keywords_accumulates_post_ids(mock_db) -> None:
     first_post_id = uuid4()
     second_post_id = uuid4()
     user_id = uuid4()
@@ -105,74 +92,61 @@ async def test_persist_post_extraction_writes_single_object_with_updated_at() ->
         "content_keywords": {"rag": 1},
     }
 
-    try:
-        first_record = await persist_post_extraction(
-            first_post_id,
-            user_id=user_id,
-            payload=payload,
-            path=path,
-        )
+    profile = SimpleNamespace(
+        user_id=user_id,
+        extracted_keywords=None,
+        keywords_updated_at=None,
+    )
+    db = mock_db()
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: profile))
+    db.add = MagicMock()
+    db.commit = AsyncMock()
 
-        stored = json.loads(path.read_text(encoding="utf-8"))
-        assert isinstance(stored, dict)
-        assert stored == first_record
-        assert stored["latest_post_id"] == str(first_post_id)
-        assert stored["post_ids"] == [str(first_post_id)]
-        assert stored["updated_at"]
-        assert stored["minor"] == ["Ds"]
-        assert stored["interests"] == ["Machine Learning"]
+    first_record = await persist_profile_extracted_keywords(
+        db,
+        post_id=first_post_id,
+        user_id=user_id,
+        payload=payload,
+    )
 
-        updated_payload = {
-            **payload,
-            "content_keywords": {"rag": 2, "nlp": 1},
-            "hashtags": {"fastapi": 2},
-        }
-        second_record = await persist_post_extraction(
-            second_post_id,
-            user_id=user_id,
-            payload=updated_payload,
-            path=path,
-        )
+    assert first_record["latest_post_id"] == str(first_post_id)
+    assert first_record["post_ids"] == [str(first_post_id)]
+    assert first_record["minor"] == ["Ds"]
+    assert profile.keywords_updated_at is not None
 
-        stored = json.loads(path.read_text(encoding="utf-8"))
-        assert isinstance(stored, dict)
-        assert stored == second_record
-        assert stored["latest_post_id"] == str(second_post_id)
-        assert stored["post_ids"] == [str(first_post_id), str(second_post_id)]
-        assert stored["content_keywords"] == {"rag": 2, "nlp": 1}
-        assert stored["hashtags"] == {"fastapi": 2}
-        assert stored["updated_at"]
-    finally:
-        if path.exists():
-            path.unlink()
+    profile.extracted_keywords = first_record
+    updated_payload = {
+        **payload,
+        "content_keywords": {"rag": 2, "nlp": 1},
+        "hashtags": {"fastapi": 2},
+    }
+    second_record = await persist_profile_extracted_keywords(
+        db,
+        post_id=second_post_id,
+        user_id=user_id,
+        payload=updated_payload,
+    )
+
+    assert second_record["latest_post_id"] == str(second_post_id)
+    assert second_record["post_ids"] == [str(first_post_id), str(second_post_id)]
+    assert second_record["content_keywords"] == {"rag": 2, "nlp": 1}
+    assert second_record["hashtags"] == {"fastapi": 2}
 
 
 @pytest.mark.asyncio
-async def test_persist_post_extraction_replaces_other_user_record() -> None:
-    base = Path(__file__).resolve().parents[2] / "tmp_test_extractions"
-    base.mkdir(parents=True, exist_ok=True)
-    path = base / f"extraction-{uuid4()}.json"
-    first_user_id = uuid4()
-    second_user_id = uuid4()
-    payload = {
-        "major": ["AI"],
-        "minor": [],
-        "interests": [],
-        "hashtags": {"ai": 1},
-        "engagement_keywords": {},
-        "content_keywords": {"rag": 1},
-    }
+async def test_persist_profile_extracted_keywords_skips_missing_profile(mock_db) -> None:
+    db = mock_db()
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: None))
 
-    try:
-        await persist_post_extraction(uuid4(), user_id=first_user_id, payload=payload, path=path)
-        await persist_post_extraction(uuid4(), user_id=second_user_id, payload=payload, path=path)
+    record = await persist_profile_extracted_keywords(
+        db,
+        post_id=uuid4(),
+        user_id=uuid4(),
+        payload={"major": [], "minor": [], "interests": [], "hashtags": {}, "engagement_keywords": {}, "content_keywords": {}},
+    )
 
-        stored = json.loads(path.read_text(encoding="utf-8"))
-        assert stored["user_id"] == str(second_user_id)
-        assert "updated_at" in stored
-    finally:
-        if path.exists():
-            path.unlink()
+    assert record == {}
+    db.commit.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -180,13 +154,7 @@ async def test_log_post_keywords_best_effort_prints_json(monkeypatch, mock_db) -
     post_id = uuid4()
     user_id = uuid4()
     printed: list[str] = []
-    extraction_path = Path(__file__).resolve().parents[2] / "tmp_test_extractions" / f"extraction-{uuid4()}.json"
-    extraction_path.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr("builtins.print", lambda *args, **kwargs: printed.append(" ".join(str(a) for a in args)))
-    monkeypatch.setattr(
-        "apps.recommendation.services.post_keyword_service.EXTRACTION_JSON_PATH",
-        extraction_path,
-    )
 
     payload = {
         "major": ["Artificial Intelligence"],
@@ -195,11 +163,28 @@ async def test_log_post_keywords_best_effort_prints_json(monkeypatch, mock_db) -
         "hashtags": {"fastapi": 2},
         "engagement_keywords": {},
         "content_keywords": {"rag": 4},
+        "_post_snapshot": {
+            "content_keywords": {"rag": 4},
+            "hashtags": {"fastapi": 2},
+        },
     }
 
     with patch(
         "apps.recommendation.services.post_keyword_service.build_post_recommendation_payload",
         AsyncMock(return_value=payload),
+    ), patch(
+        "apps.recommendation.services.post_keyword_service.persist_post_keyword_snapshot",
+        AsyncMock(),
+    ), patch(
+        "apps.recommendation.services.post_keyword_service.persist_profile_extracted_keywords",
+        AsyncMock(
+            return_value={
+                "latest_post_id": str(post_id),
+                "post_ids": [str(post_id)],
+                "hashtags": {"fastapi": 2},
+                "content_keywords": {"rag": 4},
+            }
+        ),
     ):
         await log_post_keywords_best_effort(
             post_id,
@@ -209,14 +194,7 @@ async def test_log_post_keywords_best_effort_prints_json(monkeypatch, mock_db) -
         )
 
     assert any(str(post_id) in line for line in printed)
-    assert any("Artificial Intelligence" in line for line in printed)
-    assert any('"updated_at"' in line for line in printed)
-
-    stored = json.loads(extraction_path.read_text(encoding="utf-8"))
-    assert isinstance(stored, dict)
-    assert stored["latest_post_id"] == str(post_id)
-    assert stored["hashtags"] == {"fastapi": 2}
-    extraction_path.unlink(missing_ok=True)
+    assert any("fastapi" in line for line in printed)
 
 
 @pytest.mark.asyncio
@@ -227,19 +205,31 @@ async def test_log_post_keywords_best_effort_prints_profile_only_when_content_em
     printed: list[str] = []
     monkeypatch.setattr("builtins.print", lambda *args, **kwargs: printed.append(" ".join(str(a) for a in args)))
 
+    post_id = uuid4()
     profile = SimpleNamespace(
         major="AI",
         minor=None,
         profile_interests_id=[],
+        extracted_keywords=None,
+        keywords_updated_at=None,
+    )
+    post = SimpleNamespace(
+        id=post_id,
+        extracted_keywords=None,
+        keywords_updated_at=None,
     )
     db = mock_db()
     db.execute = AsyncMock(
         side_effect=[
             SimpleNamespace(scalar_one_or_none=lambda: profile),
+            SimpleNamespace(scalar_one_or_none=lambda: post),
+            SimpleNamespace(scalar_one_or_none=lambda: profile),
         ]
     )
+    db.add = MagicMock()
+    db.commit = AsyncMock()
 
-    await log_post_keywords_best_effort(uuid4(), {}, user_id=uuid4(), db=db)
+    await log_post_keywords_best_effort(post_id, {}, user_id=uuid4(), db=db)
 
     combined = "\n".join(printed)
     assert '"major": [' in combined
@@ -248,7 +238,6 @@ async def test_log_post_keywords_best_effort_prints_profile_only_when_content_em
     assert '"hashtags": {}' in combined
     assert '"engagement_keywords": {}' in combined
     assert '"content_keywords": {}' in combined
-    assert '"updated_at"' in combined
 
 
 @pytest.mark.asyncio

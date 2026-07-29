@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -12,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from apps.feed.content_utils import extract_hashtags, normalize_text
+from apps.feed.db_models.post_db_model import Post
 from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
 from apps.profiles.db_models.profile_db_model import Profile
 from apps.recommendation.services.keyword_scoring import (
@@ -20,9 +20,6 @@ from apps.recommendation.services.keyword_scoring import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Project-root debug store for post keyword extractions (temporary).
-EXTRACTION_JSON_PATH = Path(__file__).resolve().parents[3] / "extraction.json"
 
 _EXTRACTION_LIST_FIELDS = ("major", "minor", "interests")
 _EXTRACTION_SCORE_FIELDS = ("hashtags", "engagement_keywords", "content_keywords")
@@ -51,8 +48,8 @@ def _extract_keywords_sync(text: str) -> dict:
     return extract_post_keywords(text)
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _non_empty_list(value: str | None) -> list[str]:
@@ -60,45 +57,12 @@ def _non_empty_list(value: str | None) -> list[str]:
     return [cleaned] if cleaned else []
 
 
-def _read_extraction_raw(path: Path) -> Any:
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        logger.exception("Failed to read extraction file path=%s", path)
-        return None
-
-
-def _find_user_record_in_raw(raw: Any, user_id: UUID) -> dict[str, Any] | None:
-    user_id_str = str(user_id)
-
-    if isinstance(raw, dict):
-        if raw.get("user_id") == user_id_str:
-            return raw
-        users = raw.get("users")
-        if isinstance(users, dict):
-            entry = users.get(user_id_str)
-            if isinstance(entry, dict):
-                return entry
-        return None
-
-    if isinstance(raw, list):
-        for entry in raw:
-            if isinstance(entry, dict) and entry.get("user_id") == user_id_str:
-                return entry
-        for entry in raw:
-            if isinstance(entry, dict) and entry.get("post_id") and entry.get("user_id") == user_id_str:
-                return entry
-
-    return None
-
-
-def _existing_keyword_scores(path: Path, user_id: UUID, field: str) -> dict[str, int]:
-    record = _find_user_record_in_raw(_read_extraction_raw(path), user_id)
-    if not record:
+def _profile_keyword_record(profile: Profile | None) -> dict[str, Any]:
+    if profile is None or not profile.extracted_keywords:
         return {}
-    return coerce_keyword_scores(record.get(field))
+    if isinstance(profile.extracted_keywords, dict):
+        return profile.extracted_keywords
+    return {}
 
 
 def _post_hashtags(content: dict | None) -> list[str]:
@@ -142,23 +106,19 @@ async def build_post_recommendation_payload(
     *,
     user_id: UUID,
     content: dict | None,
-    extraction_path: Path | None = None,
 ) -> dict[str, Any]:
     profile = (
         await db.execute(select(Profile).where(Profile.user_id == user_id))
     ).scalar_one_or_none()
 
-    path = extraction_path or EXTRACTION_JSON_PATH
-    existing_record = _find_user_record_in_raw(_read_extraction_raw(path), user_id)
+    existing_record = _profile_keyword_record(profile)
 
     existing_content_keywords = coerce_keyword_scores(
-        existing_record.get("content_keywords") if existing_record else None
+        existing_record.get("content_keywords")
     )
-    existing_hashtags = coerce_keyword_scores(
-        existing_record.get("hashtags") if existing_record else None
-    )
+    existing_hashtags = coerce_keyword_scores(existing_record.get("hashtags"))
     existing_engagement_keywords = coerce_keyword_scores(
-        existing_record.get("engagement_keywords") if existing_record else None
+        existing_record.get("engagement_keywords")
     )
 
     text = build_post_plain_text(content)
@@ -167,6 +127,11 @@ async def build_post_recommendation_payload(
         result = await asyncio.to_thread(_extract_keywords_sync, text)
         new_keywords = list(result.get("keywords") or [])
 
+    post_snapshot = {
+        "content_keywords": update_keyword_scores({}, new_keywords),
+        "hashtags": update_keyword_scores({}, _post_hashtags(content)),
+    }
+
     return {
         "major": _non_empty_list(profile.major if profile else None),
         "minor": _non_empty_list(profile.minor if profile else None),
@@ -174,63 +139,87 @@ async def build_post_recommendation_payload(
         "hashtags": update_keyword_scores(existing_hashtags, _post_hashtags(content)),
         "engagement_keywords": existing_engagement_keywords,
         "content_keywords": update_keyword_scores(existing_content_keywords, new_keywords),
+        "_post_snapshot": post_snapshot,
     }
 
 
-def _persist_extraction_sync(
-    path: Path,
+def _build_profile_extracted_keywords(
+    existing: dict[str, Any] | None,
     *,
     post_id: UUID,
-    user_id: UUID,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Replace extraction.json with one cumulative record for the current user."""
-    user_id_str = str(user_id)
+    existing = existing or {}
     post_id_str = str(post_id)
-    now = _utc_now_iso()
 
-    existing = _find_user_record_in_raw(_read_extraction_raw(path), user_id)
-
-    post_ids: list[str] = []
-    if existing and existing.get("user_id") == user_id_str:
-        post_ids = [str(value) for value in (existing.get("post_ids") or []) if value]
-        legacy_post_id = existing.get("post_id") or existing.get("latest_post_id")
-        if legacy_post_id and str(legacy_post_id) not in post_ids:
-            post_ids.append(str(legacy_post_id))
+    post_ids: list[str] = [str(value) for value in (existing.get("post_ids") or []) if value]
+    legacy_post_id = existing.get("latest_post_id")
+    if legacy_post_id and str(legacy_post_id) not in post_ids:
+        post_ids.append(str(legacy_post_id))
     if post_id_str not in post_ids:
         post_ids.append(post_id_str)
 
     record: dict[str, Any] = {
-        "user_id": user_id_str,
         "latest_post_id": post_id_str,
         "post_ids": post_ids,
-        "updated_at": now,
     }
     for field in _EXTRACTION_LIST_FIELDS:
         record[field] = list(payload.get(field) or [])
     for field in _EXTRACTION_SCORE_FIELDS:
         record[field] = dict(payload.get(field) or {})
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record, indent=2), encoding="utf-8")
     return record
 
 
-async def persist_post_extraction(
+async def persist_post_keyword_snapshot(
+    db: AsyncSession,
     post_id: UUID,
+    snapshot: dict[str, Any],
+) -> None:
+    """Store per-post extracted keywords for engagement reuse."""
+    post = (
+        await db.execute(select(Post).where(Post.id == post_id))
+    ).scalar_one_or_none()
+    if post is None:
+        logger.warning("Skipping post keyword snapshot; post not found post_id=%s", post_id)
+        return
+
+    post.extracted_keywords = {
+        "content_keywords": dict(snapshot.get("content_keywords") or {}),
+        "hashtags": dict(snapshot.get("hashtags") or {}),
+    }
+    post.keywords_updated_at = _utc_now()
+    db.add(post)
+    await db.commit()
+
+
+async def persist_profile_extracted_keywords(
+    db: AsyncSession,
     *,
+    post_id: UUID,
     user_id: UUID,
     payload: dict[str, Any],
-    path: Path | None = None,
 ) -> dict[str, Any]:
-    target = path or EXTRACTION_JSON_PATH
-    return await asyncio.to_thread(
-        _persist_extraction_sync,
-        target,
+    """Persist cumulative keyword profile data on the user's profile row."""
+    profile = (
+        await db.execute(select(Profile).where(Profile.user_id == user_id))
+    ).scalar_one_or_none()
+    if profile is None:
+        logger.warning(
+            "Skipping profile keyword persistence; profile not found user_id=%s",
+            user_id,
+        )
+        return {}
+
+    record = _build_profile_extracted_keywords(
+        _profile_keyword_record(profile),
         post_id=post_id,
-        user_id=user_id,
         payload=payload,
     )
+    profile.extracted_keywords = record
+    profile.keywords_updated_at = _utc_now()
+    db.add(profile)
+    await db.commit()
+    return record
 
 
 async def log_post_keywords(
@@ -240,15 +229,20 @@ async def log_post_keywords(
     user_id: UUID,
     db: AsyncSession,
 ) -> None:
-    """
-    Build the recommendation payload, print it, and store it in extraction.json.
-    """
+    """Build the recommendation payload, print it, and store it on profile/post rows."""
     payload = await build_post_recommendation_payload(
         db,
         user_id=user_id,
         content=content,
     )
-    record = await persist_post_extraction(post_id, user_id=user_id, payload=payload)
+    post_snapshot = payload.pop("_post_snapshot", {})
+    await persist_post_keyword_snapshot(db, post_id, post_snapshot)
+    record = await persist_profile_extracted_keywords(
+        db,
+        post_id=post_id,
+        user_id=user_id,
+        payload=payload,
+    )
     print(f"[post-keywords] post_id={post_id}")
     print(json.dumps(record, indent=2))
 
