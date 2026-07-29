@@ -1,10 +1,32 @@
-import re
-import spacy
-from keybert import KeyBERT
+from __future__ import annotations
 
-# Load models once (application startup)
-nlp = spacy.load("en_core_web_sm")
-kw_model = KeyBERT(model="all-MiniLM-L6-v2")
+import re
+
+nlp = None
+kw_model = None
+
+
+def initialize_models() -> None:
+    """Load spaCy and KeyBERT models once during application startup."""
+    global nlp, kw_model
+
+    if nlp is not None and kw_model is not None:
+        return
+
+    import spacy
+    from keybert import KeyBERT
+
+    nlp = spacy.load("en_core_web_sm")
+    kw_model = KeyBERT(model="all-MiniLM-L6-v2")
+
+
+def _ensure_initialized() -> None:
+    if nlp is None or kw_model is None:
+        raise RuntimeError(
+            "Recommendation models are not initialized. "
+            "Call initialize_models() during application startup before using "
+            "keyword extraction."
+        )
 
 
 def extract_hashtags(text: str) -> list[str]:
@@ -25,6 +47,7 @@ def preprocess_text(text: str) -> str:
     """
     Remove stop words, punctuation, numbers and lemmatize.
     """
+    _ensure_initialized()
 
     doc = nlp(text)
 
@@ -47,6 +70,8 @@ def extract_keywords(processed_text: str) -> list[tuple[str, float]]:
     Returns cleaned (keyword, score) tuples sorted by score descending.
     """
     from apps.recommendation.services.keyword_postprocessing import clean_keywords
+
+    _ensure_initialized()
 
     raw_keywords = kw_model.extract_keywords(
         processed_text,
@@ -87,6 +112,8 @@ def extract_post_keywords(text: str) -> dict:
 
 
 if __name__ == "__main__":
+
+    initialize_models()
 
     text = """
     I am currently learning FastAPI, Python, Machine Learning,

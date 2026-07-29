@@ -28,6 +28,10 @@ async def test_lifespan_starts_and_stops_email_cron(monkeypatch) -> None:
     monkeypatch.setattr("core.lifespan.db_settings", MagicMock(auto_init_db=False))
     monkeypatch.setattr("core.email.config.settings", MagicMock(is_sendgrid_configured=True))
     monkeypatch.setattr("core.email_service.cron_send_emails", _mock_cron_send_emails)
+    monkeypatch.setattr(
+        "apps.recommendation.services.algorithm.initialize_models",
+        lambda: None,
+    )
 
     async with lifespan(app):
         await asyncio.wait_for(cron_started.wait(), timeout=1)
@@ -56,6 +60,10 @@ async def test_lifespan_runs_init_db_when_enabled(monkeypatch) -> None:
         await asyncio.sleep(0)
 
     monkeypatch.setattr("core.email_service.cron_send_emails", _noop_cron)
+    monkeypatch.setattr(
+        "apps.recommendation.services.algorithm.initialize_models",
+        lambda: None,
+    )
 
     async with lifespan(app):
         pass

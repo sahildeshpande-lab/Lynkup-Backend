@@ -34,8 +34,9 @@ DEFAULT_KEYWORD_BLACKLIST = frozenset(
 
 
 def _nlp_model():
-    from apps.recommendation.services.algorithm import nlp
+    from apps.recommendation.services.algorithm import _ensure_initialized, nlp
 
+    _ensure_initialized()
     return nlp
 
 
