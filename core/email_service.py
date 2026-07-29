@@ -452,27 +452,28 @@ def _otp_template_details(otp_purpose: str) -> tuple[str, str]:
 
 def _build_otp_display_html(otp: str, brand_blue: str) -> str:
     """Build the OTP display as a full-width dashed card with large spaced digits.
-    Works for any OTP length; digits are space-separated for clarity.
+    Works for any OTP length; digits are rendered as separate table cells for
+    consistent rendering across Gmail/Apple Mail/Outlook.
     """
-    spaced = " ".join(escape(ch) for ch in otp)
+    digits = [escape(ch) for ch in str(otp or "")]
+
+    digit_cells = "".join(
+        f'<td align="center" style="padding: 0 6px; font-size: 30px; font-weight: 700; color: #0F172A; font-family: \'Courier New\', Courier, monospace; line-height: 1;">{digit}</td>'
+        for digit in digits
+    )
+
     return (
-        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 8px 0 4px;">'
+        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 8px 0 4px; border-collapse:collapse;">'
         "<tr>"
-        f'<td class="otp-card" align="center" style="padding: 20px 16px; background-color: #F8FAFC; border: 2px dashed {brand_blue}; border-radius: 12px;">'
-
-        f'<div class="otp-label" style="font-size: 10px; font-weight: 600; color: {brand_blue}; letter-spacing: 2px; text-transform: uppercase; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; margin-bottom: 16px;">'
+        f'<td class="otp-card" align="center" width="100%" style="padding: 20px 16px; background-color: #F8FAFC; border: 2px dashed {brand_blue}; border-radius: 12px; width: 100%;">'
+        f'<p class="otp-label" style="font-size: 10px; font-weight: 600; color: {brand_blue}; letter-spacing: 2px; text-transform: uppercase; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; margin: 0 0 16px;">'
         "ONE-TIME PASSWORD"
-        "</div>"
-
-        '<div style="text-align: center; white-space: nowrap;">'
-
-        f'<span class="otp-font" style="display: inline-block; font-size: 30px; font-weight: 700; color: #0F172A; font-family: \'Courier New\', Courier, monospace; margin: 0 6px;">{otp[0]}</span>'
-        f'<span class="otp-font" style="display: inline-block; font-size: 30px; font-weight: 700; color: #0F172A; font-family: \'Courier New\', Courier, monospace; margin: 0 6px;">{otp[1]}</span>'
-        f'<span class="otp-font" style="display: inline-block; font-size: 30px; font-weight: 700; color: #0F172A; font-family: \'Courier New\', Courier, monospace; margin: 0 6px;">{otp[2]}</span>'
-        f'<span class="otp-font" style="display: inline-block; font-size: 30px; font-weight: 700; color: #0F172A; font-family: \'Courier New\', Courier, monospace; margin: 0 6px;">{otp[3]}</span>'
-       
-
-        "</div>"
+        "</p>"
+        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-collapse:collapse; white-space:nowrap;">'
+        "<tr>"
+        f"{digit_cells}"
+        "</tr>"
+        "</table>"
         "</td>"
         "</tr>"
         "</table>"
