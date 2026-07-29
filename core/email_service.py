@@ -451,7 +451,7 @@ def _otp_template_details(otp_purpose: str) -> tuple[str, str]:
 
 
 def _build_otp_display_html(otp: str, brand_blue: str) -> str:
-    """Build a content-sized OTP card, horizontally centered in the email body.
+    """Build a content-sized OTP card for embedding inside a centered parent <td>.
 
     Digits are rendered as separate table cells so any OTP length (4/5/6/8)
     works consistently across Gmail, Apple Mail, Outlook, Yahoo, and Samsung Mail.
@@ -468,14 +468,10 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
         for digit in digits
     )
 
+    # Outermost element is the OTP card itself (content-sized, not width=100%).
+    # Parent template wraps this in a full-width <td align="center">.
     return (
-        # Parent: full-width table whose single cell centers the card.
-        '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" '
-        'style="margin:8px 0 4px; border-collapse:collapse;">'
-        "<tr>"
-        '<td align="center" style="padding:0; margin:0;">'
-        # Nested card: content-sized, centered (no width:100%).
-        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" '
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
         'align="center" style="margin:0 auto; border-collapse:collapse;">'
         "<tr>"
         f'<td class="otp-card" align="center" '
@@ -487,14 +483,10 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
         'margin:0 0 16px; text-align:center;">'
         "ONE-TIME PASSWORD"
         "</p>"
-        # Digits table: also centered inside the card.
-        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" '
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
         'align="center" style="margin:0 auto; border-collapse:collapse;">'
         "<tr>"
         f"{digit_cells}"
-        "</tr>"
-        "</table>"
-        "</td>"
         "</tr>"
         "</table>"
         "</td>"
