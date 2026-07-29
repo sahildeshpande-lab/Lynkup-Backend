@@ -172,6 +172,11 @@ async def complete_onboarding(
     await db.refresh(user)
     await db.refresh(profile)
 
+    from apps.recommendation.services.post_keyword_service import (
+        refresh_profile_extracted_keywords_best_effort,
+    )
+    await refresh_profile_extracted_keywords_best_effort(db, user_id=user.id)
+
     from apps.chat.service import StreamChatError, upsert_stream_user
     from apps.notifications.services.topic_service import TopicService
     from common.exceptions import ApiError
@@ -268,6 +273,11 @@ async def update_profile_me_form(
     await db.commit()
     await db.refresh(current_user)
     await db.refresh(profile)
+
+    from apps.recommendation.services.post_keyword_service import (
+        refresh_profile_extracted_keywords_best_effort,
+    )
+    await refresh_profile_extracted_keywords_best_effort(db, user_id=current_user.id)
 
     if topic_sync_needed:
         from apps.notifications.services.topic_service import TopicService

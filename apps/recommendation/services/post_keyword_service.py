@@ -16,6 +16,7 @@ from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
 from apps.profiles.db_models.profile_db_model import Profile
 from apps.recommendation.services.keyword_scoring import (
     coerce_keyword_scores,
+    subtract_keyword_scores,
     update_keyword_scores,
 )
 
@@ -106,6 +107,7 @@ async def build_post_recommendation_payload(
     *,
     user_id: UUID,
     content: dict | None,
+    previous_post_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = (
         await db.execute(select(Profile).where(Profile.user_id == user_id))
@@ -120,6 +122,16 @@ async def build_post_recommendation_payload(
     existing_engagement_keywords = coerce_keyword_scores(
         existing_record.get("engagement_keywords")
     )
+
+    if previous_post_snapshot:
+        existing_content_keywords = subtract_keyword_scores(
+            existing_content_keywords,
+            coerce_keyword_scores(previous_post_snapshot.get("content_keywords")),
+        )
+        existing_hashtags = subtract_keyword_scores(
+            existing_hashtags,
+            coerce_keyword_scores(previous_post_snapshot.get("hashtags")),
+        )
 
     text = build_post_plain_text(content)
     new_keywords: list[str] = []
@@ -168,6 +180,70 @@ def _build_profile_extracted_keywords(
     for field in _EXTRACTION_SCORE_FIELDS:
         record[field] = dict(payload.get(field) or {})
     return record
+
+
+async def _build_profile_fields_snapshot(
+    db: AsyncSession,
+    profile: Profile,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    existing = existing or {}
+    record: dict[str, Any] = {
+        "major": _non_empty_list(profile.major),
+        "minor": _non_empty_list(profile.minor),
+        "interests": await _profile_interest_names(db, profile),
+    }
+
+    if existing.get("latest_post_id"):
+        record["latest_post_id"] = existing.get("latest_post_id")
+    post_ids = existing.get("post_ids")
+    if post_ids:
+        record["post_ids"] = list(post_ids)
+
+    for field in _EXTRACTION_SCORE_FIELDS:
+        record[field] = dict(existing.get(field) or {})
+
+    return record
+
+
+async def refresh_profile_extracted_keywords(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+) -> dict[str, Any]:
+    """Sync profile major/minor/interests into extracted_keywords without touching post scores."""
+    profile = (
+        await db.execute(select(Profile).where(Profile.user_id == user_id))
+    ).scalar_one_or_none()
+    if profile is None:
+        logger.warning(
+            "Skipping profile keyword refresh; profile not found user_id=%s",
+            user_id,
+        )
+        return {}
+
+    record = await _build_profile_fields_snapshot(
+        db,
+        profile,
+        _profile_keyword_record(profile),
+    )
+    profile.extracted_keywords = record
+    profile.keywords_updated_at = _utc_now()
+    db.add(profile)
+    await db.commit()
+    return record
+
+
+async def refresh_profile_extracted_keywords_best_effort(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+) -> None:
+    """Never raise — keyword refresh must not block profile updates."""
+    try:
+        await refresh_profile_extracted_keywords(db, user_id=user_id)
+    except Exception:
+        logger.exception("Profile keyword refresh failed user_id=%s", user_id)
 
 
 async def persist_post_keyword_snapshot(
@@ -230,10 +306,18 @@ async def log_post_keywords(
     db: AsyncSession,
 ) -> None:
     """Build the recommendation payload, print it, and store it on profile/post rows."""
+    post = (
+        await db.execute(select(Post).where(Post.id == post_id))
+    ).scalar_one_or_none()
+    previous_post_snapshot = None
+    if post is not None and isinstance(post.extracted_keywords, dict):
+        previous_post_snapshot = post.extracted_keywords
+
     payload = await build_post_recommendation_payload(
         db,
         user_id=user_id,
         content=content,
+        previous_post_snapshot=previous_post_snapshot,
     )
     post_snapshot = payload.pop("_post_snapshot", {})
     await persist_post_keyword_snapshot(db, post_id, post_snapshot)

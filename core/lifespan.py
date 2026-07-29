@@ -40,34 +40,38 @@ async def lifespan(app: FastAPI):
 
     logger.info("[%s] Recommendation algorithm module imported successfully.", _timestamp())
 
-    def _initialize_recommendation_models_in_thread() -> None:
+    def _initialize_spacy_in_thread() -> None:
         thread_logger = logging.getLogger(__name__)
         thread_logger.info(
-            "[%s] Recommendation model initialization worker thread started.",
+            "[%s] spaCy initialization worker thread started.",
             _timestamp(),
         )
         recommendation_algorithm.initialize_models()
         thread_logger.info(
-            "[%s] Recommendation model initialization worker thread finished.",
+            "[%s] spaCy initialization worker thread finished. "
+            "KeyBERT deferred to first keyword extraction request.",
             _timestamp(),
         )
 
-    model_init_started = time.perf_counter()
+    spacy_init_started = time.perf_counter()
     try:
-        logger.info("[%s] Submitting recommendation model initialization to worker thread...", _timestamp())
-        await asyncio.to_thread(_initialize_recommendation_models_in_thread)
+        logger.info("[%s] Submitting spaCy initialization to worker thread...", _timestamp())
+        await asyncio.to_thread(_initialize_spacy_in_thread)
         logger.info(
-            "[%s] Recommendation model worker thread completed (%.2f sec).",
+            "[%s] spaCy initialization worker thread completed (%.2f sec).",
             _timestamp(),
-            time.perf_counter() - model_init_started,
+            time.perf_counter() - spacy_init_started,
         )
-        logger.info("[%s] Recommendation models loaded successfully.", _timestamp())
+        logger.info(
+            "[%s] spaCy model loaded successfully during startup. "
+            "KeyBERT/SentenceTransformer will load lazily on first use.",
+            _timestamp(),
+        )
     except Exception:
         logger.exception(
-            "[%s] Recommendation model initialization failed during application startup "
-            "after %.2f sec.",
+            "[%s] spaCy initialization failed during application startup after %.2f sec.",
             _timestamp(),
-            time.perf_counter() - model_init_started,
+            time.perf_counter() - spacy_init_started,
         )
         raise
 

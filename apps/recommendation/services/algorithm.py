@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 nlp = None
 kw_model = None
 
-_SENTENCE_TRANSFORMER_MODEL = "all-MiniLM-L6-v2"
+_KEYBERT_MODEL = "all-MiniLM-L6-v2"
 _SPACY_MODEL = "en_core_web_sm"
 
 
@@ -18,35 +18,15 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _log_huggingface_cache_paths() -> None:
-    import os
-
-    logger.info("[%s] HuggingFace cache environment:", _timestamp())
-    for env_var in (
-        "HF_HOME",
-        "TRANSFORMERS_CACHE",
-        "SENTENCE_TRANSFORMERS_HOME",
-        "HUGGINGFACE_HUB_CACHE",
-    ):
-        logger.info("[%s]   %s=%r", _timestamp(), env_var, os.environ.get(env_var))
-
-    try:
-        from huggingface_hub.constants import HF_HUB_CACHE
-
-        logger.info("[%s] HuggingFace hub cache path=%s", _timestamp(), HF_HUB_CACHE)
-    except Exception:
-        logger.exception("[%s] Failed while resolving HuggingFace hub cache path", _timestamp())
-
-
 def initialize_models() -> None:
-    """Load spaCy and KeyBERT models once during application startup."""
-    global nlp, kw_model
+    """Load the spaCy model once during application startup."""
+    global nlp
 
     total_start = time.perf_counter()
     logger.info("[%s] Enter initialize_models()", _timestamp())
 
-    if nlp is not None and kw_model is not None:
-        logger.info("[%s] Models already initialized; skipping duplicate startup load.", _timestamp())
+    if nlp is not None:
+        logger.info("[%s] spaCy model already initialized; skipping duplicate startup load.", _timestamp())
         return
 
     spacy_start = time.perf_counter()
@@ -66,59 +46,43 @@ def initialize_models() -> None:
         logger.exception("[%s] Failed while loading spaCy", _timestamp())
         raise
 
-    _log_huggingface_cache_paths()
-
-    sentence_transformer_start = time.perf_counter()
-    logger.info("[%s] Loading SentenceTransformer...", _timestamp())
-    try:
-        from sentence_transformers import SentenceTransformer
-
-        logger.info(
-            "[%s] Beginning SentenceTransformer download/load for %s",
-            _timestamp(),
-            _SENTENCE_TRANSFORMER_MODEL,
-        )
-        sentence_transformer_model = SentenceTransformer(_SENTENCE_TRANSFORMER_MODEL)
-        logger.info(
-            "[%s] SentenceTransformer download/load completed.",
-            _timestamp(),
-        )
-        logger.info("[%s] SentenceTransformer model moved into memory.", _timestamp())
-        logger.info(
-            "[%s] SentenceTransformer loaded successfully (%.2f sec)",
-            _timestamp(),
-            time.perf_counter() - sentence_transformer_start,
-        )
-    except Exception:
-        logger.exception("[%s] Failed while loading SentenceTransformer", _timestamp())
-        raise
-
-    keybert_start = time.perf_counter()
-    logger.info("[%s] Initializing KeyBERT...", _timestamp())
-    try:
-        from keybert import KeyBERT
-
-        logger.info("[%s] Beginning KeyBERT initialization.", _timestamp())
-        kw_model = KeyBERT(model=sentence_transformer_model)
-        logger.info("[%s] KeyBERT model moved into memory.", _timestamp())
-        logger.info(
-            "[%s] KeyBERT initialized successfully (%.2f sec)",
-            _timestamp(),
-            time.perf_counter() - keybert_start,
-        )
-    except Exception:
-        logger.exception("[%s] Failed while loading KeyBERT", _timestamp())
-        raise
-
     logger.info(
-        "[%s] initialize_models() completed successfully (Total: %.2f sec)",
+        "[%s] initialize_models() completed successfully (Total: %.2f sec). "
+        "KeyBERT will load lazily on first keyword extraction request.",
         _timestamp(),
         time.perf_counter() - total_start,
     )
 
 
+def get_keyword_model():
+    """Return the cached KeyBERT model, loading it on first use."""
+    global kw_model
+
+    if kw_model is not None:
+        logger.info("[%s] KeyBERT model already cached; reusing existing instance.", _timestamp())
+        return kw_model
+
+    load_start = time.perf_counter()
+    logger.info("[%s] Loading KeyBERT model for the first time...", _timestamp())
+    try:
+        from keybert import KeyBERT
+
+        logger.info("[%s] Beginning KeyBERT initialization for %s", _timestamp(), _KEYBERT_MODEL)
+        kw_model = KeyBERT(model=_KEYBERT_MODEL)
+        logger.info(
+            "[%s] KeyBERT model loaded successfully (%.2f sec).",
+            _timestamp(),
+            time.perf_counter() - load_start,
+        )
+    except Exception:
+        logger.exception("[%s] Failed while loading KeyBERT", _timestamp())
+        raise
+
+    return kw_model
+
+
 def _ensure_initialized() -> None:
-    if nlp is None or kw_model is None:
+    if nlp is None:
         raise RuntimeError(
             "Recommendation models are not initialized. "
             "Call initialize_models() during application startup before using "
@@ -170,7 +134,8 @@ def extract_keywords(processed_text: str) -> list[tuple[str, float]]:
 
     _ensure_initialized()
 
-    raw_keywords = kw_model.extract_keywords(
+    model = get_keyword_model()
+    raw_keywords = model.extract_keywords(
         processed_text,
         keyphrase_ngram_range=(1, 3),
         top_n=10,

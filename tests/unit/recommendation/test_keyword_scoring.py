@@ -5,6 +5,7 @@ import pytest
 from apps.recommendation.services.keyword_scoring import (
     coerce_keyword_scores,
     get_top_keywords,
+    subtract_keyword_scores,
     update_keyword_scores,
 )
 
@@ -33,6 +34,18 @@ def test_update_keyword_scores_custom_increment() -> None:
     result = update_keyword_scores({"nlp": 5}, ["NLP", "LLM"], increment=3)
 
     assert result == {"nlp": 8, "llm": 3}
+
+
+def test_subtract_keyword_scores_removes_and_reduces_scores() -> None:
+    existing = {"python": 4, "fastapi": 2, "rag": 1}
+
+    result = subtract_keyword_scores(
+        existing,
+        {"python": 3, "fastapi": 2, "missing": 1},
+    )
+
+    assert result == {"python": 1, "rag": 1}
+    assert existing == {"python": 4, "fastapi": 2, "rag": 1}
 
 
 def test_get_top_keywords_sorts_by_score_descending() -> None:

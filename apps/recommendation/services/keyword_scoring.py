@@ -64,6 +64,38 @@ def update_keyword_scores(
     return updated
 
 
+def subtract_keyword_scores(
+    existing: dict[str, int],
+    removed: dict[str, int],
+) -> dict[str, int]:
+    """
+    Remove keyword score contributions from an aggregate map.
+
+    Scores are reduced by the values in ``removed``. Keywords whose score
+    reaches zero or below are dropped from the result.
+    """
+    updated = dict(existing)
+
+    for keyword, score in removed.items():
+        normalized = _normalize_keyword(str(keyword))
+        if not normalized:
+            continue
+        try:
+            delta = int(score)
+        except (TypeError, ValueError):
+            delta = 1
+        if delta <= 0:
+            continue
+
+        remaining = updated.get(normalized, 0) - delta
+        if remaining <= 0:
+            updated.pop(normalized, None)
+        else:
+            updated[normalized] = remaining
+
+    return updated
+
+
 def get_top_keywords(keyword_scores: dict[str, int], top_n: int = 5) -> list[str]:
     """
     Return the highest-scoring keywords without their scores.

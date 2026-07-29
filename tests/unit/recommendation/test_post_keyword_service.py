@@ -12,6 +12,7 @@ from apps.recommendation.services.post_keyword_service import (
     build_post_recommendation_payload,
     log_post_keywords_best_effort,
     persist_profile_extracted_keywords,
+    refresh_profile_extracted_keywords,
 )
 
 
@@ -76,6 +77,105 @@ async def test_build_post_recommendation_payload_merges_keyword_scores(
             "hashtags": {"fastapi": 1},
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_build_post_recommendation_payload_replaces_previous_post_keywords(
+    mock_db,
+) -> None:
+    user_id = uuid4()
+    profile = SimpleNamespace(
+        major="Computer Science",
+        minor="Statistics",
+        profile_interests_id=[1],
+        extracted_keywords={
+            "content_keywords": {"old topic": 1, "shared topic": 2},
+            "hashtags": {"oldtag": 1, "sharedtag": 1},
+        },
+    )
+
+    db = mock_db()
+    db.execute = AsyncMock(
+        side_effect=[
+            SimpleNamespace(scalar_one_or_none=lambda: profile),
+            SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: ["AI"])),
+        ]
+    )
+
+    fake_result = {
+        "hashtags": ["ignored"],
+        "keywords": ["new topic", "shared topic"],
+    }
+
+    with patch(
+        "apps.recommendation.services.post_keyword_service._extract_keywords_sync",
+        return_value=fake_result,
+    ):
+        payload = await build_post_recommendation_payload(
+            db,
+            user_id=user_id,
+            content={"caption": "Updated #NewTag #SharedTag"},
+            previous_post_snapshot={
+                "content_keywords": {"old topic": 1, "shared topic": 1},
+                "hashtags": {"oldtag": 1, "sharedtag": 1},
+            },
+        )
+
+    assert payload["content_keywords"] == {
+        "shared topic": 2,
+        "new topic": 1,
+    }
+    assert payload["hashtags"] == {
+        "newtag": 1,
+        "sharedtag": 1,
+    }
+    assert payload["_post_snapshot"]["content_keywords"] == {
+        "new topic": 1,
+        "shared topic": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_profile_extracted_keywords_updates_major_minor_interests(
+    mock_db,
+) -> None:
+    user_id = uuid4()
+    profile = SimpleNamespace(
+        user_id=user_id,
+        major="Computer Science",
+        minor="Data Science",
+        profile_interests_id=[1],
+        extracted_keywords={
+            "content_keywords": {"rag": 4},
+            "hashtags": {"ai": 2},
+            "engagement_keywords": {"paper": 1},
+            "post_ids": ["post-1"],
+            "latest_post_id": "post-1",
+        },
+        keywords_updated_at=None,
+    )
+
+    db = mock_db()
+    db.execute = AsyncMock(
+        side_effect=[
+            SimpleNamespace(scalar_one_or_none=lambda: profile),
+            SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: ["Machine Learning"])),
+        ]
+    )
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+
+    record = await refresh_profile_extracted_keywords(db, user_id=user_id)
+
+    assert record["major"] == ["Computer Science"]
+    assert record["minor"] == ["Data Science"]
+    assert record["interests"] == ["Machine Learning"]
+    assert record["content_keywords"] == {"rag": 4}
+    assert record["hashtags"] == {"ai": 2}
+    assert record["engagement_keywords"] == {"paper": 1}
+    assert record["post_ids"] == ["post-1"]
+    assert record["latest_post_id"] == "post-1"
+    assert profile.keywords_updated_at is not None
 
 
 @pytest.mark.asyncio
@@ -221,6 +321,7 @@ async def test_log_post_keywords_best_effort_prints_profile_only_when_content_em
     db = mock_db()
     db.execute = AsyncMock(
         side_effect=[
+            SimpleNamespace(scalar_one_or_none=lambda: post),
             SimpleNamespace(scalar_one_or_none=lambda: profile),
             SimpleNamespace(scalar_one_or_none=lambda: post),
             SimpleNamespace(scalar_one_or_none=lambda: profile),

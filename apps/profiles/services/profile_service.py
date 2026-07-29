@@ -151,6 +151,11 @@ async def update_profile_me(
     await db.refresh(current_user)
     await db.refresh(profile)
 
+    from apps.recommendation.services.post_keyword_service import (
+        refresh_profile_extracted_keywords_best_effort,
+    )
+    await refresh_profile_extracted_keywords_best_effort(db, user_id=current_user.id)
+
     # Temporarily disabled: profile updated email
     # try:
     #     import logging
@@ -414,6 +419,11 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
     await db.commit()
     await db.refresh(profile)
 
+    from apps.recommendation.services.post_keyword_service import (
+        refresh_profile_extracted_keywords_best_effort,
+    )
+    await refresh_profile_extracted_keywords_best_effort(db, user_id=user.id)
+
     if stream_sync_needed:
         from apps.chat.service import StreamChatError, upsert_stream_user
         from common.exceptions import ApiError
@@ -588,6 +598,11 @@ async def update_user_profile_by_admin_service(
     db.add(profile)
     await db.commit()
     await db.refresh(profile)
+
+    from apps.recommendation.services.post_keyword_service import (
+        refresh_profile_extracted_keywords_best_effort,
+    )
+    await refresh_profile_extracted_keywords_best_effort(db, user_id=user.id)
 
     if stream_sync_needed:
         from apps.chat.service import StreamChatError, upsert_stream_user
