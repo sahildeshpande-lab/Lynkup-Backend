@@ -3,6 +3,8 @@ uvicorn[standard]
 sqlmodel
 sqlalchemy
 asyncpg
+spacy
+KeyBERT
 aiosqlite
 psycopg2-binary
 redis
