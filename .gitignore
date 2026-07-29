@@ -32,5 +32,4 @@ extraction.json
 post_keywords.json
 entrypoints/static/uploads/*
 
-
 alembic/versions/*
