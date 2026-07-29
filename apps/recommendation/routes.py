@@ -9,7 +9,11 @@ from sqlmodel import select
 
 from apps.accounts.db_models import User
 from apps.profiles.db_models.profile_db_model import Profile
-from apps.recommendation.services.semantic_scholar_service import build_search_query, search_papers
+from apps.recommendation.services.recommendation_query_builder import (
+    build_semantic_scholar_query,
+    collect_topics,
+)
+from apps.recommendation.services.semantic_scholar_service import search_papers
 from common.schemas import ApiResponse
 from core.database.session import get_session
 from core.security.auth import get_current_user
@@ -35,50 +39,46 @@ async def search_recommendation_papers(
     ).scalar_one_or_none()
 
     extracted_keywords = profile.extracted_keywords if profile else None
-    normalized_query = build_search_query(extracted_keywords)
-    if not normalized_query:
-        print("[semantic-scholar]")
-        print(f"user_id={current_user.id}")
-        print("query=")
-        print("")
-        print("papers_found=0")
+
+    topics = collect_topics(extracted_keywords or {})
+    query = build_semantic_scholar_query(extracted_keywords or {})
+
+    if not query:
         return ApiResponse(
             status=False,
             message="No profile keywords available for recommendations",
             data={"data": [], "total": 0},
         )
 
-    result, status_code = await search_papers(normalized_query)
+    logger.info(
+        "[semantic-scholar]\nuser_id=%s\ntopics=%s\nquery=\n%s",
+        current_user.id,
+        topics,
+        query,
+    )
+
+    result, status_code = await search_papers(query)
+
+    raw_papers = result.get("data") if isinstance(result, dict) else None
+    papers_found = len(raw_papers) if isinstance(raw_papers, list) else 0
+
+    logger.info(
+        "[semantic-scholar]\nstatus_code=%s\npapers_found=%s",
+        status_code,
+        papers_found,
+    )
 
     if status_code == 429:
         logger.warning(
             "[semantic-scholar] rate limit exceeded user_id=%s query=%r",
             current_user.id,
-            normalized_query,
+            query,
         )
         return ApiResponse(
             status=False,
             message="Semantic Scholar rate limit exceeded. Please try again in a few seconds.",
             data={"data": [], "total": 0},
         )
-
-    raw_papers = result.get("data") if isinstance(result, dict) else None
-    papers_found = len(raw_papers) if isinstance(raw_papers, list) else 0
-
-    print("[semantic-scholar]")
-    print(f"user_id={current_user.id}")
-    print("query=")
-    print(normalized_query)
-    print(f"status_code={status_code}")
-    print(f"papers_found={papers_found}")
-
-    logger.info(
-        "[semantic-scholar]\nuser_id=%s\nquery=\"%s\"\nstatus_code=%s\npapers_found=%s",
-        current_user.id,
-        normalized_query,
-        status_code,
-        papers_found,
-    )
 
     message = "Papers fetched successfully" if papers_found else "No papers found"
     return ApiResponse(message=message, data=result)

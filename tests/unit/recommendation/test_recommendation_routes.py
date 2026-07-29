@@ -75,8 +75,9 @@ def test_search_recommendation_papers_returns_raw_semantic_scholar_response(monk
     }
 
     async def _mock_search_papers(query: str, **kwargs):
-        assert "artificial intelligence" in query
-        assert "semantic search" in query
+        q = query.lower()
+        assert "artificial intelligence" in q
+        assert "semantic search" in q
         return raw_response, 200
 
     monkeypatch.setattr(recommendation_routes, "search_papers", _mock_search_papers)
