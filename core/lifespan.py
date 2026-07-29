@@ -28,11 +28,18 @@ async def lifespan(app: FastAPI):
     # Load email settings from .env early so SendGrid config is available.
     from core.email.config import settings as email_settings
 
+    logger.info("Importing recommendation algorithm module...")
     from apps.recommendation.services import algorithm as recommendation_algorithm
 
-    logger.info("Loading recommendation models...")
-    await asyncio.to_thread(recommendation_algorithm.initialize_models)
-    logger.info("Recommendation models loaded successfully")
+    logger.info("Recommendation algorithm module imported successfully.")
+
+    try:
+        logger.info("Loading recommendation models...")
+        await asyncio.to_thread(recommendation_algorithm.initialize_models)
+        logger.info("Recommendation models loaded successfully.")
+    except Exception:
+        logger.exception("Recommendation model initialization failed during application startup.")
+        raise
 
     if email_settings.is_sendgrid_configured:
         logger.info("SendGrid email delivery is configured.")

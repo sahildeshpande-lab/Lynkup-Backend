@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 nlp = None
 kw_model = None
@@ -10,14 +13,30 @@ def initialize_models() -> None:
     """Load spaCy and KeyBERT models once during application startup."""
     global nlp, kw_model
 
+    logger.info("Entered initialize_models()")
+
     if nlp is not None and kw_model is not None:
         return
 
-    import spacy
-    from keybert import KeyBERT
+    try:
+        logger.info("Loading spaCy model...")
+        import spacy
 
-    nlp = spacy.load("en_core_web_sm")
-    kw_model = KeyBERT(model="all-MiniLM-L6-v2")
+        nlp = spacy.load("en_core_web_sm")
+        logger.info("spaCy model loaded successfully.")
+    except Exception:
+        logger.exception("Failed to load spaCy model during recommendation startup.")
+        raise
+
+    try:
+        logger.info("Loading KeyBERT model...")
+        from keybert import KeyBERT
+
+        kw_model = KeyBERT(model="all-MiniLM-L6-v2")
+        logger.info("KeyBERT model loaded successfully.")
+    except Exception:
+        logger.exception("Failed to load KeyBERT model during recommendation startup.")
+        raise
 
 
 def _ensure_initialized() -> None:
