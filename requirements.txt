@@ -4,7 +4,9 @@ sqlmodel
 sqlalchemy
 asyncpg
 spacy
-KeyBERT
+sentence-transformers
+transformers
+torch
 aiosqlite
 psycopg2-binary
 redis
