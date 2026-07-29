@@ -15,6 +15,41 @@ from .response_service import build_user_base_response
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
+
+async def _apply_country_id_update(
+    profile,
+    country_id: str | None,
+    db: AsyncSession,
+) -> None:
+    from fastapi import HTTPException, status
+    from sqlmodel import select
+    from apps.profiles.db_models.country_db_model import Country
+
+    if country_id is None:
+        return
+
+    if country_id:
+        try:
+            country_uuid = UUID(str(country_id))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid country_id",
+            ) from exc
+
+        country = (
+            await db.execute(select(Country).where(Country.id == country_uuid))
+        ).scalar_one_or_none()
+        if not country:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid country_id",
+            )
+        profile.country_id = country_uuid
+    else:
+        profile.country_id = None
+
+
 async def get_profile_me(user: User, db: AsyncSession) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
     from sqlmodel import select
@@ -342,6 +377,8 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
         else:
             profile.university_id = None
 
+    await _apply_country_id_update(profile, payload.country_id, db)
+
     if payload.education_level_id is not None:
         from common.enums import EducationLevel
         try:
@@ -505,6 +542,8 @@ async def update_user_profile_by_admin_service(
                 )
         else:
             profile.university_id = None
+
+    await _apply_country_id_update(profile, payload.country_id, db)
 
     if payload.education_level_id is not None:
         from common.enums import EducationLevel

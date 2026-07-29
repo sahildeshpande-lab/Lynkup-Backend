@@ -440,3 +440,38 @@ async def test_get_my_profile_service_relationship_flags() -> None:
     finally:
         await engine.dispose()
 
+
+@pytest.mark.asyncio
+async def test_apply_country_id_update_sets_valid_country(mock_db) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from uuid import uuid4
+
+    from apps.profiles.services.profile_service import _apply_country_id_update
+
+    country_uuid = uuid4()
+    profile = SimpleNamespace(country_id=None)
+    db = mock_db()
+    db.execute = AsyncMock(
+        return_value=SimpleNamespace(scalar_one_or_none=lambda: SimpleNamespace(id=country_uuid))
+    )
+
+    await _apply_country_id_update(profile, str(country_uuid), db)
+
+    assert profile.country_id == country_uuid
+
+
+@pytest.mark.asyncio
+async def test_apply_country_id_update_clears_country(mock_db) -> None:
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from apps.profiles.services.profile_service import _apply_country_id_update
+
+    profile = SimpleNamespace(country_id=uuid4())
+    db = mock_db()
+
+    await _apply_country_id_update(profile, "", db)
+
+    assert profile.country_id is None
+
