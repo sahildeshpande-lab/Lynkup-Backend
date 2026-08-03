@@ -46,6 +46,24 @@ def test_build_connection_accepted_payload() -> None:
     }
 
 
+def test_build_connection_declined_payload() -> None:
+    notification_id = uuid4()
+    sender_id = uuid4()
+
+    payload = NotificationPayloadBuilder.build(
+        notification_type="CONNECTION_DECLINED",
+        notification_id=notification_id,
+        sender_user_id=sender_id,
+    )
+
+    assert payload == {
+        "notification_type": "CONNECTION_DECLINED",
+        "notification_id": str(notification_id),
+        "sender_user_id": str(sender_id),
+        "deep_link": {"screen": "connections", "tab": "requests"},
+    }
+
+
 def test_build_announcement_extends_existing_payload() -> None:
     notification_id = uuid4()
     campaign_id = uuid4()

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 from datetime import datetime, timezone
+import re 
+
 
 logger = logging.getLogger(__name__)
 
@@ -83,18 +84,20 @@ def get_keyword_model():
 
 def _ensure_initialized() -> None:
     if nlp is None:
-        raise RuntimeError(
-            "Recommendation models are not initialized. "
-            "Call initialize_models() during application startup before using "
-            "keyword extraction."
-        )
+        try:
+            initialize_models()
+        except Exception as exc:
+            raise RuntimeError(
+                "Recommendation models are not initialized. "
+                "Install spaCy and the configured language model before using "
+                "keyword extraction."
+            ) from exc
 
 
 def extract_hashtags(text: str) -> list[str]:
-    hashtags = re.findall(r"#([A-Za-z0-9_]+)", text)
+    from apps.feed.content_utils import extract_hashtags as extract_content_hashtags
 
-    # Remove duplicates while preserving order
-    return list(dict.fromkeys(hashtags))
+    return extract_content_hashtags(caption=text, content_html=None)
 
 
 def remove_hashtags(text: str) -> str:
@@ -162,13 +165,26 @@ def extract_post_keywords(text: str) -> dict:
     cleaned_text = remove_hashtags(text)
 
     processed_text = preprocess_text(cleaned_text)
+    logger.info(
+        "[post-keyword-extraction]\nProcessed Text\n%s",
+        processed_text,
+    )
+    logger.info(
+        "[post-keyword-extraction]\nExtracted Hashtags\n%s",
+        hashtags,
+    )
 
     keywords_with_scores = extract_keywords(processed_text)
+    keywords = [keyword for keyword, _ in keywords_with_scores]
+    logger.info(
+        "[post-keyword-extraction]\nExtracted Keywords\n%s",
+        keywords,
+    )
 
     return {
         "processed_text": processed_text,
         "hashtags": hashtags,
-        "keywords": [keyword for keyword, _ in keywords_with_scores],
+        "keywords": keywords,
         "keywords_with_scores": keywords_with_scores,
     }
 

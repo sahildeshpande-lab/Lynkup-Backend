@@ -175,6 +175,18 @@ async def _topics_from_minor(_db: AsyncSession, profile: Profile) -> set[str]:
     return {topic} if topic else set()
 
 
+async def _topics_from_country(db: AsyncSession, profile: Profile) -> set[str]:
+    if not profile.country_id:
+        return set()
+    country = (
+        await db.execute(select(Country).where(Country.id == profile.country_id))
+    ).scalar_one_or_none()
+    if country is None:
+        return set()
+    topic = format_topic("country", country.name or "")
+    return {topic} if topic else set()
+
+
 async def _topics_from_hashtags(db: AsyncSession, profile: Profile) -> set[str]:
     from apps.feed.db_models.hashtag_db_model import Hashtag
     from apps.feed.db_models.post_db_model import Post
@@ -249,6 +261,7 @@ _TOPIC_BUILDERS: list[TopicBuilder] = [
     _topics_from_university,
     _topics_from_major,
     _topics_from_minor,
+    _topics_from_country,
     _topics_from_education_level,
     _topics_from_interests,
     _topics_from_hashtags,
@@ -259,6 +272,7 @@ _TOPIC_PAYLOAD_FIELDS: tuple[str, ...] = (
     "major",
     "minor",
     "university_id",
+    "country_id",
     "education_level_id",
     "academic_interests",
 )
@@ -469,6 +483,37 @@ class TopicService:
             sorted(topics_to_unsubscribe),
         )
         return result
+
+    @staticmethod
+    async def unsubscribe_device_from_user_topics(
+        db: AsyncSession,
+        user_id: UUID,
+        *,
+        fcm_token: str,
+    ) -> None:
+        """Best-effort: detach one device FCM token from all topics for this user.
+
+        Used on logout so the device stops receiving topic pushes after sign-out.
+        Never raises.
+        """
+        token = (fcm_token or "").strip()
+        if not token:
+            return
+        try:
+            profile = (
+                await db.execute(select(Profile).where(Profile.user_id == user_id))
+            ).scalar_one_or_none()
+            topics = (
+                await TopicService.build_topics(db, profile) if profile is not None else set()
+            )
+            if not topics:
+                return
+            TopicService.unsubscribe([token], topics)
+        except Exception:
+            logger.exception(
+                "Failed to unsubscribe device from Firebase topics on logout user_id=%s",
+                user_id,
+            )
 
     @staticmethod
     def _apply_topic_operation(

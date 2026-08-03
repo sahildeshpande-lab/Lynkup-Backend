@@ -375,7 +375,6 @@ class AccountExistsException(Exception):
 
 
 async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dict, bool]:
-    from core.images import normalize_image_name
     from core.auth.services import verify_firebase_token
     from sqlmodel import select
     from sqlalchemy.orm import selectinload
@@ -478,13 +477,11 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
         user.updated_at = now
         db.add(user)
 
-        # 7. Review Profile Photo Flow:
-        # Frontend uploads the image separately and sends only an S3 key/URL in payload.profilePhotoUrl.
-        # Persist normalize_image_name(payload.profilePhotoUrl) directly without duplicate uploads to S3.
+        # Persist Google/Apple profile photo URL as-is on profiles.profile_photo_url.
         stmt_profile = select(Profile).where(Profile.user_id == user.id)
         profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-        if profile and payload.profilePhotoUrl:
-            profile.profile_photo_url = normalize_image_name(payload.profilePhotoUrl)
+        if profile and payload.profile_photo_url:
+            profile.profile_photo_url = payload.profile_photo_url
             db.add(profile)
             await db.flush()
             from apps.profiles.services import calculate_completeness_score
@@ -537,11 +534,10 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
         user_id=user.id,
         first_name=first_name,
         last_name=last_name,
+        profile_photo_url=payload.profile_photo_url,
         completeness_score=0,
         updated_at=now
     )
-    if payload.profilePhotoUrl:
-        profile.profile_photo_url = normalize_image_name(payload.profilePhotoUrl)
 
     db.add(profile)
     await db.flush()
@@ -759,9 +755,12 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     if needs_otp:
         now = _now()
         otp = _generate_otp()
+        already_active = user.status == UserStatus.active
         user.email_otp = otp
         user.email_otp_created_at = now
-        user.status = UserStatus.pending
+        # Never downgrade an active account back to pending.
+        if not already_active:
+            user.status = UserStatus.pending
         user.updated_at = now
         db.add(user)
 
@@ -1000,6 +999,22 @@ async def logout(
     ).scalar_one_or_none()
 
     if installation:
+        fcm_token = (installation.fcm_token or "").strip()
+        if fcm_token:
+            try:
+                from apps.notifications.services.topic_service import TopicService
+
+                await TopicService.unsubscribe_device_from_user_topics(
+                    db,
+                    user.id,
+                    fcm_token=fcm_token,
+                )
+            except Exception:
+                logger.exception(
+                    "Topic unsubscribe failed during logout user_id=%s",
+                    user.id,
+                )
+        installation.fcm_token = None
         installation.is_active = False
         installation.last_active_at = _now()
         db.add(installation)
@@ -1039,8 +1054,7 @@ async def logout_all(current_user: User, db: AsyncSession) -> dict:
     rows = (await db.execute(select(RefreshToken).where(RefreshToken.user_id == current_user.id, RefreshToken.revoked_at == None))).scalars().all()
     for row in rows:
         await _revoke_refresh_token_row(db, row)
-        
-    current_user.status = UserStatus.pending
+
     current_user.updated_at = _now()
     db.add(current_user)
     await db.commit()

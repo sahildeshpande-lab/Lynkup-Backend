@@ -28,8 +28,6 @@ tech_stackl
 .scannerwork
 .agents
 sonar-project.properties
-extraction.json
-post_keywords.json
 entrypoints/static/uploads/*
 
 alembic/versions/*

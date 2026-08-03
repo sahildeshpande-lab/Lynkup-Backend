@@ -362,6 +362,66 @@ async def get_preferences_by_user_id(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+def _merge_category_preferences(
+    defaults: dict[str, bool],
+    stored: dict[str, Any] | None,
+) -> dict[str, bool]:
+    """Overlay stored user values onto active category defaults."""
+    merged = dict(defaults)
+    if stored:
+        for key in list(merged.keys()):
+            if key in stored:
+                merged[key] = bool(stored[key])
+    return merged
+
+
+async def filter_users_eligible_for_push(
+    db: AsyncSession,
+    user_ids: list[UUID],
+    *,
+    category: str,
+) -> list[UUID]:
+    """
+    Return user IDs that should receive push for ``category``.
+
+    Requires ``push_enabled`` and the merged category preference to be true.
+    Users without a preference row use catalog defaults (typically all enabled).
+    """
+    if not user_ids:
+        return []
+
+    category_key = category.strip().upper()
+    defaults = await get_default_category_preferences(db)
+
+    stmt = select(NotificationPreference).where(
+        NotificationPreference.user_id.in_(user_ids)
+    )
+    preferences = {
+        pref.user_id: pref
+        for pref in (await db.execute(stmt)).scalars().all()
+    }
+
+    eligible: list[UUID] = []
+    seen: set[UUID] = set()
+    for user_id in user_ids:
+        if user_id in seen:
+            continue
+        seen.add(user_id)
+
+        pref = preferences.get(user_id)
+        if pref is None:
+            if defaults.get(category_key, True):
+                eligible.append(user_id)
+            continue
+        if not pref.push_enabled:
+            continue
+        merged = _merge_category_preferences(defaults, pref.category_preferences)
+        if merged.get(category_key, True):
+            eligible.append(user_id)
+
+    return eligible
+
+
 async def create_preferences(
     db: AsyncSession,
     *,

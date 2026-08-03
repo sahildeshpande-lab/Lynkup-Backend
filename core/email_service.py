@@ -12,8 +12,6 @@ from uuid import UUID
 from core.email.config import _PLACEHOLDER_FROM_EMAIL, settings as email_settings
 
 logger = logging.getLogger(__name__)
-# TEMP: silence email_service console noise; remove when debugging email flows again.
-logger.disabled = True
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "templates"
 BRAND_COLORS = {
@@ -451,7 +449,11 @@ def _otp_template_details(otp_purpose: str) -> tuple[str, str]:
 
 
 def _build_otp_display_html(otp: str, brand_blue: str) -> str:
-    """Build a content-sized OTP card for embedding inside a centered parent <td>.
+    """Build a responsive OTP card for embedding inside a centered parent <td>.
+
+    Desktop: content-sized card with original padding, border, and font sizes.
+    Mobile: fluid width (100% of available space) with equal side margins via
+    the parent ``otp-wrapper`` and media-query rules in ``base_email.html``.
 
     Digits are rendered as separate table cells so any OTP length (4/5/6/8)
     works consistently across Gmail, Apple Mail, Outlook, Yahoo, and Samsung Mail.
@@ -460,31 +462,30 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
 
     digit_cells = "".join(
         (
-            '<td align="center" '
-            'style="padding:0 6px; font-size:30px; font-weight:700; color:#0F172A; '
-            "font-family:'Courier New', Courier, monospace; line-height:1;\""
+            '<td class="otp-digit" align="center" '
+            'style="padding:0 6px;font-size:30px;font-weight:700;color:#0F172A;'
+            "font-family:'Courier New',Courier,monospace;line-height:1;\""
             f">{digit}</td>"
         )
         for digit in digits
     )
 
-    # Outermost element is the OTP card itself (content-sized, not width=100%).
-    # Parent template wraps this in a full-width <td align="center">.
+    # Outermost table is content-sized on desktop; mobile CSS sets width:100%.
     return (
-        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
-        'align="center" style="margin:0 auto; border-collapse:collapse;">'
+        '<table class="otp-outer-table" role="presentation" cellpadding="0" cellspacing="0" border="0" '
+        'align="center" style="margin:0 auto;border-collapse:collapse;">'
         "<tr>"
         f'<td class="otp-card" align="center" '
-        f'style="padding:24px; background-color:#F8FAFC; border:2px dashed {brand_blue}; '
-        'border-radius:12px; text-align:center;">'
-        f'<p class="otp-label" style="font-size:10px; font-weight:600; color:{brand_blue}; '
-        "letter-spacing:2px; text-transform:uppercase; "
-        "font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; "
-        'margin:0 0 16px; text-align:center;">'
-        "ONE-TIME PASSWORD"
+        f'style="padding:24px;background-color:#F8FAFC;border:2px dashed {brand_blue};'
+        'border-radius:12px;text-align:center;">'
+        f'<p class="otp-label" style="font-size:10px;font-weight:600;color:{brand_blue};'
+        "letter-spacing:2px;text-transform:uppercase;"
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
+        'margin:0 0 16px;text-align:center;">'
+        "Your OTP"
         "</p>"
         '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
-        'align="center" style="margin:0 auto; border-collapse:collapse;">'
+        'align="center" style="margin:0 auto;border-collapse:collapse;">'
         "<tr>"
         f"{digit_cells}"
         "</tr>"
@@ -493,7 +494,6 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
         "</tr>"
         "</table>"
     )
-
 
 def build_otp_email_html(otp: str, otp_purpose: str = "email_verification") -> str:
     title, hero_text = _otp_template_details(otp_purpose)

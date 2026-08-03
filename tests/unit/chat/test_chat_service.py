@@ -12,6 +12,8 @@ from apps.chat.service import (
     StreamChatError,
     build_stream_user_payload,
     generate_stream_token,
+    revoke_stream_user_tokens,
+    revoke_stream_user_tokens_best_effort,
     sync_stream_user_on_auth,
 )
 from apps.profiles.db_models.profile_db_model import Profile
@@ -79,6 +81,42 @@ async def test_generate_stream_token_returns_non_expiring_token(monkeypatch) -> 
 
     assert token_data.stream_token == "stream-token-123"
     mock_stream_client.create_token.assert_called_once_with(str(user.id))
+
+
+@pytest.mark.asyncio
+async def test_revoke_stream_user_tokens_calls_stream_api(monkeypatch) -> None:
+    user = User(
+        id=uuid4(),
+        email="user@example.com",
+        firebase_uid="firebase-uid",
+    )
+    monkeypatch.setattr("apps.chat.service.settings.stream_api_key", "test-api-key")
+    monkeypatch.setattr("apps.chat.service.settings.stream_secret_key", "test-secret-key")
+
+    mock_stream_client = MagicMock()
+    with patch(
+        "apps.chat.service.get_stream_client",
+        return_value=mock_stream_client,
+    ):
+        await revoke_stream_user_tokens(user)
+
+    mock_stream_client.revoke_user_token.assert_called_once()
+    args, _kwargs = mock_stream_client.revoke_user_token.call_args
+    assert args[0] == str(user.id)
+
+
+@pytest.mark.asyncio
+async def test_revoke_stream_user_tokens_best_effort_does_not_raise(monkeypatch) -> None:
+    user = User(
+        id=uuid4(),
+        email="user@example.com",
+        firebase_uid="firebase-uid",
+    )
+    with patch(
+        "apps.chat.service.revoke_stream_user_tokens",
+        new=AsyncMock(side_effect=StreamChatError("not configured")),
+    ):
+        await revoke_stream_user_tokens_best_effort(user)
 
 
 @pytest.mark.asyncio

@@ -27,7 +27,7 @@ from typing import Any
 
 
 def _normalize_keyword(keyword: str) -> str:
-    return keyword.strip().lower()
+    return " ".join((keyword or "").strip().lower().split())
 
 
 def update_keyword_scores(
@@ -134,7 +134,9 @@ def coerce_keyword_scores(value: Any) -> dict[str, int]:
                 score = int(raw_score)
             except (TypeError, ValueError):
                 score = 1
-            scores[key] = scores.get(key, 0) + max(score, 0)
+            if score <= 0:
+                continue
+            scores[key] = scores.get(key, 0) + score
         return scores
 
     if isinstance(value, list):

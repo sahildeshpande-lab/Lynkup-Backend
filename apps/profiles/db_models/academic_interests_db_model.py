@@ -70,9 +70,9 @@ class AcademicInterest(SQLModel, table=True):
 
     __table_args__ = (
         UniqueConstraint(
-            "name",
             "education_level_id",
-            name="uq_academic_interests_name_education_level",
+            "name",
+            name="uq_academic_interests_education_level_id_name",
         ),
         Index(
             "ix_academic_interests_name_trgm",

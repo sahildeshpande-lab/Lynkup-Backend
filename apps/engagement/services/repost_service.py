@@ -83,7 +83,7 @@ async def toggle_repost(
             repost_count = await update_post_repost_count(db, post_id, 1)
             await increment_posts_count_for_user(db, user_id)
             await db.commit()
-            from apps.recommendation.services.engagement_keyword_service import (
+            from apps.recommendations.services.engagement_keyword_service import (
                 apply_engagement_keyword_update_best_effort,
             )
 
@@ -152,7 +152,7 @@ async def toggle_repost(
             repost_count = await update_post_repost_count(db, post_id, -1)
             await decrement_posts_count_for_user(db, user_id)
             await db.commit()
-            from apps.recommendation.services.engagement_keyword_service import (
+            from apps.recommendations.services.engagement_keyword_service import (
                 apply_engagement_keyword_update_best_effort,
             )
 

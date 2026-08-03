@@ -106,13 +106,18 @@ class PostContentData(BaseModel):
 
 
 class RepostedPostData(BaseModel):
-    """Original post payload nested under a repost feed/list item."""
+    """Original post payload nested under a repost feed/list item.
+
+    ``profile_visibility`` is the *original post author's* visibility only.
+    """
     id: UUID
     author_user_id: UUID
+    author_name: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     profile_photo_url: Optional[str] = None
     profilePhoto_url: Optional[str] = None
+    profile_visibility: str = "public"
     is_connected: bool = False
     is_requested: bool = False
     university: Optional[str] = None
@@ -126,6 +131,7 @@ class RepostedPostData(BaseModel):
     content: PostContentData
     created_at: datetime
     updated_at: datetime
+    is_edited: bool = False
     like_count: int = 0
     repost_count: int = 0
     share_count: int = 0
@@ -145,12 +151,20 @@ class RepostedPostData(BaseModel):
 
 
 class PostDetailData(BaseModel):
+    """Feed/list post payload.
+
+    ``profile_visibility`` is the feed-item author's visibility (post author, or
+    the reposting user when this object is a repost card). For reposts, the
+    original author's visibility is only under ``reposted_data.profile_visibility``.
+    """
     id: UUID
     author_user_id: UUID
+    author_name: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     profile_photo_url: Optional[str] = None
     profilePhoto_url: Optional[str] = None
+    profile_visibility: str = "public"
     is_connected: bool = False
     is_requested: bool = False
     university: Optional[str] = None
@@ -163,6 +177,7 @@ class PostDetailData(BaseModel):
     content: PostContentData
     created_at: datetime
     updated_at: datetime
+    is_edited: bool = False
     like_count: int = 0
     repost_count: int = 0
     share_count: int = 0

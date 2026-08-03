@@ -420,6 +420,16 @@ async def create_notification(
 
     preference = await _get_or_create_preferences(db, recipient_user_id)
     category_enabled = await _is_category_enabled(db, preference, type_name)
+    logger.info(
+        "Notification dispatch prepared type=%s recipient_user_id=%s sender_user_id=%s "
+        "push_enabled=%s in_app_enabled=%s category_enabled=%s",
+        type_name,
+        recipient_user_id,
+        sender_user_id,
+        preference.push_enabled,
+        preference.in_app_enabled,
+        category_enabled,
+    )
 
     notification: Notification | None = None
     data_payload: dict[str, Any] = NotificationPayloadBuilder.build(
@@ -450,6 +460,12 @@ async def create_notification(
     if preference.push_enabled and category_enabled:
         try:
             tokens = await get_active_fcm_tokens_for_users(db, [recipient_user_id])
+            logger.info(
+                "Push notification token lookup type=%s recipient_user_id=%s token_count=%s",
+                type_name,
+                recipient_user_id,
+                len(tokens),
+            )
             if tokens:
                 result = send_push_notifications(
                     tokens,
@@ -464,12 +480,26 @@ async def create_notification(
                     result.get("successful_count", 0),
                     result.get("failed_count", 0),
                 )
+            else:
+                logger.warning(
+                    "Push notification skipped type=%s recipient_user_id=%s reason=no_active_fcm_tokens",
+                    type_name,
+                    recipient_user_id,
+                )
         except Exception:
             logger.exception(
                 "Push notification failed type=%s recipient_user_id=%s",
                 type_name,
                 recipient_user_id,
             )
+    else:
+        logger.info(
+            "Push notification skipped type=%s recipient_user_id=%s push_enabled=%s category_enabled=%s",
+            type_name,
+            recipient_user_id,
+            preference.push_enabled,
+            category_enabled,
+        )
 
     try:
         await db.commit()

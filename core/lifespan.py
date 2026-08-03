@@ -23,21 +23,21 @@ async def lifespan(app: FastAPI):
 
     if db_settings.auto_init_db:
         await init_db()
-        # try:
-        #     logger.info("Start DB Migrations")
-        #     await run_db_migrations_programmatically()
-        #     logger.info("Migrations completed successfully")
-        # except Exception as e:
-        #     logger.exception(f"Migration startup failed: {e}")
-        #     raise
-        # logger.info(f"Initialized database at {db_settings.db_host}")
+        try:
+            logger.info("Start DB Migrations")
+            await run_db_migrations_programmatically()
+            logger.info("Migrations completed successfully")
+        except Exception as e:
+            logger.exception(f"Migration startup failed: {e}")
+            raise
+        logger.info(f"Initialized database at {db_settings.db_host}")
 
     # Load email settings from .env early so SendGrid config is available.
     from core.email.config import settings as email_settings
 
-    # Temporarily disabled: recommendation model startup (spaCy).
+    # Temporarily disabled: recommendation model startup (spaCy / KeyBERT).
     # logger.info("[%s] Importing recommendation algorithm module...", _timestamp())
-    # from apps.recommendation.services import algorithm as recommendation_algorithm
+    # from apps.recommendations.services import algorithm as recommendation_algorithm
     #
     # logger.info("[%s] Recommendation algorithm module imported successfully.", _timestamp())
     #

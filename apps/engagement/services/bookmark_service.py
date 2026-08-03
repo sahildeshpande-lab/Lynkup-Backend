@@ -47,7 +47,7 @@ async def update_bookmark(
         try:
             await create_bookmark(db, user_id, payload.post_id)
             await db.commit()
-            from apps.recommendation.services.engagement_keyword_service import (
+            from apps.recommendations.services.engagement_keyword_service import (
                 apply_engagement_keyword_update_best_effort,
             )
 
@@ -86,7 +86,7 @@ async def update_bookmark(
         try:
             await delete_bookmark(db, existing)
             await db.commit()
-            from apps.recommendation.services.engagement_keyword_service import (
+            from apps.recommendations.services.engagement_keyword_service import (
                 apply_engagement_keyword_update_best_effort,
             )
 

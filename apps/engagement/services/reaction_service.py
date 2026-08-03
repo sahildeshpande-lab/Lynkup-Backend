@@ -115,7 +115,7 @@ async def upsert_post_reaction(
         like_count = await update_post_like_count(db, payload.post_id, delta)
         await db.commit()
         if new_type == ReactionType.like and previous_type != ReactionType.like:
-            from apps.recommendation.services.engagement_keyword_service import (
+            from apps.recommendations.services.engagement_keyword_service import (
                 apply_engagement_keyword_update_best_effort,
             )
 
@@ -127,7 +127,7 @@ async def upsert_post_reaction(
                 added=True,
             )
         elif previous_type == ReactionType.like and new_type != ReactionType.like:
-            from apps.recommendation.services.engagement_keyword_service import (
+            from apps.recommendations.services.engagement_keyword_service import (
                 apply_engagement_keyword_update_best_effort,
             )
 

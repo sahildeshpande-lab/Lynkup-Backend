@@ -1,0 +1,95 @@
+name: Staging Deployment
+
+on:
+  push:
+    branches: [develop]
+
+concurrency:
+  group: staging-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/kampulynk_test?sslmode=disable
+  AUTO_INIT_DB: "true"
+  DB_USER: postgres
+  DB_PASSWORD: postgres
+  DB_HOST: localhost
+  DB_PORT: "5432"
+  DB_NAME: kampulynk_test
+  DB_SSLMODE: disable
+  REDIS_HOST: localhost
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: ""
+  REDIS_URL: redis://localhost:6379/0
+  JWT_SECRET: staging-ci-test-secret
+  JWT_ALGORITHM: HS256
+  FIREBASE_PROJECT_ID: kampulynk-staging
+  FIREBASE_WEB_API_KEY: staging-test-key
+
+jobs:
+  deploy-staging:
+    name: Test, Build & Deploy Staging
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 35
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: kampulynk_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d kampulynk_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade cryptography pyOpenSSL
+          python -m pip install -r requirements.txt
+
+      - name: Validate environment template
+        run: test -f .env.example
+
+      - name: Initialize test database
+        run: python -c "import asyncio; from core.database.init import init_db; asyncio.run(init_db())"
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Build Docker image
+        run: docker build -t kampulynk-backend:${{ github.sha }} .
+
+      - name: Deploy the app to staging
+        uses: digitalocean/app_action/deploy@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_KAMPULYNK_STAGING_ACCESS_TOKEN }}
+          app_name: ${{ vars.DIGITALOCEAN_STAGING_APP_NAME || 'kampulynk-stage-app' }}
+          print_build_logs: true
+          print_deploy_logs: true

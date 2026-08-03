@@ -30,12 +30,12 @@ def upgrade() -> None:
     )
     reactiontype.create(op.get_bind(), checkfirst=True)
 
-    op.execute(
-        sa.text(
-            "UPDATE post_reactions SET reaction_type = 'like' "
-            "WHERE reaction_type = 'love'"
-        )
-    )
+    # op.execute(
+    #     sa.text(
+    #         "UPDATE post_reactions SET reaction_type = 'like' "
+    #         "WHERE reaction_type = 'love'"
+    #     )
+    # )
 
     op.alter_column(
         "post_reactions",

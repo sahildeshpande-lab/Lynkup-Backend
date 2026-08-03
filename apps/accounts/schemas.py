@@ -21,6 +21,15 @@ class SocialAuthRequest(BaseModel):
     user: Role = "user"
     device_id: str
     fullName: Optional[str] = None
+    platform: str | None = Field(
+        default=None,
+        max_length=20,
+        description="Optional client platform (e.g. android, ios).",
+    )
+    fcm_token: str | None = Field(
+        default=None,
+        description="Optional Firebase Cloud Messaging device token.",
+    )
     # Google / Apple avatar URL — stored as-is on profiles.profile_photo_url.
     profile_photo_url: Optional[str] = None
 
@@ -31,6 +40,14 @@ class SocialAuthRequest(BaseModel):
         if not normalized:
             raise ValueError("device_id cannot be blank")
         return normalized
+
+    @field_validator("platform", "fcm_token")
+    @classmethod
+    def normalize_optional_strings(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
     @field_validator("profile_photo_url")
     @classmethod

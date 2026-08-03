@@ -21,12 +21,13 @@ async def test_logout_deactivates_current_installation(db_scalar_result, db_scal
     installation = MagicMock()
     installation.is_active = True
     installation.last_active_at = None
+    installation.fcm_token = "fcm-device-token"
 
     mock_db = AsyncMock()
     mock_db.execute = AsyncMock(
         side_effect=[
             db_scalar_result(user),
-            db_scalar_result(installation),
+            db_scalars_result([installation]),
             db_scalars_result([]),
         ]
     )
@@ -35,6 +36,11 @@ async def test_logout_deactivates_current_installation(db_scalar_result, db_scal
     mock_db.commit = AsyncMock()
 
     monkeypatch.setattr("apps.accounts.services.revoke_firebase_tokens", lambda *args, **kwargs: None)
+    unsubscribe = AsyncMock()
+    monkeypatch.setattr(
+        "apps.notifications.services.topic_service.TopicService.unsubscribe_device_from_user_topics",
+        unsubscribe,
+    )
 
     result = await logout(
         LogoutRequest(firebaseId="firebase-token", device_id="device-123"),
@@ -45,6 +51,8 @@ async def test_logout_deactivates_current_installation(db_scalar_result, db_scal
     assert result is None
     mock_db.delete.assert_not_called()
     assert installation.is_active is False
+    assert installation.fcm_token is None
+    unsubscribe.assert_awaited_once()
     # Manual logout keeps email verification so the same device skips OTP next time.
     assert user.email_verified_at == "verified"
     assert user.email_otp is None

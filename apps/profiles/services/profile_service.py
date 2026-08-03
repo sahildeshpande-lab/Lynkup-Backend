@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
 from common.enums import UserStatus, OnboardingStatus, EducationLevel
 
+from apps.profiles.normalization import normalize_major_minor
+
 from .completeness_service import calculate_completeness_score
 from .interest_service import _resolve_academic_interest_ids
 from .response_service import build_user_base_response
@@ -112,7 +114,7 @@ async def update_profile_me(
     # Major
     #
     if payload.major is not None:
-        profile.major = payload.major
+        profile.major = normalize_major_minor(payload.major)
 
     #
     # University
@@ -151,10 +153,12 @@ async def update_profile_me(
     await db.refresh(current_user)
     await db.refresh(profile)
 
-    from apps.recommendation.services.post_keyword_service import (
+    from apps.recommendations.services.post_keyword_service import (
         refresh_profile_extracted_keywords_best_effort,
     )
     await refresh_profile_extracted_keywords_best_effort(db, user_id=current_user.id)
+
+    
 
     # Temporarily disabled: profile updated email
     # try:
@@ -366,9 +370,9 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
         or "profile_photo_key" in payload.model_fields_set
     )
     if payload.major is not None:
-        profile.major = payload.major
+        profile.major = normalize_major_minor(payload.major)
     if payload.minor is not None:
-        profile.minor = payload.minor
+        profile.minor = normalize_major_minor(payload.minor)
     if payload.bio is not None:
         profile.bio = payload.bio
 
@@ -419,23 +423,16 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
     await db.commit()
     await db.refresh(profile)
 
-    from apps.recommendation.services.post_keyword_service import (
+    from apps.recommendations.services.post_keyword_service import (
         refresh_profile_extracted_keywords_best_effort,
     )
     await refresh_profile_extracted_keywords_best_effort(db, user_id=user.id)
 
     if stream_sync_needed:
-        from apps.chat.service import StreamChatError, upsert_stream_user
-        from common.exceptions import ApiError
+        from apps.chat.service import sync_stream_user_on_auth
 
-        try:
-            await upsert_stream_user(user, db)
-        except StreamChatError as exc:
-            profile_logger.exception(
-                "Stream user sync failed during profile update for user_id=%s",
-                user.id,
-            )
-            raise ApiError(str(exc)) from exc
+        # Best-effort: missing Stream credentials must not fail profile updates.
+        await sync_stream_user_on_auth(user, db)
 
     if topic_fields_changed:
         await TopicService.sync_user_topics(
@@ -535,9 +532,9 @@ async def update_user_profile_by_admin_service(
         or payload.profile_photo_key is not None
     )
     if payload.major is not None:
-        profile.major = payload.major
+        profile.major = normalize_major_minor(payload.major)
     if payload.minor is not None:
-        profile.minor = payload.minor
+        profile.minor = normalize_major_minor(payload.minor)
     if payload.bio is not None:
         profile.bio = payload.bio
 
@@ -599,25 +596,15 @@ async def update_user_profile_by_admin_service(
     await db.commit()
     await db.refresh(profile)
 
-    from apps.recommendation.services.post_keyword_service import (
+    from apps.recommendations.services.post_keyword_service import (
         refresh_profile_extracted_keywords_best_effort,
     )
     await refresh_profile_extracted_keywords_best_effort(db, user_id=user.id)
-
     if stream_sync_needed:
-        from apps.chat.service import StreamChatError, upsert_stream_user
-        from common.exceptions import ApiError
-        import logging
+        from apps.chat.service import sync_stream_user_on_auth
 
-        profile_logger = logging.getLogger(__name__)
-        try:
-            await upsert_stream_user(user, db)
-        except StreamChatError as exc:
-            profile_logger.exception(
-                "Stream user sync failed during admin profile update for user_id=%s",
-                user.id,
-            )
-            raise ApiError(str(exc)) from exc
+        # Best-effort: missing Stream credentials must not fail profile updates.
+        await sync_stream_user_on_auth(user, db)
 
     if topic_fields_changed:
         await TopicService.sync_user_topics(

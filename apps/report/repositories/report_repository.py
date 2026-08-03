@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -199,6 +199,40 @@ async def count_reports(
     )
     stmt = select(func.count(Report.id)).where(*conditions)
     return int((await db.execute(stmt)).scalar_one())
+
+
+async def sync_open_report_moderator_for_post(
+    db: AsyncSession,
+    *,
+    post_id: UUID,
+    moderator_id: UUID,
+) -> None:
+    """Reassign open reports when a post's moderator changes (e.g. deleted moderator → Super Admin).
+
+    Updates under_review reports for the post itself and for comments on that post.
+    """
+    from apps.engagement.db_models import Comment
+
+    comment_ids_stmt = select(Comment.id).where(Comment.post_id == post_id)
+    now = datetime.now(timezone.utc)
+    stmt = (
+        update(Report)
+        .where(
+            Report.status == ReportStatus.under_review,
+            or_(
+                and_(
+                    Report.entity_type == ReportEntityType.post,
+                    Report.entity_id == post_id,
+                ),
+                and_(
+                    Report.entity_type == ReportEntityType.comment,
+                    Report.entity_id.in_(comment_ids_stmt),
+                ),
+            ),
+        )
+        .values(moderator_id=moderator_id, updated_at=now)
+    )
+    await db.execute(stmt)
 
 
 async def update_report(

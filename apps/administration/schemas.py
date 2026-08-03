@@ -147,8 +147,28 @@ class RecommendationSettingsResponse(BaseModel):
     is_enabled: bool
     generation_frequency_days: int
     max_recommendations: int
+    # GET returns admin full name; PATCH still returns UUID.
+    updated_by: UUID | str | None
     updated_at: datetime | None
-    updated_by: UUID | None
+    created_at: datetime | None = None
+
+
+class RecommendationSettingsChangeItem(BaseModel):
+    field: str
+    previous_value: Any
+    new_value: Any
+
+
+class RecommendationSettingsHistoryItem(BaseModel):
+    id: UUID
+    updated_by: str | None = None
+    updated_at: datetime | None
+    changes: list[RecommendationSettingsChangeItem]
+
+
+class RecommendationSettingsWithHistoryResponse(BaseModel):
+    current_settings: RecommendationSettingsResponse
+    history: list[RecommendationSettingsHistoryItem]
 
 
 class RecommendationSettingsUpdateRequest(BaseModel):

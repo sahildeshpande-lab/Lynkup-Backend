@@ -16,6 +16,7 @@ class NotificationPayloadBuilder:
     _DEEP_LINKS: dict[str, dict[str, str]] = {
         "CONNECTION_REQUEST": {"screen": "connections", "tab": "requests"},
         "CONNECTION_ACCEPTED": {"screen": "connections", "tab": "connections"},
+        "CONNECTION_DECLINED": {"screen": "connections", "tab": "requests"},
         "ANNOUNCEMENT": {"screen": "notifications"},
         # Future examples (uncomment / fill when wiring those types):
         # "DIRECT_MESSAGE": {"screen": "chat"},
@@ -29,6 +30,7 @@ class NotificationPayloadBuilder:
         {
             "CONNECTION_REQUEST",
             "CONNECTION_ACCEPTED",
+            "CONNECTION_DECLINED",
             # "DIRECT_MESSAGE",
             # "POST_LIKE",
             # "COMMENT",

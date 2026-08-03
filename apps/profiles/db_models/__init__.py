@@ -5,6 +5,9 @@ from .profile_db_model import Profile, CompletenessWeight
 from .learning_recommendation_log_db_model import LearningRecommendationLog
 from .profile_stats_db_model import ProfileStats
 from .learning_recommendation_settings_db_model import LearningRecommendationSettings
+from .learning_recommendation_settings_log_db_model import (
+    LearningRecommendationSettingsLog,
+)
 from .university_db_model import University
 
 __all__ = [
@@ -15,6 +18,7 @@ __all__ = [
     "CompletenessWeight",
     "LearningRecommendationLog",
     "LearningRecommendationSettings",
+    "LearningRecommendationSettingsLog",
     "ProfileStats",
     "University",
 ]

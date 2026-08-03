@@ -170,6 +170,16 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
             user.id,
         )
 
+    try:
+        from apps.chat.service import sync_stream_user_on_auth
+
+        await sync_stream_user_on_auth(user, db)
+    except Exception:
+        logger.exception(
+            "Stream user sync failed during login (no-OTP flow) user_id=%s",
+            user.id,
+        )
+
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
 
@@ -224,6 +234,16 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
         except Exception:
             logger.exception(
                 "Firebase topic sync failed during OTP verification user_id=%s",
+                user.id,
+            )
+
+        try:
+            from apps.chat.service import sync_stream_user_on_auth
+
+            await sync_stream_user_on_auth(user, db)
+        except Exception:
+            logger.exception(
+                "Stream user sync failed during OTP verification user_id=%s",
                 user.id,
             )
 

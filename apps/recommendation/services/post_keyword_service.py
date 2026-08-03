@@ -134,6 +134,11 @@ async def build_post_recommendation_payload(
         )
 
     text = build_post_plain_text(content)
+    hashtags = _post_hashtags(content)
+    logger.info(
+        "[post-keyword-extraction]\nRaw Text\n%s",
+        (text or "")[:500],
+    )
     new_keywords: list[str] = []
     if text:
         result = await asyncio.to_thread(_extract_keywords_sync, text)
@@ -141,14 +146,14 @@ async def build_post_recommendation_payload(
 
     post_snapshot = {
         "content_keywords": update_keyword_scores({}, new_keywords),
-        "hashtags": update_keyword_scores({}, _post_hashtags(content)),
+        "hashtags": update_keyword_scores({}, hashtags),
     }
 
     return {
         "major": _non_empty_list(profile.major if profile else None),
         "minor": _non_empty_list(profile.minor if profile else None),
         "interests": await _profile_interest_names(db, profile),
-        "hashtags": update_keyword_scores(existing_hashtags, _post_hashtags(content)),
+        "hashtags": update_keyword_scores(existing_hashtags, hashtags),
         "engagement_keywords": existing_engagement_keywords,
         "content_keywords": update_keyword_scores(existing_content_keywords, new_keywords),
         "_post_snapshot": post_snapshot,
@@ -259,13 +264,22 @@ async def persist_post_keyword_snapshot(
         logger.warning("Skipping post keyword snapshot; post not found post_id=%s", post_id)
         return
 
-    post.extracted_keywords = {
+    extracted = {
         "content_keywords": dict(snapshot.get("content_keywords") or {}),
         "hashtags": dict(snapshot.get("hashtags") or {}),
     }
+    logger.info(
+        "[post-keyword-extraction]\nUpdating posts.extracted_keywords\npost_id=%s",
+        post_id,
+    )
+    post.extracted_keywords = extracted
     post.keywords_updated_at = _utc_now()
     db.add(post)
     await db.commit()
+    logger.info(
+        "[post-keyword-extraction]\nKeyword extraction completed successfully.\npost_id=%s",
+        post_id,
+    )
 
 
 async def persist_profile_extracted_keywords(
@@ -306,29 +320,56 @@ async def log_post_keywords(
     db: AsyncSession,
 ) -> None:
     """Build the recommendation payload, print it, and store it on profile/post rows."""
-    post = (
-        await db.execute(select(Post).where(Post.id == post_id))
-    ).scalar_one_or_none()
-    previous_post_snapshot = None
-    if post is not None and isinstance(post.extracted_keywords, dict):
-        previous_post_snapshot = post.extracted_keywords
+    try:
+        logger.info(
+            "[post-keyword-extraction]\nStarting keyword extraction\npost_id=%s",
+            post_id,
+        )
+        post = (
+            await db.execute(select(Post).where(Post.id == post_id))
+        ).scalar_one_or_none()
+        previous_post_snapshot = None
+        if post is not None and isinstance(post.extracted_keywords, dict):
+            previous_post_snapshot = post.extracted_keywords
 
-    payload = await build_post_recommendation_payload(
-        db,
-        user_id=user_id,
-        content=content,
-        previous_post_snapshot=previous_post_snapshot,
-    )
-    post_snapshot = payload.pop("_post_snapshot", {})
-    await persist_post_keyword_snapshot(db, post_id, post_snapshot)
-    record = await persist_profile_extracted_keywords(
-        db,
-        post_id=post_id,
-        user_id=user_id,
-        payload=payload,
-    )
-    print(f"[post-keywords] post_id={post_id}")
-    print(json.dumps(record, indent=2))
+        payload = await build_post_recommendation_payload(
+            db,
+            user_id=user_id,
+            content=content,
+            previous_post_snapshot=previous_post_snapshot,
+        )
+        post_snapshot = payload.pop("_post_snapshot", {})
+        logger.info(
+            "[post-keyword-extraction]\nGenerated JSON\n%s",
+            json.dumps(post_snapshot, indent=2, default=str),
+        )
+
+        raw_text = build_post_plain_text(content)
+        content_keywords = post_snapshot.get("content_keywords") or {}
+        hashtags = post_snapshot.get("hashtags") or {}
+        if not content_keywords and not hashtags:
+            logger.warning(
+                "[post-keyword-extraction]\nKeyword extraction produced empty result.\n"
+                "post_id=%s\nraw_text_length=%s",
+                post_id,
+                len(raw_text or ""),
+            )
+
+        await persist_post_keyword_snapshot(db, post_id, post_snapshot)
+        record = await persist_profile_extracted_keywords(
+            db,
+            post_id=post_id,
+            user_id=user_id,
+            payload=payload,
+        )
+        print(f"[post-keywords] post_id={post_id}")
+        print(json.dumps(record, indent=2))
+    except Exception:
+        logger.exception(
+            "[post-keyword-extraction]\nKeyword extraction failed\npost_id=%s",
+            post_id,
+        )
+        raise
 
 
 async def log_post_keywords_best_effort(
@@ -342,4 +383,8 @@ async def log_post_keywords_best_effort(
     try:
         await log_post_keywords(post_id, content, user_id=user_id, db=db)
     except Exception:
-        logger.exception("Post keyword extraction failed post_id=%s", post_id)
+        logger.exception(
+            "[post-keyword-extraction]\nKeyword extraction failed (best-effort swallowed)\n"
+            "post_id=%s",
+            post_id,
+        )

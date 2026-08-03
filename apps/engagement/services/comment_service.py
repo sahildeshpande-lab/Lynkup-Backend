@@ -181,7 +181,7 @@ async def create_post_comment(
             await update_post_comment_count(db, post_id, 1)
         await db.commit()
         await db.refresh(comment)
-        from apps.recommendation.services.engagement_keyword_service import (
+        from apps.recommendations.services.engagement_keyword_service import (
             apply_engagement_keyword_update_best_effort,
         )
 

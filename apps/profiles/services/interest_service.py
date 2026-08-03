@@ -20,7 +20,11 @@ async def _find_existing_academic_interest(
     *,
     education_level_id: int | None = None,
 ):
-    """Return an existing interest that matches exactly (case-insensitive) or is a near-duplicate."""
+    """Return an existing interest that matches exactly (case-insensitive) or is a near-duplicate.
+
+    When ``education_level_id`` is provided, duplicates are scoped to that level so the
+    same name may exist under different education levels.
+    """
     from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
 
     normalized = _normalize_academic_interest_name(name)
@@ -30,19 +34,19 @@ async def _find_existing_academic_interest(
     name_lower = func.lower(func.trim(AcademicInterest.name))
     similarity_score = func.similarity(name_lower, normalized)
 
-    conditions = [
+    predicates = [
         or_(
             name_lower == normalized,
             similarity_score >= _ACADEMIC_INTEREST_SIMILARITY_THRESHOLD,
         )
     ]
     if education_level_id is not None:
-        conditions.append(AcademicInterest.education_level_id == education_level_id)
+        predicates.append(AcademicInterest.education_level_id == education_level_id)
 
     return (
         await db.execute(
             select(AcademicInterest)
-            .where(*conditions)
+            .where(*predicates)
             .order_by(similarity_score.desc())
             .limit(1)
         )

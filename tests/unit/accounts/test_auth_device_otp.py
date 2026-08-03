@@ -38,6 +38,7 @@ def _installation():
         device_id="device-1",
         is_active=True,
         last_active_at=datetime.now(timezone.utc),
+        fcm_token="fcm-token-1",
     )
 
 
@@ -154,16 +155,8 @@ async def test_login_sends_otp_when_verification_required(mock_db):
         patch.object(auth_svc, "PASSWORD_HASHER") as hasher,
         patch.object(auth_svc, "evaluate_device_otp_requirement", AsyncMock(return_value=(_installation(), False, True))),
         patch.object(auth_svc, "send_otp_challenge", AsyncMock()) as send_otp,
-        patch.object(auth_svc, "_fetch_user_profile", AsyncMock(return_value=SimpleNamespace(user_id=user.id))),
-        patch(
-            "apps.notifications.services.topic_service.TopicService.build_topics",
-            AsyncMock(return_value=set()),
-        ),
-        patch(
-            "apps.notifications.services.topic_service.TopicService.sync_topics",
-            AsyncMock(),
-        ) as sync_topics,
         patch.object(auth_svc, "_issue_auth_session", AsyncMock(return_value={"user": {"isEmailVerified": False}})),
+        patch.object(auth_svc, "_fetch_user_profile", AsyncMock(return_value=None)),
     ):
         hasher.verify.return_value = True
         db.execute = AsyncMock(
@@ -176,7 +169,6 @@ async def test_login_sends_otp_when_verification_required(mock_db):
         response = await auth_svc.login(payload, {"uid": user.firebase_uid, "email": user.email}, db)
 
     send_otp.assert_awaited_once()
-    sync_topics.assert_awaited_once()
     assert response.status is True
     assert response.data["needsOtp"] is True
     assert response.data["emailSent"] is True
@@ -200,17 +192,10 @@ async def test_login_success_without_otp_when_verified_same_device(mock_db):
         patch.object(auth_svc, "PASSWORD_HASHER") as hasher,
         patch.object(auth_svc, "evaluate_device_otp_requirement", AsyncMock(return_value=(installation, False, False))),
         patch.object(auth_svc, "send_otp_challenge", AsyncMock()) as send_otp,
-        patch.object(auth_svc, "upsert_user_installation", AsyncMock()),
-        patch.object(auth_svc, "_fetch_user_profile", AsyncMock(return_value=SimpleNamespace(user_id=user.id))),
-        patch(
-            "apps.notifications.services.topic_service.TopicService.build_topics",
-            AsyncMock(return_value=set()),
-        ),
-        patch(
-            "apps.notifications.services.topic_service.TopicService.sync_topics",
-            AsyncMock(),
-        ) as sync_topics,
+        patch.object(auth_svc, "upsert_user_installation", AsyncMock(return_value=installation)),
         patch.object(auth_svc, "_issue_auth_session", AsyncMock(return_value={"user": {"isEmailVerified": True}})),
+        patch.object(auth_svc, "_fetch_user_profile", AsyncMock(return_value=None)),
+        patch("apps.chat.service.sync_stream_user_on_auth", AsyncMock()),
     ):
         hasher.verify.return_value = True
         db.execute = AsyncMock(
@@ -223,54 +208,9 @@ async def test_login_success_without_otp_when_verified_same_device(mock_db):
         response = await auth_svc.login(payload, {"uid": user.firebase_uid, "email": user.email}, db)
 
     send_otp.assert_not_called()
-    sync_topics.assert_awaited_once()
     assert response.status is True
     assert response.message == "Login successful"
     assert response.data["needsOtp"] is False
-
-
-@pytest.mark.asyncio
-async def test_login_topic_sync_failure_does_not_break_login(mock_db):
-    verified_at = datetime.now(timezone.utc)
-    user = _user(email_verified_at=verified_at)
-    payload = SimpleNamespace(
-        email=user.email,
-        device_id="device-1",
-        password="Secret123",
-        platform=None,
-        fcm_token=None,
-    )
-    installation = _installation()
-    db = mock_db()
-
-    with (
-        patch.object(auth_svc, "PASSWORD_HASHER") as hasher,
-        patch.object(auth_svc, "evaluate_device_otp_requirement", AsyncMock(return_value=(installation, False, False))),
-        patch.object(auth_svc, "send_otp_challenge", AsyncMock()),
-        patch.object(auth_svc, "upsert_user_installation", AsyncMock()),
-        patch.object(auth_svc, "_fetch_user_profile", AsyncMock(return_value=SimpleNamespace(user_id=user.id))),
-        patch(
-            "apps.notifications.services.topic_service.TopicService.build_topics",
-            AsyncMock(return_value=set()),
-        ),
-        patch(
-            "apps.notifications.services.topic_service.TopicService.sync_topics",
-            AsyncMock(side_effect=Exception("firebase down")),
-        ),
-        patch.object(auth_svc, "_issue_auth_session", AsyncMock(return_value={"user": {"isEmailVerified": True}})),
-    ):
-        hasher.verify.return_value = True
-        db.execute = AsyncMock(
-            side_effect=[
-                SimpleNamespace(scalar_one_or_none=lambda: user),
-                SimpleNamespace(scalar_one=lambda: user),
-            ]
-        )
-
-        response = await auth_svc.login(payload, {"uid": user.firebase_uid, "email": user.email}, db)
-
-    assert response.status is True
-    assert response.message == "Login successful"
 
 
 @pytest.mark.asyncio
@@ -332,11 +272,15 @@ async def test_logout_preserves_email_verification_for_known_device(mock_db):
     with (
         patch.object(session_svc, "_revoke_refresh_token_row", AsyncMock()),
         patch("apps.accounts.services.session_service.revoke_firebase_tokens"),
+        patch(
+            "apps.notifications.services.topic_service.TopicService.unsubscribe_device_from_user_topics",
+            AsyncMock(),
+        ) as unsubscribe,
     ):
         db.execute = AsyncMock(
             side_effect=[
                 SimpleNamespace(scalar_one_or_none=lambda: user),
-                SimpleNamespace(scalar_one_or_none=lambda: installation),
+                SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [installation])),
                 SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
             ]
         )
@@ -348,4 +292,6 @@ async def test_logout_preserves_email_verification_for_known_device(mock_db):
     assert user.email_otp is None
     assert user.email_otp_created_at is None
     assert installation.is_active is False
+    assert installation.fcm_token is None
+    unsubscribe.assert_awaited_once()
     db.commit.assert_awaited_once()

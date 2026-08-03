@@ -12,18 +12,18 @@ Milestone 3 covers post engagement features delivered in this branch:
 
 ## Tables Used
 
-| Table                | Purpose in Milestone 3                                                      |
-| -------------------- | --------------------------------------------------------------------------- |
-| `posts`              | Target entity for engagement; stores like / comment / repost / share counts |
-| `post_reactions`     | Per-user post reactions (including like)                                    |
-| `comments`           | Post comments and replies                                                   |
-| `comment_reactions`  | Reactions on comments                                                       |
-| `reposts`            | User repost records surfaced in feed                                        |
-| `bookmarks`          | Saved / bookmarked posts                                                    |
-| `share_events`       | Share tracking related to post engagement                                   |
-| `reports`            | User-submitted reports against user, post, or comment                       |
-| `profiles`           | Author / actor context on engagement responses                              |
-| `users`              | Authenticated actor for engagement and report submission                    |
+| Table               | Purpose in Milestone 3                                                      |
+| ------------------- | --------------------------------------------------------------------------- |
+| `posts`             | Target entity for engagement; stores like / comment / repost / share counts |
+| `post_reactions`    | Per-user post reactions (including like)                                    |
+| `comments`          | Post comments and replies                                                   |
+| `comment_reactions` | Reactions on comments                                                       |
+| `reposts`           | User repost records surfaced in feed                                        |
+| `bookmarks`         | Saved / bookmarked posts                                                    |
+| `share_events`      | Share tracking related to post engagement                                   |
+| `reports`           | User-submitted reports against user, post, or comment                       |
+| `profiles`          | Author / actor context on engagement responses                              |
+| `users`             | Authenticated actor for engagement and report submission                    |
 
 ## Database Change
 
@@ -40,39 +40,38 @@ Schema changes for Milestone 3:
 ## Swagger API
 
 Swagger UI:
-[http://localhost:8000/docs](http://localhost:8000/docs)
-
-OpenAPI JSON:
-[http://localhost:8000/openapi.json](http://localhost:8000/openapi.json)
+[https://kampulynk-stage-app-pvj6t.ondigitalocean.app/docs](https://kampulynk-stage-app-pvj6t.ondigitalocean.app/docs)
 
 ### Key endpoints (Milestone 3)
 
-| Area | Method | Path |
-| ---- | ------ | ---- |
-| Like / reactions | `POST` | `/api/v1/posts/reactions` |
-| Post reaction detail | `GET` | `/api/v1/posts/{post_id}/postreaction` |
-| Liked posts | `GET` | `/api/v1/posts/liked` |
-| Create comment | `POST` | `/api/v1/posts/comments` |
-| List comments | `GET` | `/api/v1/posts/{post_id}/comments` |
-| Delete comment | `DELETE` | `/api/v1/comments` |
-| Comment reactions | `POST` | `/api/v1/comments/reactions` |
-| Repost | `POST` | `/api/v1/posts/repost` |
-| Bookmark / unbookmark | `PATCH` | `/api/v1/posts/bookmark` |
-| List bookmarks | `GET` | `/api/v1/posts/bookmark` |
-| Report | `POST` | `/api/v1/reports` |
-| Admin list / update reports | `GET` / `PATCH` | `/api/v1/admin/reports` |
+| Area                        | Method          | Path                                   |
+| --------------------------- | --------------- | -------------------------------------- |
+| Like / reactions            | `POST`          | `/api/v1/posts/reactions`              |
+| Post reaction detail        | `GET`           | `/api/v1/posts/{post_id}/postreaction` |
+| Liked posts                 | `GET`           | `/api/v1/posts/liked`                  |
+| Create comment              | `POST`          | `/api/v1/posts/comments`               |
+| List comments               | `GET`           | `/api/v1/posts/{post_id}/comments`     |
+| Delete comment              | `DELETE`        | `/api/v1/comments`                     |
+| Comment reactions           | `POST`          | `/api/v1/comments/reactions`           |
+| Repost                      | `POST`          | `/api/v1/posts/repost`                 |
+| Bookmark / unbookmark       | `PATCH`         | `/api/v1/posts/bookmark`               |
+| List bookmarks              | `GET`           | `/api/v1/posts/bookmark`               |
+| Report                      | `POST`          | `/api/v1/reports`                      |
+| Admin list / update reports | `GET` / `PATCH` | `/api/v1/admin/reports`                |
 
 ## Jira Tickets
 
 Ticket links were not present in the repository, so this table is ready for the actual project URLs.
 
-| Ticket | Description                         | Link |
-| ------ | ----------------------------------- | ---- |
-| M3-001 | Post like / reactions               | TBD  |
-| M3-002 | Post comments                       | TBD  |
-| M3-003 | Repost                              | TBD  |
-| M3-004 | Bookmark                            | TBD  |
-| M3-005 | Report (user / post / comment)      | TBD  |
+| Ticket | Description           | Link                                                                                                |
+| ------ | --------------------- | --------------------------------------------------------------------------------------------------- |
+| M3-001 | Post like / reactions | https://kampulynk.atlassian.net/browse/SCRUM-118                                                    |
+| M3-002 | Post comments         | https://kampulynk.atlassian.net/browse/SCRUM-17                                                     |
+| M3-003 | Repost                | TBD                                                                                                 |
+| M3-004 | Bookmark              | https://kampulynk.atlassian.net/browse/SCRUM-119                                                    |
+| M3-005 | Search the Post       | https://kampulynk.atlassian.net/browse/SCRUM-124 & https://kampulynk.atlassian.net/browse/SCRUM-125 |
+
+| M3-006 | Invitation | https://kampulynk.atlassian.net/browse/SCRUM-129 & https://kampulynk.atlassian.net/browse/SCRUM-130
 
 ## Branch / Repo
 

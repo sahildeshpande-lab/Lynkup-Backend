@@ -11,6 +11,7 @@ from .report_repository import (
     get_report_by_id,
     get_reported_entities,
     get_reports,
+    sync_open_report_moderator_for_post,
     update_report,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "get_report_by_id",
     "get_reported_entities",
     "get_reports",
+    "sync_open_report_moderator_for_post",
     "update_report",
 ]

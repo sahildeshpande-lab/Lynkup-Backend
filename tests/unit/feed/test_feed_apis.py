@@ -613,6 +613,8 @@ async def test_update_post_service_success(test_users) -> None:
         assert post.caption == "Updated Caption"
         assert post.content_html == "Updated text"
         assert post.state == PostState.hidden
+        assert post.is_edited is True
+        assert post.revision_number >= 2
 
     # Update draft via save_post_service with id and is_draft=True
     update_payload_draft = SavePostRequest(

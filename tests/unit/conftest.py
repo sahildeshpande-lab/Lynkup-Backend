@@ -9,7 +9,6 @@ from apps.feed.db_models import *
 from apps.invitations.db_models import *
 from apps.engagement.db_models import *
 from apps.connections.db_models import *
-from apps.notifications.db_models import *
 
 import pytest
 from unittest.mock import AsyncMock, Mock

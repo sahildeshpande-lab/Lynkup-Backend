@@ -1,10 +1,12 @@
 from __future__ import annotations
 import logging
-from fastapi import HTTPException, status
+from fastapi import HTTPException, UploadFile, status
 from core.images import normalize_image_name, generate_profile_image_url
 from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
-from common.enums import OnboardingStatus, EducationLevel
+from common.enums import OnboardingStatus, EducationLevel, UserStatus
+
+from apps.profiles.normalization import normalize_major_minor
 
 from .completeness_service import calculate_completeness_score
 from .interest_service import _resolve_academic_interest_ids
@@ -124,6 +126,9 @@ async def complete_onboarding(
             ) from exc
     profile_data["universityId"] = str(profile.university_id) if profile.university_id else None
 
+    major = normalize_major_minor(major)
+    minor = normalize_major_minor(minor)
+
     profile.major = major
     profile_data["major"] = major
 
@@ -149,6 +154,9 @@ async def complete_onboarding(
         profile_data["academicInterests"] = academic_interests
 
     user.onboarding_status = OnboardingStatus.completed
+    # Completing onboarding implies a verified account; keep or promote to active.
+    if user.status != UserStatus.active:
+        user.status = UserStatus.active
     db.add(user)
     db.add(profile)
     await db.flush()
@@ -172,25 +180,22 @@ async def complete_onboarding(
     await db.refresh(user)
     await db.refresh(profile)
 
-    from apps.recommendation.services.post_keyword_service import (
+    from apps.recommendations.services.post_keyword_service import (
         refresh_profile_extracted_keywords_best_effort,
     )
     await refresh_profile_extracted_keywords_best_effort(db, user_id=user.id)
 
-    from apps.chat.service import StreamChatError, upsert_stream_user
+    from apps.chat.service import sync_stream_user_on_auth
     from apps.notifications.services.topic_service import TopicService
-    from common.exceptions import ApiError
 
-    try:
-        await upsert_stream_user(user, db)
-    except StreamChatError as exc:
-        logger.exception("Stream user sync failed during onboarding for user_id=%s", user.id)
-        raise ApiError(str(exc)) from exc
+    # Best-effort Stream sync: missing Stream credentials must not fail onboarding.
+    await sync_stream_user_on_auth(user, db)
 
     await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
 
     user_data = await build_user_base_response(user, profile, db)
     return {"user": user_data}
+
 
 async def update_profile_me_form(
     current_user: User,
@@ -201,6 +206,7 @@ async def update_profile_me_form(
     db: AsyncSession
 ) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
+    from apps.notifications.services.topic_service import TopicService
     from sqlmodel import select
     from core.images import save_image, settings, generate_profile_image_url, normalize_image_name
     import uuid
@@ -265,6 +271,8 @@ async def update_profile_me_form(
         profile_data["academicInterests"] = interests_list
 
     current_user.onboarding_status = OnboardingStatus.completed
+    if current_user.status != UserStatus.active:
+        current_user.status = UserStatus.active
     db.add(current_user)
     db.add(profile)
     await db.flush()
@@ -274,14 +282,12 @@ async def update_profile_me_form(
     await db.refresh(current_user)
     await db.refresh(profile)
 
-    from apps.recommendation.services.post_keyword_service import (
+    from apps.recommendations.services.post_keyword_service import (
         refresh_profile_extracted_keywords_best_effort,
     )
     await refresh_profile_extracted_keywords_best_effort(db, user_id=current_user.id)
 
     if topic_sync_needed:
-        from apps.notifications.services.topic_service import TopicService
-
         await TopicService.sync_user_topics(
             db,
             current_user.id,

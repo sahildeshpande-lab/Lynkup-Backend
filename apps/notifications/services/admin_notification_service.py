@@ -26,6 +26,7 @@ from apps.notifications.repositories.campaign_audience_repository import (
 )
 from apps.notifications.repositories.notification_repository import (
     create_broadcast_notification,
+    filter_users_eligible_for_push,
     get_notification_by_campaign_id,
     get_notification_type_by_name,
     update_notification_content,
@@ -552,7 +553,18 @@ async def _dispatch_announcement(
     await db.flush()
     logger.info("Broadcast notification created campaign_id=%s", campaign.id)
 
-    fcm_tokens = await get_active_fcm_tokens_for_users(db, recipient_user_ids)
+    push_eligible_user_ids = await filter_users_eligible_for_push(
+        db,
+        recipient_user_ids,
+        category=NotificationCampaignType.announcement.value,
+    )
+    logger.info(
+        "Announcement push eligibility campaign_id=%s recipient_count=%s push_eligible_count=%s",
+        campaign.id,
+        len(recipient_user_ids),
+        len(push_eligible_user_ids),
+    )
+    fcm_tokens = await get_active_fcm_tokens_for_users(db, push_eligible_user_ids)
     push_result = _send_token_push(campaign, fcm_tokens, data=data_payload)
     logger.info(
         "Announcement push sent campaign_id=%s successful_count=%s failed_count=%s",
@@ -630,7 +642,18 @@ async def _dispatch_topic(
     # Send one push per user (deduped FCM tokens). Topic fan-out would deliver
     # multiple notifications when a user matches university + major + minor, etc.
     if recipient_user_ids:
-        fcm_tokens = await get_active_fcm_tokens_for_users(db, recipient_user_ids)
+        push_eligible_user_ids = await filter_users_eligible_for_push(
+            db,
+            recipient_user_ids,
+            category=NotificationCampaignType.topic.value,
+        )
+        logger.info(
+            "Topic push eligibility campaign_id=%s recipient_count=%s push_eligible_count=%s",
+            campaign.id,
+            len(recipient_user_ids),
+            len(push_eligible_user_ids),
+        )
+        fcm_tokens = await get_active_fcm_tokens_for_users(db, push_eligible_user_ids)
         push_result = _send_token_push(campaign, fcm_tokens, data=data_payload)
     else:
         push_result = _send_topic_push(campaign, firebase_topics)

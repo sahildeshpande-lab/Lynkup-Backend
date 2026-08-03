@@ -3,12 +3,68 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
 <title>{{title}}</title>
+<style type="text/css">
+  body, table, td, p, a {
+    -webkit-text-size-adjust: 100%;
+    -ms-text-size-adjust: 100%;
+  }
+  table {
+    border-collapse: collapse;
+    mso-table-lspace: 0pt;
+    mso-table-rspace: 0pt;
+  }
+  img {
+    border: 0;
+    outline: none;
+    text-decoration: none;
+    -ms-interpolation-mode: bicubic;
+  }
+  .body-text {
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+  }
+  @media only screen and (max-width: 620px) {
+    .email-container {
+      width: 100% !important;
+      max-width: 100% !important;
+    }
+    .email-outer-pad {
+      padding-left: 16px !important;
+      padding-right: 16px !important;
+    }
+    .email-body-content {
+      padding-left: 18px !important;
+      padding-right: 18px !important;
+    }
+    .body-text,
+    .muted-text {
+      width: 100% !important;
+      max-width: 100% !important;
+    }
+    .otp-wrapper {
+      padding-left: 18px !important;
+      padding-right: 18px !important;
+    }
+    .otp-outer-table {
+      width: 100% !important;
+    }
+    .otp-card {
+      width: 100% !important;
+      box-sizing: border-box !important;
+    }
+    .otp-digit {
+      padding-left: 4px !important;
+      padding-right: 4px !important;
+    }
+  }
+</style>
 </head>
 <body>
 <table width="100%" bgcolor="#E0E5ED" cellpadding="0" cellspacing="0">
-<tr><td align="center" style="padding:24px 12px;">
-<table width="620" cellpadding="0" cellspacing="0" style="background:#fff;max-width:620px;">
+<tr><td align="center" class="email-outer-pad" style="padding:24px 12px;">
+<table class="email-container" width="100%" cellpadding="0" cellspacing="0" style="background:#fff;max-width:620px;width:100%;">
 <tr><td height="5" style="background:linear-gradient(90deg,#00A74F,#4473BD);font-size:0;"></td></tr>
 
 <tr>
@@ -76,7 +132,7 @@ Our mission is to connect and empower university students to achieve their educa
 </tr>
 
 <tr>
-<td style="background:#edecec;padding:10px 10px;font:10px Arial,Helvetica,sans-serif;color:#333;line-height:1.7;">
+<td class="email-body-content" style="background:#edecec;padding:10px 10px;font:10px Arial,Helvetica,sans-serif;color:#333;line-height:1.7;">
 {{body_html}}
 <hr style="border:none;border-top:1px solid #D1D5DB;margin:24px 0;">
 </td>

@@ -124,52 +124,49 @@ def test_get_academics_info_returns_success(monkeypatch) -> None:
     assert body["data"]["educationLevels"][1]["interests"][0]["name"] == "Artificial Intelligence"
 
 
-def test_list_majors_returns_success(monkeypatch) -> None:
-    async def _list_profile_majors(db, *, query=None, page=None, page_size=None) -> dict:
-        assert query == "Comp"
+def test_list_majors_returns_lowercase_combined_values(monkeypatch) -> None:
+    async def _list_majors(query, page, page_size, db) -> dict:
+        assert query == "a"
         assert page == 1
-        assert page_size == 10
+        assert page_size == 20
         return {
-            "items": [{"name": "Computer Science"}],
+            "items": [{"name": "ai"}, {"name": "applied math"}],
             "page": 1,
-            "pageSize": 10,
-            "totalItems": 1,
+            "pageSize": 20,
+            "totalItems": 2,
             "totalPages": 1,
         }
 
-    monkeypatch.setattr(search_routes.services, "list_profile_majors", _list_profile_majors)
+    monkeypatch.setattr(search_routes.services, "list_majors", _list_majors)
 
-    response = client.get("/api/v1/majors", params={"query": "Comp", "page": 1, "pageSize": 10})
+    response = client.get("/api/v1/majors", params={"query": "a", "page": 1, "pageSize": 20})
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Majors fetched successfully"
-    assert body["data"]["items"][0]["name"] == "Computer Science"
+    assert body["data"]["items"] == [{"name": "ai"}, {"name": "applied math"}]
 
 
-def test_list_minors_returns_all_without_pagination(monkeypatch) -> None:
-    async def _list_profile_minors(db, *, query=None, page=None, page_size=None) -> dict:
-        assert page is None
-        assert page_size is None
+def test_list_minors_returns_lowercase_combined_values(monkeypatch) -> None:
+    async def _list_minors(query, page, page_size, db) -> dict:
         return {
-            "items": [{"name": "Psychology"}, {"name": "Economics"}],
+            "items": [{"name": "ai"}],
             "page": 1,
-            "pageSize": 2,
-            "totalItems": 2,
+            "pageSize": 1,
+            "totalItems": 1,
             "totalPages": 1,
         }
 
-    monkeypatch.setattr(search_routes.services, "list_profile_minors", _list_profile_minors)
+    monkeypatch.setattr(search_routes.services, "list_minors", _list_minors)
 
-    response = client.get("/api/v1/minor")
+    response = client.get("/api/v1/minor", params={"page": 1, "pageSize": 1})
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Minors fetched successfully"
-    assert body["data"]["totalItems"] == 2
-    assert len(body["data"]["items"]) == 2
+    assert body["data"]["items"] == [{"name": "ai"}]
 
 
 def test_create_academic_interest_returns_created(monkeypatch) -> None:

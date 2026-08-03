@@ -4,7 +4,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.profiles.db_models import Country, University
-from common.pagination import build_paginated_response
+from apps.profiles.normalization import (
+    collect_normalized_program_names,
+    normalize_named_program_list,
+)
+from common.pagination import build_paginated_response, paginate_items
 
 from .schemas import UniversitySearchParams
 
@@ -56,8 +60,8 @@ async def search_universities(params: UniversitySearchParams, db: AsyncSession) 
             "country": country_name or "Unknown",
             "slug": university.slug,
             "website": university.website,
-            "major": university.major,
-            "minor": university.minor,
+            "major": normalize_named_program_list(university.major),
+            "minor": normalize_named_program_list(university.minor),
             "academic_program": university.academic_program,
         }
         for university, country_name in rows
@@ -292,78 +296,88 @@ async def get_academics_info(
     }
 
 
-async def _list_distinct_profile_field(
-    db: AsyncSession,
+async def _list_program_field(
     *,
-    field_name: str,
+    field: str,
     query: Optional[str],
     page: int | None,
     page_size: int | None,
+    db: AsyncSession,
 ) -> dict:
-    """Return distinct non-empty values for a profile text field (major/minor)."""
-    from sqlalchemy import and_
+    """Return lowercase-deduped major or minor names from universities + profiles."""
     from apps.profiles.db_models.profile_db_model import Profile
 
-    column = getattr(Profile, field_name)
-    normalized = func.lower(func.btrim(column))
-    filters = [column.is_not(None), func.btrim(column) != ""]
-
-    clean_query = (query or "").strip()
-    if clean_query:
-        filters.append(normalized.ilike(f"%{clean_query.lower()}%"))
-
-    where_clause = and_(*filters)
-    count_stmt = select(func.count(func.distinct(normalized))).where(where_clause)
-    stmt = (
-        select(normalized)
-        .where(where_clause)
-        .distinct()
-        .order_by(normalized.asc())
-    )
-
-    total_items = int((await db.execute(count_stmt)).scalar_one())
-    if page is not None and page_size is not None:
-        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
-        resolved_page = page
-        resolved_page_size = page_size
+    if field == "major":
+        university_column = University.major
+        profile_column = Profile.major
+    elif field == "minor":
+        university_column = University.minor
+        profile_column = Profile.minor
     else:
-        resolved_page = 1
-        resolved_page_size = total_items if total_items > 0 else 1
+        raise ValueError(f"Unsupported program field: {field}")
 
-    values = [row[0] for row in (await db.execute(stmt)).all()]
-    items = [{"name": value} for value in values]
-    return build_paginated_response(items, resolved_page, resolved_page_size, total_items).model_dump()
+    university_rows = list(
+        (await db.execute(select(university_column))).scalars().all()
+    )
+    profile_rows = list(
+        (
+            await db.execute(
+                select(profile_column).where(
+                    profile_column.is_not(None),
+                    profile_column != "",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    names = collect_normalized_program_names(*university_rows, *profile_rows)
+
+    if query and query.strip():
+        needle = query.strip().lower()
+        names = [name for name in names if needle in name]
+
+    items = [{"name": name} for name in names]
+    if page is not None and page_size is not None:
+        return paginate_items(items, page=page, page_size=page_size).model_dump()
+
+    total_items = len(items)
+    return build_paginated_response(
+        items,
+        page=1,
+        page_size=total_items if total_items > 0 else 1,
+        total_items=total_items,
+    ).model_dump()
 
 
-async def list_profile_majors(
+async def list_majors(
+    query: Optional[str],
+    page: int | None,
+    page_size: int | None,
     db: AsyncSession,
-    *,
-    query: Optional[str] = None,
-    page: int | None = None,
-    page_size: int | None = None,
 ) -> dict:
-    return await _list_distinct_profile_field(
-        db,
-        field_name="major",
+    return await _list_program_field(
+        field="major",
         query=query,
         page=page,
         page_size=page_size,
+        db=db,
     )
 
 
-async def list_profile_minors(
+async def list_minors(
+    query: Optional[str],
+    page: int | None,
+    page_size: int | None,
     db: AsyncSession,
-    *,
-    query: Optional[str] = None,
-    page: int | None = None,
-    page_size: int | None = None,
 ) -> dict:
-    return await _list_distinct_profile_field(
-        db,
-        field_name="minor",
+    return await _list_program_field(
+        field="minor",
         query=query,
         page=page,
         page_size=page_size,
+        db=db,
     )
 
 

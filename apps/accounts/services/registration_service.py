@@ -1,9 +1,10 @@
 from __future__ import annotations
+import logging
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 from sqlalchemy.orm import selectinload
-from apps.accounts.db_models import SecurityEventType, User, UserInstallation
+from apps.accounts.db_models import SecurityEventType, User
 from apps.profiles.db_models import Profile
 from common.enums import OnboardingStatus, RegistrationType, UserStatus, inactive_account_message
 from common.exceptions import ApiError
@@ -19,7 +20,10 @@ from .device_otp_service import (
     attach_otp_flags,
     evaluate_device_otp_requirement,
     send_otp_challenge,
+    upsert_user_installation,
 )
+
+logger = logging.getLogger(__name__)
 
 async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) -> User:
     firebase_uid = firebase_user["uid"]
@@ -115,31 +119,33 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
         )
     ).scalar_one()
 
-async def _upsert_user_installation(
+async def _refresh_user_topic_subscriptions_best_effort(
     db: AsyncSession,
-    user_id,
-    device_id: str,
-    now,
+    user: User,
     *,
-    platform: str | None = None,
-    fcm_token: str | None = None,
+    context: str,
 ) -> None:
-    from apps.accounts.services.device_otp_service import upsert_user_installation
+    try:
+        from apps.notifications.services.topic_service import TopicService
 
-    await upsert_user_installation(
-        db,
-        user_id,
-        device_id,
-        platform=platform,
-        fcm_token=fcm_token,
-        now=now,
-    )
+        profile = await _fetch_user_profile(db, user)
+        if profile is not None:
+            await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
+    except Exception:
+        logger.exception(
+            "Firebase topic sync failed during social auth (%s) user_id=%s",
+            context,
+            user.id,
+        )
 
 
 async def _build_device_auth_session(
     db: AsyncSession,
     user: User,
     device_id: str,
+    *,
+    platform: str | None = None,
+    fcm_token: str | None = None,
 ) -> tuple[dict, str]:
     from sqlalchemy.orm import selectinload
 
@@ -156,7 +162,10 @@ async def _build_device_auth_session(
             device_id,
             installation=installation,
             is_new_device=is_new_device,
+            platform=platform,
+            fcm_token=fcm_token,
         )
+        await _refresh_user_topic_subscriptions_best_effort(db, user, context="otp flow")
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()
         return (
@@ -172,12 +181,17 @@ async def _build_device_auth_session(
     user.updated_at = _now()
     db.add(user)
 
-    if installation:
-        installation.last_active_at = _now()
-        installation.is_active = True
-        db.add(installation)
+    await upsert_user_installation(
+        db,
+        user.id,
+        device_id,
+        platform=platform,
+        fcm_token=fcm_token,
+        now=_now(),
+    )
 
     await db.commit()
+    await _refresh_user_topic_subscriptions_best_effort(db, user, context="no-otp flow")
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
     return (
@@ -304,7 +318,13 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
             db.add(profile)
 
         await db.flush()
-        session_data, message = await _build_device_auth_session(db, user, payload.device_id)
+        session_data, message = await _build_device_auth_session(
+            db,
+            user,
+            payload.device_id,
+            platform=payload.platform,
+            fcm_token=payload.fcm_token,
+        )
         return session_data, False, message
 
     user = User(
@@ -357,14 +377,19 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
     profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
 
-    await _upsert_user_installation(db, user.id, payload.device_id, now)
     await db.commit()
     await db.refresh(user)
 
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
 
-    session_data, message = await _build_device_auth_session(db, user, payload.device_id)
+    session_data, message = await _build_device_auth_session(
+        db,
+        user,
+        payload.device_id,
+        platform=payload.platform,
+        fcm_token=payload.fcm_token,
+    )
     return session_data, True, message
 
 async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSession) -> ApiResponse:
@@ -410,15 +435,25 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
                 profile.completeness_score = await calculate_completeness_score(existing_user_email.id, db)
                 db.add(profile)
 
-            # Ensure installation exists / refresh FCM token when provided
-            await _upsert_user_installation(
-                db,
-                existing_user_email.id,
-                payload.device_id,
-                now,
-                platform=payload.platform,
-                fcm_token=payload.fcm_token,
-            )
+            # Ensure installation exists
+            from apps.accounts.db_models import UserInstallation
+            stmt_inst = select(UserInstallation).where(UserInstallation.user_id == existing_user_email.id, UserInstallation.device_id == payload.device_id)
+            inst = (await db.execute(stmt_inst)).scalar_one_or_none()
+            if not inst:
+                inst = UserInstallation(
+                    user_id=existing_user_email.id,
+                    device_id=payload.device_id,
+                    platform=None,
+                    app_version=None,
+                    installed_at=now,
+                    last_active_at=now,
+                    is_active=True,
+                )
+                db.add(inst)
+            else:
+                inst.last_active_at = now
+                inst.is_active = True
+                db.add(inst)
 
             await db.commit()
 
@@ -495,15 +530,18 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
 
-    # 4. Create / refresh UserInstallation record
-    await _upsert_user_installation(
-        db,
-        user.id,
-        payload.device_id,
-        now,
-        platform=payload.platform,
-        fcm_token=payload.fcm_token,
+    # 4. Create UserInstallation record
+    from apps.accounts.db_models import UserInstallation
+    installation = UserInstallation(
+        user_id=user.id,
+        device_id=payload.device_id,
+        platform=None,
+        app_version=None,
+        installed_at=now,
+        last_active_at=now,
+        is_active=True,
     )
+    db.add(installation)
 
     await db.commit()
     otp = user.email_otp or _generate_otp()

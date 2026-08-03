@@ -15,6 +15,7 @@ from common.enums import ReactionType
 def _profile(**kwargs):
     defaults = {
         "id": uuid.uuid4(),
+        "user_id": uuid.uuid4(),
         "first_name": "John",
         "last_name": "Doe",
         "major": "CS",
@@ -117,7 +118,7 @@ async def test_get_post_reactions_multiple_types_and_summary(mock_db):
     assert len(response.data.reactions["CELEBRATE"]) == 1
     assert len(response.data.reactions["CURIOUS"]) == 1
     assert response.data.reactions["LIKE"][0].reaction_type == "LIKE"
-    assert response.data.reactions["LIKE"][0].profile_id == profile.id
+    assert response.data.reactions["LIKE"][0].profile_id == profile.user_id
     assert response.data.reactions["LIKE"][0].profilePhoto_url == "https://cdn.example/photo.jpg"
     assert response.data.reactions["LIKE"][0].bio == "Student developer"
     assert response.data.totalItems == 3

@@ -413,10 +413,13 @@ def test_social_auth_route_conflict(monkeypatch) -> None:
 
 
 def test_social_auth_route_passes_optional_fields(monkeypatch) -> None:
+    photo_url = "https://lh3.googleusercontent.com/a/example-photo"
+
     async def _mock_social_auth(payload, db):
         assert payload.device_id == "test-device-001"
         assert payload.loginType == "google"
         assert payload.fullName == "Jane Doe"
+        assert payload.profile_photo_url == photo_url
         return {
             "accessToken": "access_token_123",
             "refreshToken": "refresh_token_123",
@@ -435,7 +438,11 @@ def test_social_auth_route_passes_optional_fields(monkeypatch) -> None:
 
     response = client.post(
         "/api/v1/auth/social",
-        json={**_SOCIAL_AUTH_PAYLOAD, "fullName": "Jane Doe"},
+        json={
+            **_SOCIAL_AUTH_PAYLOAD,
+            "fullName": "Jane Doe",
+            "profile_photo_url": photo_url,
+        },
     )
 
     assert response.status_code == 200

@@ -409,7 +409,8 @@ async def test_dispatch_topic_sends_one_deduped_token_push_per_recipient(mock_db
     broadcast.assert_awaited_once()
     stored_topics = broadcast.await_args.kwargs["deep_link_payload"]["firebase_topics"]
     assert set(stored_topics) == firebase_topics
-    load_tokens.assert_awaited_once_with(db, recipient_ids)
+    load_tokens.assert_awaited_once()
+    assert load_tokens.await_args.args[1] == recipient_ids
     token_push.assert_called_once()
     resolve_users.assert_not_awaited()
     topic_push.assert_not_called()
@@ -594,3 +595,73 @@ async def test_list_notifications_hides_disabled_announcement_category(mock_db) 
     titles = [item["title"] for item in response.data["items"]]
     assert titles == ["Request"]
     assert "Campus news" not in titles
+
+
+@pytest.mark.asyncio
+async def test_dispatch_announcement_skips_push_for_opted_out_users(mock_db) -> None:
+    db = mock_db()
+    campaign = _campaign(campaign_type=NotificationCampaignType.announcement)
+    recipients = [uuid4(), uuid4(), uuid4()]
+    push_eligible = [recipients[0], recipients[2]]
+
+    with (
+        patch.object(admin_svc, "_get_campaign", AsyncMock(return_value=campaign)),
+        patch.object(
+            admin_svc,
+            "resolve_announcement_recipients",
+            AsyncMock(return_value=recipients),
+        ),
+        patch.object(
+            admin_svc,
+            "create_campaign_audience",
+            AsyncMock(return_value=3),
+        ) as audience,
+        patch.object(
+            admin_svc,
+            "create_broadcast_notification",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=uuid4(),
+                    deep_link_payload={
+                        "broadcast": True,
+                        "campaign_type": "ANNOUNCEMENT",
+                        "campaign_id": str(campaign.id),
+                    },
+                )
+            ),
+        ),
+        patch.object(
+            admin_svc,
+            "filter_users_eligible_for_push",
+            AsyncMock(return_value=push_eligible),
+        ) as filter_push,
+        patch.object(
+            admin_svc,
+            "get_active_fcm_tokens_for_users",
+            AsyncMock(return_value=["t1"]),
+        ) as load_tokens,
+        patch.object(
+            admin_svc,
+            "send_push_notifications",
+            return_value={"successful_count": 1, "failed_count": 0},
+        ) as push,
+        patch.object(
+            admin_svc,
+            "_update_campaign_status",
+            AsyncMock(return_value=campaign),
+        ),
+    ):
+        await admin_svc.dispatch_campaign(db, campaign.id)
+
+    filter_push.assert_awaited_once_with(
+        db,
+        recipients,
+        category="ANNOUNCEMENT",
+    )
+    audience.assert_awaited_once_with(
+        db,
+        campaign_id=campaign.id,
+        user_ids=recipients,
+    )
+    load_tokens.assert_awaited_once_with(db, push_eligible)
+    push.assert_called_once()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,7 +63,6 @@ def build_stream_user_payload(
     }
 
 
-
 async def upsert_stream_user(user: User, db: AsyncSession) -> None:
     profile = await _fetch_user_profile(db, user)
     user_payload = build_stream_user_payload(user, profile)
@@ -88,6 +88,7 @@ async def sync_stream_user_on_auth(user: User, db: AsyncSession) -> None:
 
 
 async def generate_stream_token(user: User) -> StreamTokenData:
+    """Mint a new Stream Chat user token (called by FE via POST /chat/token after login)."""
     _ensure_stream_configured()
 
     try:
@@ -97,3 +98,27 @@ async def generate_stream_token(user: User) -> StreamTokenData:
         raise StreamChatError("Failed to generate Stream token") from exc
 
     return StreamTokenData(stream_token=stream_token)
+
+
+async def revoke_stream_user_tokens(user: User) -> None:
+    """Invalidate all Stream tokens issued for this user up to now (logout)."""
+    _ensure_stream_configured()
+    before = datetime.now(timezone.utc)
+    try:
+        get_stream_client().revoke_user_token(str(user.id), before)
+        logger.info("Stream tokens revoked for user_id=%s before=%s", user.id, before.isoformat())
+    except StreamChatError:
+        raise
+    except Exception as exc:
+        logger.exception("Stream token revoke failed for user_id=%s", user.id)
+        raise StreamChatError("Failed to revoke Stream tokens") from exc
+
+
+async def revoke_stream_user_tokens_best_effort(user: User) -> None:
+    """Best-effort token revoke for logout flows. Never raises to callers."""
+    try:
+        await revoke_stream_user_tokens(user)
+    except StreamChatError as exc:
+        logger.warning("Stream token revoke skipped for user_id=%s: %s", user.id, exc)
+    except Exception:
+        logger.exception("Stream token revoke failed for user_id=%s", user.id)

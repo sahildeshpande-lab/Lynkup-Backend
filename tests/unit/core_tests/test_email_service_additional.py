@@ -41,7 +41,11 @@ async def test_all_email_builders_and_senders():
 
     # 1. Test HTML builders
     html_otp = build_otp_email_html("123456", "email_verification")
-    assert "1 2 3 4 5 6" in html_otp
+    # Digits are rendered in separate <td> cells (not space-joined).
+    for digit in "123456":
+        assert f">{digit}</td>" in html_otp
+    assert "Your OTP" in html_otp
+    assert "otp-card" in html_otp
 
     html_notif = build_notification_email_html("Test Title", "Test Body")
     assert "Test Title" in html_notif

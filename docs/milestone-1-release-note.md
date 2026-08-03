@@ -29,21 +29,21 @@ The schema change for Milestone 1 is handled in Alembic and mirrored in the SQL 
 ## Swagger API
 
 Swagger UI:
-[http://localhost:8000/docs](http://localhost:8000/docs)
-
-OpenAPI JSON:
-[http://localhost:8000/openapi.json](http://localhost:8000/openapi.json)
+[https://kampulynk-stage-app-pvj6t.ondigitalocean.app/docs](https://kampulynk-stage-app-pvj6t.ondigitalocean.app/docs)
 
 ## Jira Tickets
 
 Ticket links were not present in the repository, so this table is ready for the actual project URLs.
 
-| Ticket | Description                              | Link |
-| ------ | ---------------------------------------- | ---- |
-| M1-001 | Firebase forgot-password email flow      | TBD  |
-| M1-002 | Logout API and installation tracking     | TBD  |
-| M1-003 | `user_installations.is_active` migration | TBD  |
-| M1-004 | Remove account reset-password endpoint   | TBD  |
+| Ticket | Description                              | Link                                            |
+| ------ | ---------------------------------------- | ----------------------------------------------- |
+| M1-001 | Backend infrastructure                   | https://kampulynk.atlassian.net/browse/SCRUM-78 |
+| M1-002 | Database & API Integration               | https://kampulynk.atlassian.net/browse/SCRUM-76 |
+| M1-003 | Logout API and installation tracking     | TBD                                             |
+| M1-004 | `user_installations.is_active` migration | TBD                                             |
+| M1-005 | Remove account reset-password endpoint   | TBD                                             |
+
+|
 
 ## Branch / Repo
 

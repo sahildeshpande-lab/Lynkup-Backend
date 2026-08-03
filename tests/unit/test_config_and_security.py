@@ -102,6 +102,12 @@ async def test_security_auth_role_dependencies():
     with pytest.raises(ApiError, match="Insufficient"):
         await security_auth.get_current_user_or_superadmin(moderator)
 
+    assert await security_auth.get_current_user_moderator_or_superadmin(user) is user
+    assert await security_auth.get_current_user_moderator_or_superadmin(moderator) is moderator
+    assert await security_auth.get_current_user_moderator_or_superadmin(superadmin) is superadmin
+    with pytest.raises(ApiError, match="Insufficient"):
+        await security_auth.get_current_user_moderator_or_superadmin(viewer)
+
     assert await security_auth.get_current_moderator(moderator) is moderator
     assert await security_auth.get_current_moderator(superadmin) is superadmin
     with pytest.raises(ApiError):

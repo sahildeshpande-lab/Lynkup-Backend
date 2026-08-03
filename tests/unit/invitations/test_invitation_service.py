@@ -16,7 +16,7 @@ from common.enums import InvitationStatus
 
 
 def _invitation(**kwargs):
-    now = datetime(2026, 7, 14, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     defaults = {
         "id": uuid4(),
         "inviter_user_id": uuid4(),
@@ -128,7 +128,7 @@ async def test_validate_invitation_success(mock_db):
 async def test_validate_invitation_expired(mock_db):
     db = mock_db()
     invitation = _invitation(
-        expires_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        expires_at=datetime.now(timezone.utc) - timedelta(days=1),
     )
     with patch.object(
         svc,

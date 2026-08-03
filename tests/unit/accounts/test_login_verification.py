@@ -82,7 +82,7 @@ async def test_login_active_user(db_session: AsyncSession):
 
 @pytest.mark.asyncio
 async def test_login_active_user_new_device(db_session: AsyncSession, monkeypatch):
-    # Verified user on a new device gets OTP and is moved to pending until verified.
+    # Verified active user on a new device gets OTP but stays active.
     from apps.accounts.services import _hash_password
     from apps.accounts.schemas import LoginRequest
     sent_emails = []
@@ -121,8 +121,9 @@ async def test_login_active_user_new_device(db_session: AsyncSession, monkeypatc
     assert response.data["emailSent"] is True
 
     refreshed = await db_session.get(User, user.id)
-    assert refreshed.status == UserStatus.pending
+    assert refreshed.status == UserStatus.active
     assert refreshed.email_otp is not None
+    assert refreshed.email_verified_at is not None
     assert len(sent_emails) == 1
 
     # Verify a UserInstallation was created for the new device

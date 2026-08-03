@@ -166,6 +166,7 @@ class NotificationPreferencesData(BaseModel):
             {
                 "CONNECTION_REQUEST": True,
                 "CONNECTION_ACCEPTED": True,
+                "CONNECTION_DECLINED": True,
                 "DIRECT_MESSAGE": False,
                 "ANNOUNCEMENT": True,
                 "TOPIC": True,
@@ -196,6 +197,7 @@ class UpdateNotificationPreferencesRequest(BaseModel):
             {
                 "CONNECTION_REQUEST": True,
                 "CONNECTION_ACCEPTED": True,
+                "CONNECTION_DECLINED": True,
                 "DIRECT_MESSAGE": False,
                 "ANNOUNCEMENT": True,
                 "TOPIC": True,
@@ -211,6 +213,7 @@ class UpdateNotificationPreferencesRequest(BaseModel):
                 "category_preferences": {
                     "CONNECTION_REQUEST": True,
                     "CONNECTION_ACCEPTED": True,
+                    "CONNECTION_DECLINED": True,
                     "DIRECT_MESSAGE": False,
                     "ANNOUNCEMENT": True,
                     "TOPIC": True,

@@ -218,10 +218,13 @@ def send_push_to_topic(
     )
 
     try:
+        print(f"[FCM TOPIC SEND] topic={topic_name} title={title!r} body={body!r}")
         message_id = messaging.send(message)
+        print(f"[FCM TOPIC SEND OK] topic={topic_name} message_id={message_id}")
         logger.info("FCM topic message sent successfully: topic=%s id=%s", topic_name, message_id)
         return message_id
-    except Exception:
+    except Exception as exc:
+        print(f"[FCM TOPIC SEND ERROR] topic={topic_name} error={exc}")
         logger.exception("FCM topic push failed: topic=%s", topic_name)
         raise
 

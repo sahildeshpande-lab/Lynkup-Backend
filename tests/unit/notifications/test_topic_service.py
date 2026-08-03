@@ -246,6 +246,32 @@ async def test_topics_from_major_and_minor(mock_db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_topics_from_country_uses_country_name(mock_db, scalar_result) -> None:
+    from apps.notifications.services import topic_service as ts
+
+    country_id = uuid4()
+    profile = SimpleNamespace(user_id=uuid4(), country_id=country_id)
+    country = SimpleNamespace(id=country_id, name="United States")
+    db = mock_db(scalar_result(country))
+
+    topics = await ts._topics_from_country(db, profile)
+    assert topics == {"country_united_states"}
+
+
+@pytest.mark.asyncio
+async def test_affects_topics_includes_country_id() -> None:
+    payload = SimpleNamespace(
+        major=None,
+        minor=None,
+        university_id=None,
+        country_id=uuid4(),
+        education_level_id=None,
+        academic_interests=None,
+    )
+    assert TopicService.affects_topics(payload) is True
+
+
+@pytest.mark.asyncio
 async def test_update_profile_syncs_topic_diff(mock_db) -> None:
     from apps.profiles.schemas import UpdateProfileRequest
     from apps.profiles.services import profile_service as svc
