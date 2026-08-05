@@ -6,10 +6,18 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from common.exceptions import ApiError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from common.enums import PostState
+from sqlalchemy import delete, select, update
+from common.enums import FEED_VISIBLE_POST_STATES, OWNER_VISIBLE_POST_STATES, PostState, ReportEntityType
 from apps.accounts.db_models import User
-from apps.feed.db_models import Post
+from apps.feed.db_models import (
+    LinkPreview,
+    MediaAsset,
+    Post,
+    PostAttachment,
+    PostHashtag,
+    PostRevision,
+    PostTopic,
+)
 from apps.feed.schemas import SavePostRequest, EditPostRequest
 from apps.engagement.schemas import PostReactionsGrouped
 from apps.feed.content_utils import sanitize_html, validate_content, validate_media_count
@@ -27,6 +35,88 @@ from apps.moderation.services.moderator_assignment_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+_COUNTED_POST_STATES = (PostState.published, PostState.reinstate)
+
+
+async def _hard_delete_post(db: AsyncSession, post: Post) -> UUID:
+    """
+    Permanently remove a post and its dependent rows from the database.
+
+    Explicit deletes are required because not all FKs use ON DELETE CASCADE.
+    """
+    from apps.engagement.db_models import (
+        Bookmark,
+        Comment,
+        CommentReaction,
+        PostReaction,
+        Repost,
+        ShareEvent,
+    )
+    from apps.report.db_models import Report
+
+    post_id = post.id
+    comment_ids_subq = select(Comment.id).where(Comment.post_id == post_id)
+
+    await db.execute(
+        delete(CommentReaction).where(CommentReaction.comment_id.in_(comment_ids_subq))
+    )
+    await db.execute(
+        delete(Report).where(
+            Report.entity_type == ReportEntityType.comment,
+            Report.entity_id.in_(comment_ids_subq),
+        )
+    )
+    # Clear self-FK so nested comments can be removed in one pass.
+    await db.execute(
+        update(Comment).where(Comment.post_id == post_id).values(parent_comment_id=None)
+    )
+    await db.execute(delete(Comment).where(Comment.post_id == post_id))
+
+    await db.execute(delete(PostReaction).where(PostReaction.post_id == post_id))
+    await db.execute(delete(Bookmark).where(Bookmark.post_id == post_id))
+    await db.execute(delete(Repost).where(Repost.post_id == post_id))
+    await db.execute(delete(ShareEvent).where(ShareEvent.post_id == post_id))
+    await db.execute(delete(PostRevision).where(PostRevision.post_id == post_id))
+    await db.execute(delete(PostHashtag).where(PostHashtag.post_id == post_id))
+    await db.execute(delete(PostTopic).where(PostTopic.post_id == post_id))
+    await db.execute(delete(LinkPreview).where(LinkPreview.post_id == post_id))
+
+    media_asset_ids = list(
+        (
+            await db.execute(
+                select(PostAttachment.media_asset_id).where(PostAttachment.post_id == post_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    await db.execute(delete(PostAttachment).where(PostAttachment.post_id == post_id))
+
+    if media_asset_ids:
+        still_referenced = set(
+            (
+                await db.execute(
+                    select(PostAttachment.media_asset_id).where(
+                        PostAttachment.media_asset_id.in_(media_asset_ids)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        orphan_ids = [mid for mid in media_asset_ids if mid not in still_referenced]
+        if orphan_ids:
+            await db.execute(delete(MediaAsset).where(MediaAsset.id.in_(orphan_ids)))
+
+    await db.execute(
+        delete(Report).where(
+            Report.entity_type == ReportEntityType.post,
+            Report.entity_id == post_id,
+        )
+    )
+    await db.execute(delete(Post).where(Post.id == post_id))
+    return post_id
 
 
 async def _capture_user_topics(db: AsyncSession, user_id: UUID) -> set[str]:
@@ -74,9 +164,9 @@ def _should_sync_topics_for_post_state(
     *,
     previous_state: PostState | None = None,
 ) -> bool:
-    if post_state == PostState.published:
+    if post_state in FEED_VISIBLE_POST_STATES:
         return True
-    return previous_state == PostState.published
+    return previous_state in FEED_VISIBLE_POST_STATES
 
 
 def _should_sync_topics_for_post(
@@ -88,7 +178,8 @@ def _should_sync_topics_for_post(
     if _should_sync_topics_for_post_state(post_state, previous_state=previous_state):
         return True
     return hashtag_content_changed and (
-        post_state == PostState.published or previous_state == PostState.published
+        post_state in FEED_VISIBLE_POST_STATES
+        or previous_state in FEED_VISIBLE_POST_STATES
     )
 
 
@@ -214,6 +305,7 @@ def format_post_detail(
         "reviewed_at": post.reviewed_at,
         "moderator_id": post.moderator_id,
         "moderator_name": _resolve_moderator_name(moderator_user, moderator_profile),
+        "moderation_notes": getattr(post, "moderation_notes", None),
         "media": media_data,
         "reposted_data": reposted_data,
     }
@@ -419,7 +511,7 @@ async def _assign_moderator_for_review(
 async def _repair_unassigned_moderators_for_state(
     db: AsyncSession,
     *,
-    status: Literal["published", "flagged", "rejected", "reinstate"] | None = None,
+    status: Literal["published", "flagged", "rejected", "reinstate", "escalate"] | None = None,
     limit: int = 500,
 ) -> None:
     """Assign moderators to posts in a review state that are still unassigned."""
@@ -523,6 +615,7 @@ async def _soft_delete_other_drafts(
     *,
     exclude_post_id: UUID | None = None,
 ) -> None:
+    """Hard-delete other draft posts for the user (replacing a draft)."""
     stmt = select(Post).where(
         Post.author_user_id == user_id,
         Post.state == PostState.draft,
@@ -531,9 +624,8 @@ async def _soft_delete_other_drafts(
         stmt = stmt.where(Post.id != exclude_post_id)
 
     result = await db.execute(stmt)
-    for draft in result.scalars().all():
-        draft.state = PostState.deleted
-        draft.updated_at = utc_now()
+    for draft in list(result.scalars().all()):
+        await _hard_delete_post(db, draft)
 
 async def save_post_service(
     user_id: UUID,
@@ -910,18 +1002,21 @@ async def publish_post_service(
 
 async def admin_publish_post_service(
     post_id: UUID,
-    status: Literal["published", "flagged", "rejected", "reinstate"],
+    status: Literal["published", "flagged", "rejected", "reinstate", "escalate"],
     admin_user_id: UUID,
-    db: AsyncSession
-) -> Post:
+    db: AsyncSession,
+    *,
+    notes: str | None = None,
+) -> Post | dict:
     """
     Moderate a post by setting its lifecycle state.
 
-    ``status`` maps 1:1 to ``Post.state``:
+    ``status`` maps to ``Post.state`` except ``rejected``, which hard-deletes:
     - ``published`` -> published (or hidden when visibility is private/hidden)
     - ``flagged``   -> flagged
-    - ``rejected``  -> rejected
+    - ``rejected``  -> permanently remove the post from the DB
     - ``reinstate`` -> reinstate
+    - ``escalate``  -> escalate (reassigned to a superadmin)
     """
     from apps.profiles.db_models import Profile
 
@@ -930,6 +1025,50 @@ async def admin_publish_post_service(
 
     if not post:
         raise ApiError("Post not found")
+
+    if status == "rejected":
+        previous_state = post.state
+        author_user_id = post.author_user_id
+        rejected_post_id = post.id
+        was_counted = previous_state in _COUNTED_POST_STATES
+        try:
+            deleted_id = await _hard_delete_post(db, post)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise ApiError("Failed to reject and delete post")
+
+        if was_counted:
+            try:
+                from apps.profiles.services.profile_stats_service import (
+                    decrement_posts_count_for_user,
+                )
+
+                await decrement_posts_count_for_user(db, author_user_id)
+                await db.commit()
+            except Exception:
+                logger.exception(
+                    "Failed to update posts_count for user %s after rejecting post %s",
+                    author_user_id,
+                    deleted_id,
+                )
+
+        try:
+            from apps.notifications.services import POST_REJECTED, notify_post_author
+
+            await notify_post_author(
+                db,
+                post_id=rejected_post_id,
+                author_user_id=author_user_id,
+                notification_type=POST_REJECTED,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to notify author after rejecting post %s",
+                rejected_post_id,
+            )
+
+        return {"id": deleted_id, "deleted": True, "status": "rejected"}
 
     author_result = await db.execute(
         select(User, Profile)
@@ -947,6 +1086,7 @@ async def admin_publish_post_service(
             ).strip() or None
 
     previous_state = post.state
+    assignee_id = admin_user_id
 
     if status in ("published", "reinstate"):
         # Respect visibility stored in content
@@ -957,14 +1097,24 @@ async def admin_publish_post_service(
             post.state = PostState.hidden
         else:
             post.state = PostState.published if status == "published" else PostState.reinstate
+        if notes is not None:
+            post.moderation_notes = notes.strip() or None
     elif status == "flagged":
         post.state = PostState.flagged
-    elif status == "rejected":
-        post.state = PostState.rejected
+        if notes is not None:
+            post.moderation_notes = notes.strip() or None
+    elif status == "escalate":
+        superadmin_ids = await _fetch_superadmin_user_ids(db)
+        if not superadmin_ids:
+            raise ApiError("No superadmin available to escalate this post")
+        post.state = PostState.escalate
+        if notes is not None:
+            post.moderation_notes = notes.strip() or None
+        assignee_id = superadmin_ids[0]
     else:
         raise ApiError(f"Invalid status: {status}")
 
-    post.moderator_id = admin_user_id
+    post.moderator_id = assignee_id
     post.is_moderator_reviewed = True
     post.reviewed_at = utc_now()
 
@@ -973,13 +1123,12 @@ async def admin_publish_post_service(
     post.updated_at = utc_now()
 
     # Profile posts_count tracks posts that are publicly countable for the author.
-    # Flagged/rejected leave that set; publishing/reinstating re-enters it.
-    _counted_states = (PostState.published, PostState.reinstate)
-    was_counted = previous_state in _counted_states
-    now_counted = post.state in _counted_states
+    # Flagged/escalate leave that set; publishing/reinstating re-enters it.
+    was_counted = previous_state in _COUNTED_POST_STATES
+    now_counted = post.state in _COUNTED_POST_STATES
 
     try:
-        # Create revision audit record with the admin user as the editor
+        # Create revision audit record with the acting admin as the editor
         await _create_revision(post, admin_user_id, db)
 
         await db.commit()
@@ -1011,6 +1160,30 @@ async def admin_publish_post_service(
             previous_state,
             post.state,
         )
+
+    if status in ("flagged", "reinstate"):
+        try:
+            from apps.notifications.services import (
+                POST_FLAGGED,
+                POST_REINSTATED,
+                notify_post_author,
+            )
+
+            notification_type = (
+                POST_FLAGGED if status == "flagged" else POST_REINSTATED
+            )
+            await notify_post_author(
+                db,
+                post_id=post.id,
+                author_user_id=post.author_user_id,
+                notification_type=notification_type,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to notify author after moderating post %s status=%s",
+                post.id,
+                status,
+            )
 
     # Temporarily disabled: post moderated/published/flagged email
     # if author_user and author_user.email:
@@ -1063,7 +1236,7 @@ async def get_post_service(
             raise ApiError("Post not found")
         return post
 
-    if post.state == PostState.flagged and post.author_user_id != user_id:
+    if post.state in (PostState.flagged, PostState.escalate, PostState.rejected) and post.author_user_id != user_id:
         raise ApiError("Post is not accessible")
 
     if post.state in (PostState.draft, PostState.hidden, PostState.processing):
@@ -1147,8 +1320,8 @@ async def delete_draft_post_service(
     post_id: UUID,
     user_id: UUID,
     db: AsyncSession,
-) -> Post:
-    """Soft-delete a draft post owned by the authenticated user."""
+) -> dict:
+    """Hard-delete a draft post owned by the authenticated user."""
     result = await db.execute(select(Post).where(Post.id == post_id))
     post = result.scalar_one_or_none()
 
@@ -1159,26 +1332,23 @@ async def delete_draft_post_service(
     if post.state != PostState.draft:
         raise ApiError("Only draft posts can be deleted through this endpoint")
 
-    post.state = PostState.deleted
-    post.updated_at = utc_now()
-
     try:
+        deleted_id = await _hard_delete_post(db, post)
         await db.commit()
-        await db.refresh(post)
     except Exception:
         await db.rollback()
         raise ApiError("Failed to delete draft post")
 
-    return post
+    return {"id": deleted_id, "deleted": True}
 
 
 async def delete_post_service(
     post_id: UUID,
     user_id: UUID,
     db: AsyncSession
-) -> Post:
+) -> dict:
     """
-    Soft-delete a post by marking its state as deleted.
+    Hard-delete a post owned by the authenticated user (row removed from DB).
     """
     result = await db.execute(select(Post).where(Post.id == post_id))
     post = result.scalar_one_or_none()
@@ -1189,36 +1359,33 @@ async def delete_post_service(
         raise ApiError("Post does not belong to the authenticated user")
 
     previous_state = post.state
-    if previous_state == PostState.deleted:
-        return post
-
-    post.state = PostState.deleted
-    post.updated_at = utc_now()
+    author_user_id = post.author_user_id
+    was_counted = previous_state in _COUNTED_POST_STATES
 
     try:
+        deleted_id = await _hard_delete_post(db, post)
         await db.commit()
-        await db.refresh(post)
-    except Exception as e:
+    except Exception:
         await db.rollback()
         raise ApiError("Failed to delete post")
 
     # Profile posts_count tracks published/reinstated posts only.
-    if previous_state in (PostState.published, PostState.reinstate):
+    if was_counted:
         try:
             from apps.profiles.services.profile_stats_service import (
                 decrement_posts_count_for_user,
             )
 
-            await decrement_posts_count_for_user(db, post.author_user_id)
+            await decrement_posts_count_for_user(db, author_user_id)
             await db.commit()
         except Exception:
             logger.exception(
                 "Failed to update posts_count for user %s after deleting post %s",
-                post.author_user_id,
-                post.id,
+                author_user_id,
+                deleted_id,
             )
 
-    return post
+    return {"id": deleted_id, "deleted": True}
 
 _LIST_POST_STATES: dict[str, PostState] = {
     "published": PostState.published,
@@ -1226,6 +1393,23 @@ _LIST_POST_STATES: dict[str, PostState] = {
     "flagged": PostState.flagged,
     "draft": PostState.draft,
 }
+
+
+def _query_states_for_list(
+    requested_state: PostState,
+    *,
+    is_owner: bool = False,
+) -> PostState | tuple[PostState, ...]:
+    """
+    Profile/list ``published`` expands to the viewer-appropriate visible set.
+
+    - Owner: published + flagged + reinstate (matches owner posts_count).
+    - Visitor: published + reinstate only.
+    Each post keeps its real ``state`` (not remapped).
+    """
+    if requested_state == PostState.published:
+        return OWNER_VISIBLE_POST_STATES if is_owner else FEED_VISIBLE_POST_STATES
+    return requested_state
 
 
 async def get_profile_visibility_block_message(
@@ -1307,7 +1491,9 @@ async def list_user_posts_service(
     if effective_user_id is not None and not await user_exists(db, effective_user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    total_items = await count_posts_by_state(db, state=requested_state, user_id=effective_user_id)
+    is_owner = effective_user_id == current_user.id
+    query_states = _query_states_for_list(requested_state, is_owner=is_owner)
+    total_items = await count_posts_by_state(db, state=query_states, user_id=effective_user_id)
 
     if page is None and page_size is None:
         offset = 0
@@ -1320,7 +1506,7 @@ async def list_user_posts_service(
 
     posts = await fetch_posts_by_state(
         db,
-        state=requested_state,
+        state=query_states,
         user_id=effective_user_id,
         offset=offset,
         limit=limit,
@@ -1367,7 +1553,9 @@ async def list_user_posts_items_service(
     if effective_user_id is not None and not await user_exists(db, effective_user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    total_items = await count_posts_by_state(db, state=requested_state, user_id=effective_user_id)
+    is_owner = effective_user_id == current_user.id
+    query_states = _query_states_for_list(requested_state, is_owner=is_owner)
+    total_items = await count_posts_by_state(db, state=query_states, user_id=effective_user_id)
 
     if page is None and page_size is None:
         offset = 0
@@ -1380,7 +1568,7 @@ async def list_user_posts_items_service(
 
     rows = await fetch_posts_by_state_with_details(
         db,
-        state=requested_state,
+        state=query_states,
         user_id=effective_user_id,
         offset=offset,
         limit=limit,
@@ -1395,14 +1583,14 @@ async def list_user_posts_items_service(
 
     repost_items = []
     if requested_state == PostState.published and effective_user_id is not None:
-        # Find all reposts by this user
+        # Find all reposts by this user (original post may be published or reinstate)
         repost_stmt = (
             sa_select(Repost, Post, Profile)
             .join(Post, Post.id == Repost.post_id)
             .outerjoin(Profile, Profile.user_id == Post.author_user_id)
             .where(
                 Repost.user_id == effective_user_id,
-                Post.state == PostState.published,
+                Post.state.in_(FEED_VISIBLE_POST_STATES),
             )
             .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
             .order_by(Repost.created_at.desc())
@@ -1578,6 +1766,7 @@ def _format_reviewed_post_item(
         "is_repostable": is_repostable,
         "moderator_id": post.moderator_id,
         "moderator_name": _resolve_moderator_name(moderator_user, moderator_profile),
+        "moderation_notes": getattr(post, "moderation_notes", None),
         "profilePhoto_url": (
             generate_profile_image_url(profile.profile_photo_url)
             if profile and profile.profile_photo_url
@@ -1669,7 +1858,7 @@ async def list_processing_posts_service(
 async def list_reviewed_posts_by_state_service(
     db: AsyncSession,
     moderator_id: UUID | None,
-    status: Literal["published", "flagged", "rejected", "reinstate"] | None = None,
+    status: Literal["published", "flagged", "rejected", "reinstate", "escalate"] | None = None,
     page: int | None = None,
     page_size: int | None = None,
     viewer_user_id: UUID | None = None,
@@ -1678,7 +1867,7 @@ async def list_reviewed_posts_by_state_service(
 
     ``Post.state`` is the single source of truth for the moderator dashboard
     tabs. ``status`` maps 1:1 to a post state (published / flagged / rejected /
-    reinstate); when omitted it defaults to ``published``. An optional
+    reinstate / escalate); when omitted it defaults to ``published``. An optional
     ``moderator_id`` additionally scopes results to a single moderator.
     """
     from common.pagination import build_paginated_response

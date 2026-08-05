@@ -14,7 +14,7 @@ from apps.feed.db_models import Hashtag, Post, PostAttachment, PostHashtag
 from apps.profiles.db_models import Country, Profile
 from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
 from apps.profiles.db_models.university_db_model import University
-from common.enums import EducationLevel, PostState, ProfileVisibility
+from common.enums import EducationLevel, FEED_VISIBLE_POST_STATES, ProfileVisibility
 from common.user_visibility import visible_user_filters
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -341,7 +341,7 @@ def _build_search_filters(
     author_user,
 ):
     filters = [
-        Post.state == PostState.published,
+        Post.state.in_(FEED_VISIBLE_POST_STATES),
         Post.author_user_id != current_user_id,
         *visible_user_filters(author_user),
     ]

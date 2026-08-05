@@ -18,6 +18,9 @@ class NotificationPayloadBuilder:
         "CONNECTION_ACCEPTED": {"screen": "connections", "tab": "connections"},
         "CONNECTION_DECLINED": {"screen": "connections", "tab": "requests"},
         "ANNOUNCEMENT": {"screen": "notifications"},
+        "POST_FLAGGED": {"screen": "post"},
+        "POST_REINSTATED": {"screen": "post"},
+        "POST_REJECTED": {"screen": "post"},
         # Future examples (uncomment / fill when wiring those types):
         # "DIRECT_MESSAGE": {"screen": "chat"},
         # "TOPIC": {"screen": "notifications"},
@@ -78,6 +81,9 @@ class NotificationPayloadBuilder:
         deep_link = cls._DEEP_LINKS.get(type_name)
         if deep_link is not None:
             payload["deep_link"] = dict(deep_link)
+            post_id = payload.get("post_id")
+            if post_id and payload["deep_link"].get("screen") == "post":
+                payload["deep_link"]["post_id"] = str(post_id)
 
         return payload
 

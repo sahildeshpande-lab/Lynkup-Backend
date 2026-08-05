@@ -105,3 +105,67 @@ def test_for_fcm_serializes_nested_deep_link() -> None:
         "tab": "requests",
     }
     assert fcm_data["notification_type"] == "CONNECTION_REQUEST"
+
+
+def test_build_post_flagged_payload() -> None:
+    notification_id = uuid4()
+    post_id = uuid4()
+
+    payload = NotificationPayloadBuilder.build(
+        notification_type="POST_FLAGGED",
+        notification_id=notification_id,
+        extra={"post_id": str(post_id)},
+    )
+
+    assert payload == {
+        "notification_type": "POST_FLAGGED",
+        "notification_id": str(notification_id),
+        "post_id": str(post_id),
+        "deep_link": {"screen": "post", "post_id": str(post_id)},
+    }
+    assert "sender_user_id" not in payload
+    assert "username" not in payload
+    assert "profile_photo" not in payload
+
+
+def test_build_post_reinstated_payload() -> None:
+    notification_id = uuid4()
+    post_id = uuid4()
+
+    payload = NotificationPayloadBuilder.build(
+        notification_type="POST_REINSTATED",
+        notification_id=notification_id,
+        extra={"post_id": str(post_id)},
+    )
+
+    assert payload == {
+        "notification_type": "POST_REINSTATED",
+        "notification_id": str(notification_id),
+        "post_id": str(post_id),
+        "deep_link": {"screen": "post", "post_id": str(post_id)},
+    }
+
+
+def test_build_post_rejected_payload() -> None:
+    notification_id = uuid4()
+    post_id = uuid4()
+
+    payload = NotificationPayloadBuilder.build(
+        notification_type="POST_REJECTED",
+        notification_id=notification_id,
+        extra={"post_id": str(post_id)},
+    )
+
+    assert payload == {
+        "notification_type": "POST_REJECTED",
+        "notification_id": str(notification_id),
+        "post_id": str(post_id),
+        "deep_link": {"screen": "post", "post_id": str(post_id)},
+    }
+
+    fcm_data = NotificationPayloadBuilder.for_fcm(payload)
+    assert json.loads(fcm_data["deep_link"]) == {
+        "screen": "post",
+        "post_id": str(post_id),
+    }
+    assert fcm_data["post_id"] == str(post_id)

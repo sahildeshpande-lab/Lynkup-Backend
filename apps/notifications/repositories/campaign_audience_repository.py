@@ -12,7 +12,7 @@ from apps.notifications.db_models import NotificationCampaignAudience
 from apps.profiles.db_models import Country, Profile
 from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
 from apps.profiles.db_models.university_db_model import University
-from common.enums import EducationLevel, NotificationTargetType, PostState, UserStatus
+from common.enums import EducationLevel, FEED_VISIBLE_POST_STATES, NotificationTargetType, UserStatus
 from common.time import utc_now
 from common.user_visibility import visible_user_filters
 
@@ -477,7 +477,7 @@ async def _resolve_hashtag_users(db: AsyncSession, values: list[str]) -> list[UU
             *visible_user_filters(User),
             User.status == UserStatus.active,
             Hashtag.tag.in_(tags),
-            Post.state == PostState.published,
+            Post.state.in_(FEED_VISIBLE_POST_STATES),
         )
         .distinct()
     )

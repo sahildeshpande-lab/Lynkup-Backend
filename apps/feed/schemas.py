@@ -146,6 +146,7 @@ class RepostedPostData(BaseModel):
     reviewed_at: Optional[datetime] = None
     moderator_id: Optional[UUID] = None
     moderator_name: Optional[str] = None
+    moderation_notes: Optional[str] = None
     media: List[PostMediaData] = Field(default_factory=list)
     reposted_data: None = None
 

@@ -193,7 +193,7 @@ async def complete_onboarding(
 
     await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
 
-    user_data = await build_user_base_response(user, profile, db)
+    user_data = await build_user_base_response(user, profile, db, viewer_user_id=user.id)
     return {"user": user_data}
 
 
@@ -295,5 +295,7 @@ async def update_profile_me_form(
             profile=profile,
         )
 
-    user_data = await build_user_base_response(current_user, profile, db)
+    user_data = await build_user_base_response(
+        current_user, profile, db, viewer_user_id=current_user.id
+    )
     return {"user": user_data}

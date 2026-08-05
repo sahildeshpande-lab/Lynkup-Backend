@@ -140,7 +140,14 @@ class AdminResetPasswordRequest(BaseModel):
 
 class AdminPublishPostRequest(BaseModel):
     post_id: UUID
-    status: Literal["published", "flagged", "rejected", "reinstate"] = "published"
+    status: Literal[
+        "published", "flagged", "rejected", "reinstate", "escalate"
+    ] = "published"
+    notes: str | None = Field(
+        default=None,
+        max_length=5000,
+        description="Optional moderation notes.",
+    )
 
 
 class RecommendationSettingsResponse(BaseModel):

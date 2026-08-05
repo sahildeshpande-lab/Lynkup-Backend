@@ -226,3 +226,17 @@ class UpdateNotificationPreferencesRequest(BaseModel):
 
 class NotificationPreferencesResponse(ApiResponse):
     data: NotificationPreferencesData | None = None
+
+
+# Temporary test-only schema — remove with /test/push endpoint.
+class TestPushRequest(BaseModel):
+    title: str = Field(default="Test notification", max_length=200)
+    body: str = Field(default="This is a temporary test push from KampuLynk.", max_length=1000)
+    fcm_token: str | None = Field(
+        default=None,
+        description="Optional raw FCM token. When omitted, uses the current user's active installation tokens.",
+    )
+
+
+class TestPushResponse(ApiResponse):
+    data: dict[str, Any] | None = None

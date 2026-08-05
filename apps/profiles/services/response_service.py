@@ -1,4 +1,6 @@
 from __future__ import annotations
+from uuid import UUID
+
 from core.images import generate_profile_image_url
 from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
@@ -11,6 +13,34 @@ def _compose_full_name(first_name: str | None, last_name: str | None) -> str:
     parts = [_normalize_name_part(first_name), _normalize_name_part(last_name)]
     return " ".join(part for part in parts if part).strip()
 
+
+async def _count_owner_visible_posts(db: AsyncSession, user_id: UUID) -> int:
+    from apps.feed.repositories.post_repository import count_posts_by_state
+    from common.enums import OWNER_VISIBLE_POST_STATES
+
+    return await count_posts_by_state(
+        db,
+        state=OWNER_VISIBLE_POST_STATES,
+        user_id=user_id,
+    )
+
+
+async def _resolve_posts_count(
+    db: AsyncSession,
+    *,
+    profile_user_id: UUID,
+    cached_posts_count: int,
+    viewer_user_id: UUID | None,
+) -> int:
+    """
+    Owner sees published + flagged + reinstate.
+    Visitors see the cached public count (published + reinstate only).
+    """
+    if viewer_user_id is None or viewer_user_id != profile_user_id:
+        return cached_posts_count or 0
+    return await _count_owner_visible_posts(db, profile_user_id)
+
+
 async def build_user_base_response(
     user: User,
     profile: Profile | None,
@@ -19,6 +49,7 @@ async def build_user_base_response(
     university_name: str | None = None,
     country_name: str | None = None,
     interests: list[str] | None = None,
+    viewer_user_id: UUID | None = None,
 ) -> dict:
     from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
     from sqlmodel import select
@@ -112,7 +143,12 @@ async def build_user_base_response(
         "isEmailVerified": user.email_verified_at is not None,
         "email_verified_at": user.email_verified_at.isoformat() if user.email_verified_at else None,
         "onlinePresence": profile.online_presence_visible if profile else False,
-        "posts_count": profile.posts_count if profile else 0,
+        "posts_count": await _resolve_posts_count(
+            db,
+            profile_user_id=user.id,
+            cached_posts_count=profile.posts_count if profile else 0,
+            viewer_user_id=viewer_user_id,
+        ),
         "followers_count": profile.followers_count if profile else 0,
         "following_count": profile.following_count if profile else 0,
         "connection_count": connection_count,

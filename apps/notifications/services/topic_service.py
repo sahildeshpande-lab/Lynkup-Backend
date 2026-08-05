@@ -191,7 +191,7 @@ async def _topics_from_hashtags(db: AsyncSession, profile: Profile) -> set[str]:
     from apps.feed.db_models.hashtag_db_model import Hashtag
     from apps.feed.db_models.post_db_model import Post
     from apps.feed.db_models.post_hashtag_db_model import PostHashtag
-    from common.enums import PostState
+    from common.enums import FEED_VISIBLE_POST_STATES
 
     rows = (
         await db.execute(
@@ -200,7 +200,7 @@ async def _topics_from_hashtags(db: AsyncSession, profile: Profile) -> set[str]:
             .join(Post, Post.id == PostHashtag.post_id)
             .where(
                 Post.author_user_id == profile.user_id,
-                Post.state == PostState.published,
+                Post.state.in_(FEED_VISIBLE_POST_STATES),
             )
             .distinct()
         )

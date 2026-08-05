@@ -18,6 +18,8 @@ from apps.notifications.schemas import (
     MarkNotificationReadResponse,
     NotificationListResponse,
     NotificationPreferencesResponse,
+    TestPushRequest,
+    TestPushResponse,
     UpdateCampaignRequest,
     UpdateCampaignResponse,
     UpdateNotificationPreferencesRequest,
@@ -245,3 +247,57 @@ async def admin_delete_notification_campaign(
 ) -> DeleteCampaignResponse:
     _ = current_user
     return await delete_campaign(db, campaign_id=payload.id)
+
+
+@router.post(
+    "/test/push",
+    response_model=TestPushResponse,
+    status_code=status.HTTP_200_OK,
+    summary="[TEMPORARY] Send a test FCM push",
+    description=(
+        "Temporary endpoint for verifying push delivery. "
+        "Sends to the authenticated user's active FCM tokens, "
+        "or to an optional raw `fcm_token` in the body. Remove before production."
+    ),
+)
+async def test_push_route(
+    payload: TestPushRequest,
+    current_user: Annotated[User, Depends(get_current_app_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> TestPushResponse:
+    from apps.notifications.repositories import get_active_fcm_tokens_for_users
+    from common.responses import error_response, success_response
+    from core.auth.services import send_push_notifications
+
+    if payload.fcm_token and payload.fcm_token.strip():
+        tokens = [payload.fcm_token.strip()]
+    else:
+        tokens = await get_active_fcm_tokens_for_users(db, [current_user.id])
+
+    if not tokens:
+        return error_response(
+            "No active FCM tokens found for this user",
+            data={"user_id": str(current_user.id), "token_count": 0},
+            response_cls=TestPushResponse,
+        )
+
+    result = send_push_notifications(
+        tokens,
+        payload.title,
+        payload.body,
+        {
+            "notification_type": "TEST_PUSH",
+            "user_id": str(current_user.id),
+        },
+    )
+    return success_response(
+        "Test push dispatched",
+        {
+            "user_id": str(current_user.id),
+            "token_count": len(tokens),
+            "successful_count": result.get("successful_count", 0),
+            "failed_count": result.get("failed_count", 0),
+            "failed_tokens": result.get("failed_tokens", []),
+        },
+        response_cls=TestPushResponse,
+    )

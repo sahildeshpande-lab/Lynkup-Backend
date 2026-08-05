@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Literal, Union
 from uuid import UUID
 
@@ -10,16 +11,28 @@ from apps.accounts.db_models import User
 from apps.feed.db_models import Post
 from common.enums import PostState
 
+
+def _post_state_filter(state: PostState | Collection[PostState]):
+    """Build a Post.state filter for one state or a set of states."""
+    if isinstance(state, Collection) and not isinstance(state, (str, PostState)):
+        states = list(state)
+        if len(states) == 1:
+            return Post.state == states[0]
+        return Post.state.in_(states)
+    return Post.state == state
+
+
 # Public-facing status values accepted by the reviewed-posts endpoint.
 # Each status maps 1:1 to a Post.state value — Post.state is the single source
 # of truth for reviewed-post filtering (dashboard tabs are driven from it).
-ReviewedPostStatus = Literal["published", "flagged", "rejected", "reinstate"]
+ReviewedPostStatus = Literal["published", "flagged", "rejected", "reinstate", "escalate"]
 
 _REVIEWED_STATUS_TO_STATE: dict[str, PostState] = {
     "published": PostState.published,
     "flagged": PostState.flagged,
     "rejected": PostState.rejected,
     "reinstate": PostState.reinstate,
+    "escalate": PostState.escalate,
 }
 
 # Default state when no status filter is supplied.
@@ -69,6 +82,7 @@ async def count_reviewed_posts_summary_by_state(
         PostState.flagged: "flagged",
         PostState.rejected: "rejected",
         PostState.reinstate: "reinstate",
+        PostState.escalate: "escalate",
     }
     stmt = (
         select(Post.state, func.count(Post.id))
@@ -141,13 +155,13 @@ async def user_exists(db: AsyncSession, user_id: UUID) -> bool:
 async def count_posts_by_state(
     db: AsyncSession,
     *,
-    state: PostState,
+    state: PostState | Collection[PostState],
     user_id: UUID | None = None,
 ) -> int:
-    """Count posts filtered by state and optional author."""
+    """Count posts filtered by state(s) and optional author."""
     from common.user_visibility import visible_user_filters
 
-    filters = [Post.state == state, *visible_user_filters(User)]
+    filters = [_post_state_filter(state), *visible_user_filters(User)]
     if user_id is not None:
         filters.append(Post.author_user_id == user_id)
     stmt = (
@@ -162,15 +176,15 @@ async def count_posts_by_state(
 async def fetch_posts_by_state(
     db: AsyncSession,
     *,
-    state: PostState,
+    state: PostState | Collection[PostState],
     user_id: UUID | None = None,
     offset: int = 0,
     limit: int | None = None,
 ) -> list[Post]:
-    """Fetch posts filtered by state and optional author, newest first."""
+    """Fetch posts filtered by state(s) and optional author, newest first."""
     from common.user_visibility import visible_user_filters
 
-    filters = [Post.state == state, *visible_user_filters(User)]
+    filters = [_post_state_filter(state), *visible_user_filters(User)]
     if user_id is not None:
         filters.append(Post.author_user_id == user_id)
 
@@ -191,7 +205,7 @@ async def fetch_posts_by_state(
 async def fetch_posts_by_state_with_details(
     db: AsyncSession,
     *,
-    state: PostState,
+    state: PostState | Collection[PostState],
     user_id: UUID | None = None,
     offset: int = 0,
     limit: int | None = None,
@@ -208,7 +222,7 @@ async def fetch_posts_by_state_with_details(
     ModeratorUser = aliased(User, name="moderator_user")
     ModeratorProfile = aliased(Profile, name="moderator_profile")
 
-    filters = [Post.state == state, *visible_user_filters(AuthorUser)]
+    filters = [_post_state_filter(state), *visible_user_filters(AuthorUser)]
     if user_id is not None:
         filters.append(Post.author_user_id == user_id)
 

@@ -17,6 +17,7 @@ async def test_list_reviewed_posts_by_state_service_includes_summary():
         "flagged": 2,
         "rejected": 1,
         "reinstate": 0,
+        "escalate": 0,
     }
 
     # We mock the repository methods at their definition source

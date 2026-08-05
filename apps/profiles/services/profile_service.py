@@ -63,7 +63,7 @@ async def get_profile_me(user: User, db: AsyncSession) -> dict:
         db.add(profile)
         await db.commit()
         await db.refresh(profile)
-    user_data = await build_user_base_response(user, profile, db)
+    user_data = await build_user_base_response(user, profile, db, viewer_user_id=user.id)
     return {"user": user_data}
 
 async def update_profile_me(
@@ -176,7 +176,8 @@ async def update_profile_me(
     user_data = await build_user_base_response(
         current_user,
         profile,
-        db
+        db,
+        viewer_user_id=current_user.id,
     )
 
     return {
@@ -197,7 +198,7 @@ async def delete_user_me(user: User, db: AsyncSession) -> dict:
         profile = (
             await db.execute(select(Profile).where(Profile.user_id == user.id))
         ).scalar_one_or_none()
-        user_data = await build_user_base_response(user, profile, db)
+        user_data = await build_user_base_response(user, profile, db, viewer_user_id=user.id)
         return {
             "deleted": True,
             "status": user.status.value if hasattr(user.status, "value") else str(user.status),
@@ -240,7 +241,7 @@ async def delete_user_me(user: User, db: AsyncSession) -> dict:
     profile = (
         await db.execute(select(Profile).where(Profile.user_id == user.id))
     ).scalar_one_or_none()
-    user_data = await build_user_base_response(user, profile, db)
+    user_data = await build_user_base_response(user, profile, db, viewer_user_id=user.id)
     return {
         "deleted": True,
         "status": user.status.value if hasattr(user.status, "value") else str(user.status),
@@ -315,7 +316,9 @@ async def get_my_profile_service(
         await db.commit()
         await db.refresh(profile)
 
-    user_data = await build_user_base_response(target_user, profile, db)
+    user_data = await build_user_base_response(
+        target_user, profile, db, viewer_user_id=user.id
+    )
 
     # Inject relationship flags when viewing another user's profile
     if effective_user_id != user.id:

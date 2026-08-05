@@ -82,8 +82,24 @@ class PostState(str, Enum):
     flagged = "flagged"
     rejected = "rejected"
     reinstate = "reinstate"
+    escalate = "escalate"
     hidden = "hidden"
     deleted = "deleted"
+
+
+# User-facing surfaces (feed, profile post list, search) show these states.
+# ``reinstate`` stays its own status — it is visible, not remapped to published.
+FEED_VISIBLE_POST_STATES: tuple[PostState, ...] = (
+    PostState.published,
+    PostState.reinstate,
+)
+
+# Owner profile count / own post list: include flagged so authors still see moderated posts.
+OWNER_VISIBLE_POST_STATES: tuple[PostState, ...] = (
+    PostState.published,
+    PostState.flagged,
+    PostState.reinstate,
+)
 
 
 class MediaAssetState(str, Enum):

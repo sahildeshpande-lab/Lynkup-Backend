@@ -406,8 +406,8 @@ async def test_create_draft_replaces_existing_draft(test_users) -> None:
         assert drafts[0].id == second_id
         assert drafts[0].caption == "Second draft"
 
-        old_draft = (await session.execute(select(Post).where(Post.id == first_id))).scalar_one()
-        assert old_draft.state == PostState.deleted
+        old_draft = (await session.execute(select(Post).where(Post.id == first_id))).scalar_one_or_none()
+        assert old_draft is None
 
 
 @pytest.mark.asyncio
@@ -1027,8 +1027,9 @@ async def test_delete_post_service_success(test_users) -> None:
         await delete_post_service(post_id, user.id, session)
 
     async with async_session_factory() as session:
-        post = await get_post_service(post_id, user.id, session)
-        assert post.state == PostState.deleted
+        with pytest.raises(ApiError) as exc_info:
+            await get_post_service(post_id, user.id, session)
+        assert "not found" in exc_info.value.message.lower()
         profile = (await session.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one()
         assert profile.posts_count == 0
 
@@ -1422,10 +1423,12 @@ async def test_routes_post_management_flow(test_users) -> None:
             delete_res = await ac.request("DELETE", "/api/v1/posts", json={"id": post_id})
             assert delete_res.status_code == 200
 
-            # Verify deleted
+            # Verify hard-deleted
             get_deleted = await ac.get(f"/api/v1/posts/{post_id}")
             assert get_deleted.status_code == 200
-            assert get_deleted.json()["data"]["state"] == "deleted"
+            body = get_deleted.json()
+            assert body["status"] is False
+            assert "not found" in body["message"].lower()
     finally:
         app.dependency_overrides.pop(get_current_user, None)
         app.dependency_overrides.pop(get_current_moderator, None)
@@ -1480,8 +1483,9 @@ async def test_delete_draft_post_service_success(test_users) -> None:
         await delete_draft_post_service(draft_id, user.id, session)
 
     async with async_session_factory() as session:
-        post = await get_post_service(draft_id, user.id, session)
-        assert post.state == PostState.deleted
+        with pytest.raises(ApiError) as exc_info:
+            await get_post_service(draft_id, user.id, session)
+        assert "not found" in exc_info.value.message.lower()
 
 
 @pytest.mark.asyncio

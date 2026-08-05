@@ -22,16 +22,16 @@ async def lifespan(app: FastAPI):
     logger = logging.getLogger(__name__)
     startup_started = time.perf_counter()
 
-    # if db_settings.auto_init_db:
-    #     await init_db()
-    #     try:
-    #         logger.info("Start DB Migrations")
-    #         await run_db_migrations_programmatically()
-    #         logger.info("Migrations completed successfully")
-    #     except Exception as e:
-    #         logger.exception(f"Migration startup failed: {e}")
-    #         raise
-    #     logger.info(f"Initialized database at {db_settings.db_host}")
+    if db_settings.auto_init_db:
+        await init_db()
+        # try:
+        #     logger.info("Start DB Migrations")
+        #     # await run_db_migrations_programmatically()
+        #     logger.info("Migrations completed successfully")
+        # except Exception as e:
+        #     logger.exception(f"Migration startup failed: {e}")
+        #     raise
+        # logger.info(f"Initialized database at {db_settings.db_host}")
 
     from core.email.config import settings as email_settings
 

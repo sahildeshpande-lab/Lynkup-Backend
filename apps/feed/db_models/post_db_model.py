@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, Integer, Enum, Boolean
+from sqlalchemy import Column, DateTime, Integer, Enum, Boolean, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel, Relationship
@@ -43,6 +43,10 @@ class Post(SQLModel, table=True):
     reviewed_at: datetime | None = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    moderation_notes: str | None = Field(
+        default=None,
+        sa_column=Column(Text, nullable=True),
     )
     like_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
     repost_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))

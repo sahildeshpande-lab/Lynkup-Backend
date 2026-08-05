@@ -290,9 +290,9 @@ async def list_processing_posts(
 
 @router.get("/admin/posts/reviewed", response_model=ApiResponse)
 async def list_reviewed_posts(
-    status: Literal["published", "flagged", "rejected", "reinstate"] | None = Query(
+    status: Literal["published", "flagged", "rejected", "reinstate", "escalate"] | None = Query(
         default=None,
-        description="Filter reviewed posts by status: published, flagged, rejected, reinstate",
+        description="Filter reviewed posts by status: published, flagged, rejected, reinstate, escalate",
     ),
     moderator_id: str | None = Query(
         default=None,
@@ -362,23 +362,32 @@ async def admin_publish_or_flag_post(
     current_user=Depends(get_current_moderator),
 ) -> ApiResponse:
     """
-    Moderate a post by setting its state: published, flagged, rejected, or reinstate.
+    Moderate a post by setting its state: published, flagged, rejected (hard delete),
+    reinstate, or escalate.
     """
     from apps.feed.services import admin_publish_post_service, format_post_detail
-    post = await admin_publish_post_service(
+    result = await admin_publish_post_service(
         post_id=payload.post_id,
         status=payload.status,
         admin_user_id=current_user.id,
-        db=db
+        db=db,
+        notes=payload.notes,
     )
     _status_messages = {
         "published": "Post published successfully",
         "flagged": "Post flagged successfully",
-        "rejected": "Post rejected successfully",
+        "rejected": "Post rejected and deleted successfully",
         "reinstate": "Post reinstated successfully",
+        "escalate": "Post escalated to senior admin successfully",
     }
+    if payload.status == "rejected":
+        return ApiResponse(
+            status=True,
+            message=_status_messages["rejected"],
+            data=result,
+        )
     return ApiResponse(
         status=True,
         message=_status_messages.get(payload.status, "Post updated successfully"),
-        data=format_post_detail(post, viewer_user_id=current_user.id),
+        data=format_post_detail(result, viewer_user_id=current_user.id),
     )

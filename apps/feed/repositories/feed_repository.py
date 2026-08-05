@@ -110,7 +110,7 @@ WITH ranked_posts AS (
         ON author_user.id = p.author_user_id
     LEFT JOIN profiles me
         ON me.user_id = :current_user
-    WHERE p.state::text = 'published'
+    WHERE p.state::text IN ('published', 'reinstate')
       AND p.author_user_id <> :current_user
       AND {_visible_author_sql("author_user")}
       AND {_visibility_sql("author_profile", "p.author_user_id")}
@@ -137,7 +137,7 @@ WITH ranked_posts AS (
         ON author_user.id = p.author_user_id
     LEFT JOIN profiles me
         ON me.user_id = :current_user
-    WHERE p.state::text = 'published'
+    WHERE p.state::text IN ('published', 'reinstate')
       AND reposter_profile.user_id <> :current_user
       AND {_visible_author_sql("reposter_user")}
       AND {_visible_author_sql("author_user")}
@@ -206,7 +206,7 @@ WITH ranked_posts AS (
         ON author_profile.user_id = p.author_user_id
     JOIN users author_user
         ON author_user.id = p.author_user_id
-    WHERE p.state::text = 'published'
+    WHERE p.state::text IN ('published', 'reinstate')
       AND p.author_user_id <> :current_user
       AND {_visible_author_sql("author_user")}
       AND {_visibility_sql("author_profile", "p.author_user_id")}
@@ -227,7 +227,7 @@ WITH ranked_posts AS (
         ON author_profile.user_id = p.author_user_id
     JOIN users author_user
         ON author_user.id = p.author_user_id
-    WHERE p.state::text = 'published'
+    WHERE p.state::text IN ('published', 'reinstate')
       AND reposter_profile.user_id <> :current_user
       AND {_visible_author_sql("reposter_user")}
       AND {_visible_author_sql("author_user")}

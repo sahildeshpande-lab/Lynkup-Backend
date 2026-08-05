@@ -20,4 +20,25 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await conn.run_sync(SQLModel.metadata.create_all)
+        # Existing DBs: create_all does not add enum values or new columns.
+        await conn.execute(
+            text(
+                """
+                DO $$ BEGIN
+                    ALTER TYPE poststate ADD VALUE 'escalate';
+                EXCEPTION
+                    WHEN duplicate_object THEN NULL;
+                    WHEN undefined_object THEN NULL;
+                END $$
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS posts
+                ADD COLUMN IF NOT EXISTS moderation_notes TEXT
+                """
+            )
+        )
     _db_initialized = True

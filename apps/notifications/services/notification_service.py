@@ -49,6 +49,32 @@ logger = logging.getLogger(__name__)
 
 _FIREBASE_TOPICS_KEY = "firebase_topics"
 
+# User-facing post moderation notification types (rows live in notification_types).
+POST_FLAGGED = "POST_FLAGGED"
+POST_REINSTATED = "POST_REINSTATED"
+POST_REJECTED = "POST_REJECTED"
+
+_POST_AUTHOR_NOTIFICATION_COPY: dict[str, tuple[str, str]] = {
+    POST_FLAGGED: (
+        "Post Flagged",
+        "Your post has been flagged by our moderation team and is currently under review.",
+    ),
+    POST_REINSTATED: (
+        "Post Reinstated",
+        "Your post has been reinstated and is now visible to other users.",
+    ),
+    POST_REJECTED: (
+        "Post Rejected",
+        "Your post has been rejected by our moderation team.",
+    ),
+}
+
+_POST_AUTHOR_TYPE_DESCRIPTIONS: dict[str, str] = {
+    POST_FLAGGED: "Post flagged by moderation",
+    POST_REINSTATED: "Post reinstated by moderation",
+    POST_REJECTED: "Post rejected by moderation",
+}
+
 
 async def _merged_category_preferences(
     db: AsyncSession,
@@ -465,6 +491,7 @@ async def create_notification(
     body: str,
     sender_user_id: UUID | None = None,
     campaign_id: UUID | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> Notification | None:
     """
     Common entry point for creating in-app + push notifications.
@@ -500,6 +527,7 @@ async def create_notification(
         notification_type=type_name,
         notification_id=None,
         sender_user_id=sender_user_id,
+        extra=extra,
     )
 
     if preference.in_app_enabled and category_enabled:
@@ -516,6 +544,7 @@ async def create_notification(
             notification_type=type_name,
             notification_id=notification.id,
             sender_user_id=sender_user_id,
+            extra=extra,
         )
         notification.deep_link_payload = data_payload
         db.add(notification)
@@ -579,3 +608,92 @@ async def create_notification(
         return None
 
     return notification
+
+
+async def _ensure_notification_type(
+    db: AsyncSession,
+    name: str,
+    *,
+    description: str | None = None,
+) -> Any:
+    """Get or create a notification_types row (data only — no schema change)."""
+    from apps.notifications.db_models import NotificationType
+    from common.time import utc_now
+
+    existing = await get_notification_type_by_name(db, name)
+    if existing is not None:
+        return existing
+
+    row = NotificationType(
+        name=name,
+        description=description,
+        is_active=True,
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    db.add(row)
+    try:
+        await db.commit()
+        await db.refresh(row)
+        logger.info("Seeded notification type name=%s", name)
+        return row
+    except Exception:
+        await db.rollback()
+        # Concurrent insert — re-read.
+        existing = await get_notification_type_by_name(db, name)
+        if existing is not None:
+            return existing
+        logger.exception("Failed to seed notification type name=%s", name)
+        return None
+
+
+async def notify_post_author(
+    db: AsyncSession,
+    *,
+    post_id: UUID,
+    author_user_id: UUID,
+    notification_type: str,
+) -> Notification | None:
+    """
+    Notify a post author about a moderation (or other post) event.
+
+    Reuses ``create_notification`` for in-app + FCM token push. Never raises —
+    callers must treat moderation as successful even when this returns None.
+    """
+    type_name = (notification_type or "").strip().upper()
+    copy = _POST_AUTHOR_NOTIFICATION_COPY.get(type_name)
+    if copy is None:
+        logger.error(
+            "Unsupported post-author notification type=%s post_id=%s author_user_id=%s",
+            type_name,
+            post_id,
+            author_user_id,
+        )
+        return None
+
+    title, body = copy
+    try:
+        ensured = await _ensure_notification_type(
+            db,
+            type_name,
+            description=_POST_AUTHOR_TYPE_DESCRIPTIONS.get(type_name),
+        )
+        if ensured is None:
+            return None
+
+        return await create_notification(
+            db,
+            recipient_user_id=author_user_id,
+            notification_type=type_name,
+            title=title,
+            body=body,
+            extra={"post_id": str(post_id)},
+        )
+    except Exception:
+        logger.exception(
+            "Failed to notify post author type=%s post_id=%s author_user_id=%s",
+            type_name,
+            post_id,
+            author_user_id,
+        )
+        return None
