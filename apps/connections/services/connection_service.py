@@ -1,17 +1,21 @@
 from __future__ import annotations
 from datetime import datetime, timezone
+import logging
 from uuid import UUID
 from sqlalchemy import or_, and_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
 from apps.connections.db_models import Block, Connection, ConnectionRequest, Follow
-from apps.profiles.db_models.profile_db_model import Profile
+from apps.notifications.services import create_notification
 from apps.profiles.db_models import Profile
 from ..schemas import ApiResponse
 from common.enums import UserStatus
 from common.responses import error_response, success_response
 from common.user_visibility import visible_user_filters
 from core.images import generate_profile_image_url
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_RELATIONSHIP_FLAGS: dict[str, bool] = {
@@ -51,6 +55,40 @@ async def are_connected(db: AsyncSession, user_id_1: UUID, user_id_2: UUID) -> b
     )
     result = await db.execute(stmt)
     return result.scalars().first() is not None
+
+async def _clear_conflicting_connection_requests(
+    db: AsyncSession,
+    *,
+    sender_user_id: UUID,
+    receiver_user_id: UUID,
+    status: str,
+    exclude_request_id: UUID,
+) -> None:
+    """
+    Remove prior rows with the same sender/receiver/status.
+
+    The connection_requests table enforces uniqueness on (sender, receiver, status).
+    Re-decline or re-accept after a prior outcome leaves a historical row that would
+    cause IntegrityError when updating the current pending request.
+    """
+    stmt = select(ConnectionRequest).where(
+        ConnectionRequest.sender_user_id == sender_user_id,
+        ConnectionRequest.receiver_user_id == receiver_user_id,
+        ConnectionRequest.status == status,
+        ConnectionRequest.id != exclude_request_id,
+    )
+    conflicting = (await db.execute(stmt)).scalars().all()
+    for row in conflicting:
+        await db.delete(row)
+    if conflicting:
+        await db.flush()
+        logger.info(
+            "Removed %s conflicting connection request row(s) sender=%s receiver=%s status=%s",
+            len(conflicting),
+            sender_user_id,
+            receiver_user_id,
+            status,
+        )
 
 async def has_pending_request(db: AsyncSession, user_id_1: UUID, user_id_2: UUID) -> bool:
     stmt = select(ConnectionRequest).where(
@@ -97,6 +135,32 @@ async def send_connection_request(db: AsyncSession, sender_id: UUID, receiver_id
     db.add(request)
     await db.commit()
     await db.refresh(request)
+
+    try:
+        sender_profile = (
+            await db.execute(select(Profile).where(Profile.user_id == sender_id))
+        ).scalar_one_or_none()
+        sender_name = "Someone"
+        if sender_profile is not None:
+            sender_name = (
+                f"{sender_profile.first_name or ''} {sender_profile.last_name or ''}".strip()
+                or "Someone"
+            )
+        await create_notification(
+            db,
+            recipient_user_id=receiver_id,
+            notification_type="CONNECTION_REQUEST",
+            title="Connection Request",
+            body=f"{sender_name} sent you a connection request.",
+            sender_user_id=sender_id,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send CONNECTION_REQUEST notification sender=%s receiver=%s",
+            sender_id,
+            receiver_id,
+        )
+
     return success_response(
         "Connection request sent successfully.",
         {
@@ -125,10 +189,20 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
     if not req:
         return error_response("Pending request not found.", response_cls=ApiResponse)
 
+    request_id = req.id
+    sender_user_id = req.sender_user_id
+    receiver_user_id = req.receiver_user_id
+    await _clear_conflicting_connection_requests(
+        db,
+        sender_user_id=sender_user_id,
+        receiver_user_id=receiver_user_id,
+        status=response,
+        exclude_request_id=request_id,
+    )
     req.status = response
 
     if response == "accepted":
-        low_id, high_id = build_connection_pair(req.sender_user_id, req.receiver_user_id)
+        low_id, high_id = build_connection_pair(sender_user_id, receiver_user_id)
         conn_check = select(Connection).where(Connection.user_low_id == low_id, Connection.user_high_id == high_id)
         conn_res = await db.execute(conn_check)
         existing_conn = conn_res.scalars().first()
@@ -146,11 +220,22 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
         if should_increment:
             from apps.profiles.services.profile_stats_service import increment_connection_counts_for_users
             await increment_connection_counts_for_users(
-                db, req.sender_user_id, req.receiver_user_id
+                db, sender_user_id, receiver_user_id
             )
 
-    await db.commit()
-    await db.refresh(req)
+    try:
+        await db.commit()
+        await db.refresh(req)
+    except IntegrityError:
+        await db.rollback()
+        logger.exception(
+            "Failed to persist connection request response request_id=%s sender=%s receiver=%s response=%s",
+            request_id,
+            sender_user_id,
+            receiver_user_id,
+            response,
+        )
+        return error_response("Failed to update connection request.", response_cls=ApiResponse)
 
     # Temporarily disabled: connection request accepted/declined email
     # # Queue email to the person who originally sent the request
@@ -174,13 +259,58 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
     # except Exception as e:
     #     logger.exception("Failed to queue Lynkup response email: %s", e)
 
+    if response in ("accepted", "declined"):
+        notification_type = (
+            "CONNECTION_ACCEPTED" if response == "accepted" else "CONNECTION_DECLINED"
+        )
+        try:
+            receiver_profile = (
+                await db.execute(select(Profile).where(Profile.user_id == user_id))
+            ).scalar_one_or_none()
+            receiver_name = "Someone"
+            if receiver_profile is not None:
+                receiver_name = (
+                    f"{receiver_profile.first_name or ''} {receiver_profile.last_name or ''}".strip()
+                    or "Someone"
+                )
+            if response == "accepted":
+                title = "Connection Accepted"
+                body = f"{receiver_name} accepted your connection request."
+            else:
+                title = "Connection Declined"
+                body = f"{receiver_name} declined your connection request."
+            logger.info(
+                "Sending %s push notification request_id=%s recipient=%s responder=%s title=%r",
+                notification_type,
+                request_id,
+                sender_user_id,
+                user_id,
+                title,
+            )
+            await create_notification(
+                db,
+                recipient_user_id=sender_user_id,
+                notification_type=notification_type,
+                title=title,
+                body=body,
+                sender_user_id=user_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send %s push notification request_id=%s recipient=%s responder=%s",
+                notification_type,
+                request_id,
+                sender_user_id,
+                user_id,
+            )
+
     is_accepted = response == "accepted"
     return success_response(
         "You are now connected." if is_accepted else "Request declined successfully.",
         {
             "lynkup_id": req.id,
-            "sender_user_id": req.sender_user_id,
-            "receiver_user_id": req.receiver_user_id,
+            "sender_user_id": sender_user_id,
+            "receiver_user_id": receiver_user_id,
             "status": req.status,
             "is_connected": is_accepted,
             "request_sent": False,

@@ -37,6 +37,18 @@ class ReportUserDetail(BaseModel):
     profilePhoto_url: str | None = None
 
 
+def is_report_reviewed(status: ReportStatus) -> bool:
+    """True once a moderator has rejected or actioned the report."""
+    return status in (ReportStatus.rejected, ReportStatus.actioned)
+
+
+class PreviousCommentItem(BaseModel):
+    moderator_id: UUID | None = None
+    moderator_name: str | None = None
+    updated_at: datetime
+    admin_comment: str | None = None
+
+
 class ReportDetailData(BaseModel):
     id: UUID
     reported_id: UUID
@@ -45,12 +57,16 @@ class ReportDetailData(BaseModel):
     reason: str
     status: ReportStatus
     moderator_id: UUID | None = None
+    moderator_name: str | None = None
     admin_comment: str | None = None
     created_at: datetime
     updated_at: datetime
     reporter_details: ReportUserDetail | None = None
     moderator_info: ReportUserDetail | None = None
     report_count: int = 0
+    is_reviewed: bool = False
+    previous_comments: list[PreviousCommentItem] | None = None
+    post_id: UUID | None = None
 
 
 class ReportResponse(ApiResponse):
@@ -66,11 +82,13 @@ class EntityReportItem(BaseModel):
     reason: str
     status: ReportStatus
     moderator_id: UUID | None = None
+    moderator_name: str | None = None
     admin_comment: str | None = None
     created_at: datetime
     updated_at: datetime
     reporter_details: ReportUserDetail | None = None
     moderator_info: ReportUserDetail | None = None
+    is_reviewed: bool = False
 
 
 class ReportListData(BaseModel):
@@ -93,11 +111,24 @@ class ReportedEntityItem(BaseModel):
     report_count: int
     latest_reported_at: datetime
     moderator_id: UUID | None = None
+    moderator_name: str | None = None
     status: ReportStatus
+    admin_comment: str | None = None
+    is_reviewed: bool = False
+    previous_comments: list[PreviousCommentItem] | None = None
+    post_id: UUID | None = None
+
+
+class ReportStatusSummary(BaseModel):
+    under_review: int = 0
+    actioned: int = 0
+    rejected: int = 0
 
 
 class ReportedEntityListData(BaseModel):
     items: list[ReportedEntityItem]
+    summary: ReportStatusSummary
+    total: int
     page: int
     pageSize: int
     totalItems: int

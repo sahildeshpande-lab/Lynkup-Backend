@@ -26,13 +26,9 @@ class Post(SQLModel, table=True):
     )
     content: dict | None = Field(default_factory=dict, sa_column=Column(JSONB, nullable=True, default={}))
     revision_number: int = Field(default=1, sa_column=Column(Integer, nullable=False, default=1))
-    created_at: datetime = Field(
-        default_factory=utc_now,
-        sa_column=Column(DateTime(timezone=True), nullable=False),
-    )
-    updated_at: datetime = Field(
-        default_factory=utc_now,
-        sa_column=Column(DateTime(timezone=True), nullable=False),
+    is_edited: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default="false"),
     )
     is_moderator_reviewed: bool = Field(
         default=False,
@@ -52,6 +48,22 @@ class Post(SQLModel, table=True):
     repost_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
     share_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
     comment_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
+    extracted_keywords: dict | None = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
+    keywords_updated_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    created_at: datetime = Field(
+            default_factory=utc_now,
+            sa_column=Column(DateTime(timezone=True), nullable=False),
+        )
+    updated_at: datetime = Field(
+            default_factory=utc_now,
+            sa_column=Column(DateTime(timezone=True), nullable=False),
+        )
 
     attachments: List["PostAttachment"] = Relationship(
         sa_relationship=relationship("PostAttachment", back_populates="post", cascade="all, delete-orphan", lazy="selectin")

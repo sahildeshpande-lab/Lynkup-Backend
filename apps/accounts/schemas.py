@@ -21,7 +21,17 @@ class SocialAuthRequest(BaseModel):
     user: Role = "user"
     device_id: str
     fullName: Optional[str] = None
-    # profilePhotoUrl: Optional[str] = None
+    platform: str | None = Field(
+        default=None,
+        max_length=20,
+        description="Optional client platform (e.g. android, ios).",
+    )
+    fcm_token: str | None = Field(
+        default=None,
+        description="Optional Firebase Cloud Messaging device token.",
+    )
+    # Google / Apple avatar URL — stored as-is on profiles.profile_photo_url.
+    profile_photo_url: Optional[str] = None
 
     @field_validator("device_id")
     @classmethod
@@ -30,6 +40,22 @@ class SocialAuthRequest(BaseModel):
         if not normalized:
             raise ValueError("device_id cannot be blank")
         return normalized
+
+    @field_validator("platform", "fcm_token")
+    @classmethod
+    def normalize_optional_strings(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("profile_photo_url")
+    @classmethod
+    def normalize_profile_photo_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 class EmailSignupRequest(BaseModel):
@@ -40,6 +66,15 @@ class EmailSignupRequest(BaseModel):
     role: Role
     firebaseId: str
     device_id: str
+    platform: str | None = Field(
+        default=None,
+        max_length=20,
+        description="Optional client platform (e.g. android, ios).",
+    )
+    fcm_token: str | None = Field(
+        default=None,
+        description="Optional Firebase Cloud Messaging device token.",
+    )
 
     @field_validator("device_id")
     @classmethod
@@ -48,6 +83,14 @@ class EmailSignupRequest(BaseModel):
         if not normalized:
             raise ValueError("device_id cannot be blank")
         return normalized
+
+    @field_validator("platform", "fcm_token")
+    @classmethod
+    def normalize_optional_strings(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
     @field_validator("firstName", "lastName")
     @classmethod
@@ -80,6 +123,15 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=8)
     firebaseId: str
     device_id: str
+    platform: str | None = Field(
+        default=None,
+        max_length=20,
+        description="Optional client platform (e.g. android, ios).",
+    )
+    fcm_token: str | None = Field(
+        default=None,
+        description="Optional Firebase Cloud Messaging device token.",
+    )
 
     @field_validator("device_id")
     @classmethod
@@ -88,6 +140,14 @@ class LoginRequest(BaseModel):
         if not normalized:
             raise ValueError("device_id cannot be blank")
         return normalized
+
+    @field_validator("platform", "fcm_token")
+    @classmethod
+    def normalize_optional_strings(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
     @field_validator("email")
     @classmethod

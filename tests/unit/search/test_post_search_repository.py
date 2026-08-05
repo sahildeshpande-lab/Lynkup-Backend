@@ -104,6 +104,68 @@ def test_university_match_clause_ors_id_and_name():
     assert " OR " in compiled
 
 
+def test_build_search_filters_query_matches_author_major():
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.orm import aliased
+
+    from apps.accounts.db_models import User
+    from apps.profiles.db_models.profile_db_model import Profile
+
+    author_profile = aliased(Profile, name="author_profile")
+    author_user = aliased(User, name="author_user")
+    filters = repo._build_search_filters(
+        current_user_id=uuid.uuid4(),
+        connected_author_ids=set(),
+        query="computer science",
+        hashtag=None,
+        academic_interest=None,
+        university_name=None,
+        major=None,
+        minor=None,
+        country=None,
+        edu_level=None,
+        author_profile=author_profile,
+        author_user=author_user,
+    )
+    compiled = " ".join(
+        str(f.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        for f in filters
+    ).lower()
+    assert "major" in compiled
+    assert "computer science" in compiled
+
+
+def test_build_search_filters_major_filter_matches_author_major():
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.orm import aliased
+
+    from apps.accounts.db_models import User
+    from apps.profiles.db_models.profile_db_model import Profile
+
+    author_profile = aliased(Profile, name="author_profile")
+    author_user = aliased(User, name="author_user")
+    filters = repo._build_search_filters(
+        current_user_id=uuid.uuid4(),
+        connected_author_ids=set(),
+        query=None,
+        hashtag=None,
+        academic_interest=None,
+        university_name=None,
+        major="Computer Science",
+        minor=None,
+        country=None,
+        edu_level=None,
+        author_profile=author_profile,
+        author_user=author_user,
+    )
+    compiled = " ".join(
+        str(f.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        for f in filters
+    ).lower()
+    assert "major" in compiled
+    assert "computer science" in compiled
+
+
 def test_build_search_filters_query_matches_author_name():
     from sqlalchemy.dialects import postgresql
     from sqlalchemy.orm import aliased
@@ -133,7 +195,56 @@ def test_build_search_filters_query_matches_author_name():
     ).lower()
     assert "first_name" in compiled
     assert "last_name" in compiled
-    assert "%sahil%" in compiled
+    # Names use whole-word regex (~* + \y); major/minor in the same OR use ilike.
+    assert "~*" in compiled
+    assert "sahil" in compiled
+    assert "major" in compiled
+
+
+def test_word_boundary_match_escapes_regex_metacharacters():
+    from sqlalchemy.dialects import postgresql
+
+    from apps.feed.db_models import Post
+
+    clause = repo._word_boundary_match(Post.content["caption"].astext, "C++")
+    compiled = str(
+        clause.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "\\y" in compiled
+    assert "C\\+\\+" in compiled or "C++" not in compiled.replace("\\+", "")
+
+
+def test_build_search_filters_excludes_current_user_posts():
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.orm import aliased
+
+    from apps.accounts.db_models import User
+    from apps.profiles.db_models.profile_db_model import Profile
+
+    current_user_id = uuid.uuid4()
+    author_profile = aliased(Profile, name="author_profile")
+    author_user = aliased(User, name="author_user")
+    filters = repo._build_search_filters(
+        current_user_id=current_user_id,
+        connected_author_ids=set(),
+        query=None,
+        hashtag=None,
+        academic_interest=None,
+        university_name=None,
+        major=None,
+        minor=None,
+        country=None,
+        edu_level=None,
+        author_profile=author_profile,
+        author_user=author_user,
+    )
+    compiled = " ".join(
+        str(f.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        for f in filters
+    ).lower()
+    assert "author_user_id" in compiled
+    assert str(current_user_id) in compiled
+    assert "!=" in compiled or "<>" in compiled
 
 
 def test_country_match_clause_ors_ids_and_names():

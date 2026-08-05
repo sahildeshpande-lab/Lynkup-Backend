@@ -31,6 +31,8 @@ async def clean_pytest_connections_data(session):
         await session.execute(text("DELETE FROM connections WHERE user_low_id = ANY(:user_ids) OR user_high_id = ANY(:user_ids)"), params)
         await session.execute(text("DELETE FROM follows WHERE follower_user_id = ANY(:user_ids) OR following_user_id = ANY(:user_ids)"), params)
         await session.execute(text("DELETE FROM blocks WHERE blocker_user_id = ANY(:user_ids) OR blocked_user_id = ANY(:user_ids)"), params)
+        await session.execute(text("DELETE FROM notifications WHERE recipient_user_id = ANY(:user_ids)"), params)
+        await session.execute(text("DELETE FROM notification_preferences WHERE user_id = ANY(:user_ids)"), params)
         await session.execute(text("DELETE FROM user_roles WHERE user_id = ANY(:user_ids)"), params)
         await session.execute(
             text(
@@ -479,6 +481,39 @@ async def test_lynkup_accept_increments_connection_count(test_users) -> None:
         )).scalar_one()
         assert primary_stats.connection_count == 1
         assert alice_stats.connection_count == 1
+
+
+@pytest.mark.asyncio
+async def test_lynkup_decline_replaces_prior_declined_request(test_users) -> None:
+    primary, users = test_users
+    alice = users[0]
+
+    async with async_session_factory() as session:
+        session.add(
+            ConnectionRequest(
+                sender_user_id=alice.id,
+                receiver_user_id=primary.id,
+                status="declined",
+            )
+        )
+        await session.commit()
+
+    async with async_session_factory() as session:
+        response = await respond_connection_request(session, primary.id, alice.id, "declined")
+        assert response.status is True
+        assert response.data["status"] == "declined"
+        assert response.data["is_connected"] is False
+
+        rows = (
+            await session.execute(
+                select(ConnectionRequest).where(
+                    ConnectionRequest.sender_user_id == alice.id,
+                    ConnectionRequest.receiver_user_id == primary.id,
+                    ConnectionRequest.status == "declined",
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
 
 
 @pytest.mark.asyncio

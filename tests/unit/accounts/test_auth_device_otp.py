@@ -38,6 +38,7 @@ def _installation():
         device_id="device-1",
         is_active=True,
         last_active_at=datetime.now(timezone.utc),
+        fcm_token="fcm-token-1",
     )
 
 
@@ -102,6 +103,30 @@ async def test_evaluate_device_otp_requirement_when_verified_same_device(mock_db
     assert needs_otp is False
 
 
+@pytest.mark.asyncio
+async def test_evaluate_device_otp_skips_known_inactive_device_after_logout(mock_db):
+    """Deactivated installation (manual logout) is still a known/trusted device."""
+    verified_at = datetime.now(timezone.utc)
+    user = _user(email_verified_at=verified_at)
+    inactive = _installation()
+    inactive.is_active = False
+    db = mock_db()
+
+    with patch(
+        "apps.accounts.services.device_otp_service.get_user_installation",
+        AsyncMock(return_value=inactive),
+    ):
+        installation, is_new_device, needs_otp = await evaluate_device_otp_requirement(
+            db,
+            user,
+            "device-1",
+        )
+
+    assert installation is inactive
+    assert is_new_device is False
+    assert needs_otp is False
+
+
 def test_clear_session_email_verification():
     user = _user(email_verified_at=datetime.now(timezone.utc))
     user.email_otp = "1234"
@@ -117,7 +142,13 @@ def test_clear_session_email_verification():
 @pytest.mark.asyncio
 async def test_login_sends_otp_when_verification_required(mock_db):
     user = _user(email_verified_at=None)
-    payload = SimpleNamespace(email=user.email, device_id="device-1", password="Secret123")
+    payload = SimpleNamespace(
+        email=user.email,
+        device_id="device-1",
+        password="Secret123",
+        platform=None,
+        fcm_token=None,
+    )
     db = mock_db()
 
     with (
@@ -125,6 +156,7 @@ async def test_login_sends_otp_when_verification_required(mock_db):
         patch.object(auth_svc, "evaluate_device_otp_requirement", AsyncMock(return_value=(_installation(), False, True))),
         patch.object(auth_svc, "send_otp_challenge", AsyncMock()) as send_otp,
         patch.object(auth_svc, "_issue_auth_session", AsyncMock(return_value={"user": {"isEmailVerified": False}})),
+        patch.object(auth_svc, "_fetch_user_profile", AsyncMock(return_value=None)),
     ):
         hasher.verify.return_value = True
         db.execute = AsyncMock(
@@ -146,7 +178,13 @@ async def test_login_sends_otp_when_verification_required(mock_db):
 async def test_login_success_without_otp_when_verified_same_device(mock_db):
     verified_at = datetime.now(timezone.utc)
     user = _user(email_verified_at=verified_at)
-    payload = SimpleNamespace(email=user.email, device_id="device-1", password="Secret123")
+    payload = SimpleNamespace(
+        email=user.email,
+        device_id="device-1",
+        password="Secret123",
+        platform=None,
+        fcm_token=None,
+    )
     installation = _installation()
     db = mock_db()
 
@@ -154,7 +192,10 @@ async def test_login_success_without_otp_when_verified_same_device(mock_db):
         patch.object(auth_svc, "PASSWORD_HASHER") as hasher,
         patch.object(auth_svc, "evaluate_device_otp_requirement", AsyncMock(return_value=(installation, False, False))),
         patch.object(auth_svc, "send_otp_challenge", AsyncMock()) as send_otp,
+        patch.object(auth_svc, "upsert_user_installation", AsyncMock(return_value=installation)),
         patch.object(auth_svc, "_issue_auth_session", AsyncMock(return_value={"user": {"isEmailVerified": True}})),
+        patch.object(auth_svc, "_fetch_user_profile", AsyncMock(return_value=None)),
+        patch("apps.chat.service.sync_stream_user_on_auth", AsyncMock()),
     ):
         hasher.verify.return_value = True
         db.execute = AsyncMock(
@@ -220,8 +261,9 @@ async def test_login_rejects_apple_account_without_password_hash(mock_db):
     )
 
 @pytest.mark.asyncio
-async def test_logout_clears_email_verification(mock_db):
-    user = _user(email_verified_at=datetime.now(timezone.utc))
+async def test_logout_preserves_email_verification_for_known_device(mock_db):
+    verified_at = datetime.now(timezone.utc)
+    user = _user(email_verified_at=verified_at)
     user.email_otp = "1234"
     user.email_otp_created_at = datetime.now(timezone.utc)
     installation = _installation()
@@ -230,11 +272,15 @@ async def test_logout_clears_email_verification(mock_db):
     with (
         patch.object(session_svc, "_revoke_refresh_token_row", AsyncMock()),
         patch("apps.accounts.services.session_service.revoke_firebase_tokens"),
+        patch(
+            "apps.notifications.services.topic_service.TopicService.unsubscribe_device_from_user_topics",
+            AsyncMock(),
+        ) as unsubscribe,
     ):
         db.execute = AsyncMock(
             side_effect=[
                 SimpleNamespace(scalar_one_or_none=lambda: user),
-                SimpleNamespace(scalar_one_or_none=lambda: installation),
+                SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [installation])),
                 SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
             ]
         )
@@ -242,36 +288,10 @@ async def test_logout_clears_email_verification(mock_db):
 
         await session_svc.logout(payload, {"uid": user.firebase_uid}, db)
 
-    assert user.email_verified_at is None
+    assert user.email_verified_at == verified_at
     assert user.email_otp is None
     assert user.email_otp_created_at is None
-    db.commit.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_logout_clears_email_verification(mock_db):
-    user = _user(email_verified_at=datetime.now(timezone.utc))
-    user.email_otp = "1234"
-    user.email_otp_created_at = datetime.now(timezone.utc)
-    installation = _installation()
-    db = mock_db()
-
-    with (
-        patch.object(session_svc, "_revoke_refresh_token_row", AsyncMock()),
-        patch("apps.accounts.services.session_service.revoke_firebase_tokens"),
-    ):
-        db.execute = AsyncMock(
-            side_effect=[
-                SimpleNamespace(scalar_one_or_none=lambda: user),
-                SimpleNamespace(scalar_one_or_none=lambda: installation),
-                SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
-            ]
-        )
-        payload = SimpleNamespace(device_id="device-1")
-
-        await session_svc.logout(payload, {"uid": user.firebase_uid}, db)
-
-    assert user.email_verified_at is None
-    assert user.email_otp is None
-    assert user.email_otp_created_at is None
+    assert installation.is_active is False
+    assert installation.fcm_token is None
+    unsubscribe.assert_awaited_once()
     db.commit.assert_awaited_once()

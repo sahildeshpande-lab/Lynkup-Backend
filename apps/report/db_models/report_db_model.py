@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, Enum as SqlEnum, Index, Text, UniqueConstraint, text
+from sqlalchemy import Column, DateTime, Enum as SqlEnum, Index, Text, text
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -73,5 +73,4 @@ class Report(SQLModel, table=True):
         Index("ix_reports_created_at_desc", text("created_at DESC")),
         Index("ix_reports_composite_entity", "entity_type", "entity_id"),
         Index("ix_reports_composite_status_created_at", "status", text("created_at DESC")),
-        UniqueConstraint("reported_id", "entity_type", "entity_id", name="uq_reports_reported_entity"),
     )

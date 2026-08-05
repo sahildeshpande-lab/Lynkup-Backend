@@ -8,6 +8,14 @@ from apps.engagement.db_models import PostReaction, Repost, Bookmark, ShareEvent
 from apps.moderation.db_models import ModerationWordsConfig, ModerationAssignmentState
 from apps.invitations.db_models import Invitation
 from apps.report.db_models import Report
+from apps.notifications.db_models import (
+    Notification,
+    NotificationCampaign,
+    NotificationCampaignAudience,
+    NotificationCategory,
+    NotificationPreference,
+    NotificationType,
+)
 
 __all__ = [
     "ConsentRecord",
@@ -50,5 +58,11 @@ __all__ = [
     "ModerationWordsConfig",
     "ModerationAssignmentState",
     "Invitation",
+    "NotificationType",
+    "NotificationCategory",
+    "NotificationPreference",
+    "NotificationCampaign",
+    "NotificationCampaignAudience",
+    "Notification",
 ]
 

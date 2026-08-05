@@ -21,7 +21,7 @@ from apps.report.services import (
     get_reports,
     review_report_admin_service,
 )
-from common.enums import ReportEntityType
+from common.enums import ReportEntityType, ReportStatus
 from common.pagination import PaginationParams
 from common.schemas import ApiResponse
 from core.database.session import get_session
@@ -80,12 +80,21 @@ async def list_reports_admin_route(
     status_code=status.HTTP_200_OK,
     summary="List reported entities",
     description=(
-        "Return one row per reported entity for the moderation dashboard. "
+        "Return one row per reported entity for the moderation dashboard, "
+        "including previous moderation comments for each entity. "
+        "Includes summary counts by status (under_review, actioned, rejected), "
+        "total across all statuses, and paginated items. "
+        "Optionally filter items by status (under_review, actioned, rejected). "
         "Admin/moderator only."
     ),
 )
 async def get_reported_entities_route(
     entity_type: ReportEntityType = Query(...),
+    status_filter: ReportStatus | None = Query(
+        None,
+        alias="status",
+        description="Filter by report status: under_review, actioned, or rejected.",
+    ),
     moderator_id: UUID | None = Query(None),
     current_user=Depends(get_current_moderator),
     db: AsyncSession = Depends(get_session),
@@ -94,6 +103,7 @@ async def get_reported_entities_route(
     return await get_reported_entities(
         db,
         entity_type=entity_type,
+        status=status_filter,
         moderator_id=moderator_id,
         page=pagination.page,
         page_size=pagination.pageSize,
@@ -106,7 +116,7 @@ async def get_reported_entities_route(
     response_model=ReportResponse,
     status_code=status.HTTP_200_OK,
     summary="Get report by ID",
-    description="Retrieve details of a report by its ID. Admin/moderator only.",
+    description="Retrieve details of a report by its ID, including previous moderation comments for the same entity. Admin/moderator only.",
 )
 async def get_report_details_admin_route(
     report_id: UUID,

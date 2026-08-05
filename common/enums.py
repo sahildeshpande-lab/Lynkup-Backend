@@ -118,6 +118,28 @@ class InvitationStatus(str, Enum):
     deactivated = "DEACTIVATED"
 
 
+class NotificationCampaignType(str, Enum):
+    announcement = "ANNOUNCEMENT"
+    topic = "TOPIC"
+
+
+class NotificationCampaignStatus(str, Enum):
+    draft = "DRAFT"
+    scheduled = "SCHEDULED"
+    sent = "SENT"
+    failed = "FAILED"
+
+
+class NotificationTargetType(str, Enum):
+    university = "UNIVERSITY"
+    major = "MAJOR"
+    minor = "MINOR"
+    education_level = "EDUCATION_LEVEL"
+    country = "COUNTRY"
+    interests = "INTERESTS"
+    hashtags = "HASHTAGS"
+
+
 class ReportEntityType(str, Enum):
     user = "user"
     post = "post"

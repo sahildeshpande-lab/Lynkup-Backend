@@ -9,16 +9,24 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from apps.accounts.db_models import User
-from common.enums import EducationLevel, OnboardingStatus, UserStatus, RegistrationType
-from ..schemas import  AdminLoginRequest
+from common.enums import OnboardingStatus, UserStatus, RegistrationType, inactive_account_message
+from common.exceptions import ApiError
+from ..schemas import AdminLoginRequest, AdminSignupRequest
 from apps.accounts.schemas import ApiResponse, RefreshTokenRequest
 from apps.accounts.services import JWT_ALGORITHM, JWT_SECRET
 from apps.profiles.services import build_user_base_response
 from apps.profiles.db_models import Profile
-from sqlalchemy.orm import selectinload
 PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 
 from .user_management_service import _coerce_uuid
+
+
+def _ensure_admin_account_active(user: User) -> None:
+    """Reject deleted/suspended/banned admins with a 401 ApiError."""
+    if user.status == UserStatus.deleting or user.deleted_at or getattr(user, "is_deleted", False):
+        raise ApiError(inactive_account_message(UserStatus.deleting))
+    if user.status in (UserStatus.suspended, UserStatus.banned):
+        raise ApiError(inactive_account_message(user.status))
 
 def _generate_admin_tokens(user: User) -> tuple[str, str]:
     now = datetime.now(timezone.utc)
@@ -92,6 +100,8 @@ async def admin_token(payload: RefreshTokenRequest, db: AsyncSession) -> dict:
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
+    _ensure_admin_account_active(user)
+
     access_token, _refresh_token = _generate_admin_tokens(user)
     return {"access_token": access_token, "token_type": "bearer"}
 
@@ -99,13 +109,15 @@ async def admin_signin(payload: AdminLoginRequest, db: AsyncSession) -> ApiRespo
     stmt = select(User).options(selectinload(User.roles)).where(User.email == payload.email.lower())
     user = (await db.execute(stmt)).scalar_one_or_none()
     if not user:
-        return ApiResponse(status=False, message="User not found . Please sign up.", data=None)
+        return ApiResponse(status=False, message="Incorrect Username or Password.", data=None)
 
     if not user.password_hash or not PASSWORD_HASHER.verify(payload.password, user.password_hash):
-        return ApiResponse(status=False, message="Invalid credentials", data=None)
+        return ApiResponse(status=False, message="Incorrect Username or Password.", data=None)
 
     if user.role == "user":
         return ApiResponse(status=False, message="Forbidden: Admin access required", data=None)
+
+    _ensure_admin_account_active(user)
 
     profile = (await db.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one_or_none()
     user_data = await build_user_base_response(user, profile, db)

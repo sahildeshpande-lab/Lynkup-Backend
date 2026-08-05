@@ -5,6 +5,7 @@ from typing import Optional
 from uuid import UUID, uuid4
 
 from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, String, JSON
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from common.enums import ProfileVisibility
@@ -39,6 +40,24 @@ class Profile(SQLModel, table=True):
     completeness_rubric_version: str = Field(default="v1", sa_column=Column(String(32), nullable=False))
     profile_photo_url: str | None = Field(default=None, sa_column=Column(String(2048)))
     banner_photo_url: str | None = Field(default=None, sa_column=Column(String(2048)))
+    extracted_keywords: dict | None = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
+    keywords_updated_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+    # Learning recommendation persistence (cron snapshot storage).
+    learning_recommendations: dict | None = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
+    recommendations_updated_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
     updated_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
 

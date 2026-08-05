@@ -1,9 +1,10 @@
 from __future__ import annotations
+import logging
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 from sqlalchemy.orm import selectinload
-from apps.accounts.db_models import SecurityEventType, User, UserInstallation
+from apps.accounts.db_models import SecurityEventType, User
 from apps.profiles.db_models import Profile
 from common.enums import OnboardingStatus, RegistrationType, UserStatus, inactive_account_message
 from common.exceptions import ApiError
@@ -19,7 +20,10 @@ from .device_otp_service import (
     attach_otp_flags,
     evaluate_device_otp_requirement,
     send_otp_challenge,
+    upsert_user_installation,
 )
+
+logger = logging.getLogger(__name__)
 
 async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) -> User:
     firebase_uid = firebase_user["uid"]
@@ -115,41 +119,33 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
         )
     ).scalar_one()
 
-async def _upsert_user_installation(
+async def _refresh_user_topic_subscriptions_best_effort(
     db: AsyncSession,
-    user_id,
-    device_id: str,
-    now,
+    user: User,
+    *,
+    context: str,
 ) -> None:
-    from apps.accounts.db_models import UserInstallation
+    try:
+        from apps.notifications.services.topic_service import TopicService
 
-    stmt = select(UserInstallation).where(
-        UserInstallation.user_id == user_id,
-        UserInstallation.device_id == device_id,
-    )
-    installation = (await db.execute(stmt)).scalar_one_or_none()
-    if installation is None:
-        db.add(
-            UserInstallation(
-                user_id=user_id,
-                device_id=device_id,
-                platform=None,
-                app_version=None,
-                installed_at=now,
-                last_active_at=now,
-                is_active=True,
-            )
+        profile = await _fetch_user_profile(db, user)
+        if profile is not None:
+            await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
+    except Exception:
+        logger.exception(
+            "Firebase topic sync failed during social auth (%s) user_id=%s",
+            context,
+            user.id,
         )
-    else:
-        installation.last_active_at = now
-        installation.is_active = True
-        db.add(installation)
 
 
 async def _build_device_auth_session(
     db: AsyncSession,
     user: User,
     device_id: str,
+    *,
+    platform: str | None = None,
+    fcm_token: str | None = None,
 ) -> tuple[dict, str]:
     from sqlalchemy.orm import selectinload
 
@@ -166,7 +162,10 @@ async def _build_device_auth_session(
             device_id,
             installation=installation,
             is_new_device=is_new_device,
+            platform=platform,
+            fcm_token=fcm_token,
         )
+        await _refresh_user_topic_subscriptions_best_effort(db, user, context="otp flow")
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()
         return (
@@ -182,12 +181,17 @@ async def _build_device_auth_session(
     user.updated_at = _now()
     db.add(user)
 
-    if installation:
-        installation.last_active_at = _now()
-        installation.is_active = True
-        db.add(installation)
+    await upsert_user_installation(
+        db,
+        user.id,
+        device_id,
+        platform=platform,
+        fcm_token=fcm_token,
+        now=_now(),
+    )
 
     await db.commit()
+    await _refresh_user_topic_subscriptions_best_effort(db, user, context="no-otp flow")
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
     return (
@@ -201,7 +205,6 @@ async def _build_device_auth_session(
 
 
 async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dict, bool, str]:
-    from core.images import normalize_image_name
     from core.auth.services import verify_firebase_token
     from sqlmodel import select
     from sqlalchemy.orm import selectinload
@@ -305,8 +308,9 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
 
         stmt_profile = select(Profile).where(Profile.user_id == user.id)
         profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-        if profile and getattr(payload, "profilePhotoUrl", None):
-            profile.profile_photo_url = normalize_image_name(payload.profilePhotoUrl)
+        if profile and payload.profile_photo_url:
+            # Store Google/Apple photo URL as-is (no S3 key normalization).
+            profile.profile_photo_url = payload.profile_photo_url
             db.add(profile)
             await db.flush()
             from apps.profiles.services import calculate_completeness_score
@@ -314,7 +318,13 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
             db.add(profile)
 
         await db.flush()
-        session_data, message = await _build_device_auth_session(db, user, payload.device_id)
+        session_data, message = await _build_device_auth_session(
+            db,
+            user,
+            payload.device_id,
+            platform=payload.platform,
+            fcm_token=payload.fcm_token,
+        )
         return session_data, False, message
 
     user = User(
@@ -355,6 +365,8 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
         user_id=user.id,
         first_name=first_name,
         last_name=last_name,
+        # Store Google/Apple photo URL as-is when provided.
+        profile_photo_url=payload.profile_photo_url,
         completeness_score=0,
         updated_at=now
     )
@@ -365,14 +377,19 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
     profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
 
-    await _upsert_user_installation(db, user.id, payload.device_id, now)
     await db.commit()
     await db.refresh(user)
 
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
 
-    session_data, message = await _build_device_auth_session(db, user, payload.device_id)
+    session_data, message = await _build_device_auth_session(
+        db,
+        user,
+        payload.device_id,
+        platform=payload.platform,
+        fcm_token=payload.fcm_token,
+    )
     return session_data, True, message
 
 async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSession) -> ApiResponse:

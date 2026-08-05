@@ -39,7 +39,7 @@ class ReportUserRequest(BaseModel):
 class OnboardingRequest(BaseModel):
     profile_photo_key: Optional[str] = Field(None, description="S3 storage key returned by POST /uploads/image")
     banner_photo_key : Optional[str] = Field(None, description="S3 storage key returned by POST /uploads/image")
-    country_id: str
+    country_id: Optional[str] = None
     university_id: str
     major: str
     minor: Optional[str] = None
@@ -72,6 +72,7 @@ class UpdateProfileMeRequest(BaseModel):
     firstName: str | None = None
     lastName: str | None = None
     universityId: str | None = None
+    countryId: str | None = None
     major: str | None = None
     bio: str | None = None
 
@@ -82,6 +83,7 @@ class UpdateProfileRequest(BaseModel):
     major: str | None = None
     minor: str | None = None
     university_id: str | None = None
+    country_id: str | None = None
     education_level_id: int | None = None
     academic_interests: list[str] | None = None
     profile_photo_key: str | None = None

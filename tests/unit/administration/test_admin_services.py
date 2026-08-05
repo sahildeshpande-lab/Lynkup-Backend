@@ -36,7 +36,8 @@ from apps.administration.services import (
     PASSWORD_HASHER,
     _generate_admin_tokens,
 )
-from common.enums import AdminUserStatus
+from common.enums import AdminUserStatus, inactive_account_message
+from common.exceptions import ApiError
 from apps.accounts.services import JWT_SECRET, JWT_ALGORITHM, _generate_tokens
 
 
@@ -538,7 +539,7 @@ async def test_admin_signin_invalid_credentials() -> None:
             payload = AdminLoginRequest(email=email, password="WrongPassword123!")
             res = await admin_signin(payload, session)
             assert res.status is False
-            assert "Invalid credentials" in res.message
+            assert "Incorrect Username or Password." in res.message
     finally:
         await engine.dispose()
 
@@ -567,6 +568,37 @@ async def test_admin_signin_non_superadmin() -> None:
             res = await admin_signin(payload, session)
             assert res.status is False
             assert "Forbidden" in res.message
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["superadmin", "moderator", "viewer"])
+async def test_admin_signin_rejects_deleting_account(role: str) -> None:
+    try:
+        await init_db()
+        email = f"admin_deleting_{role}_{uuid.uuid4()}@example.com"
+        async with async_session_factory() as session:
+            user = User(
+                email=email,
+                password_hash=PASSWORD_HASHER.hash("AdminPassword123!"),
+                status=UserStatus.deleting,
+                is_deleted=True,
+                deleted_at=datetime.now(timezone.utc),
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+
+            from apps.accounts.services import assign_user_role
+            await assign_user_role(session, user, role)
+            await session.commit()
+
+        async with async_session_factory() as session:
+            payload = AdminLoginRequest(email=email, password="AdminPassword123!")
+            with pytest.raises(ApiError) as exc_info:
+                await admin_signin(payload, session)
+            assert exc_info.value.message == inactive_account_message(UserStatus.deleting)
     finally:
         await engine.dispose()
 

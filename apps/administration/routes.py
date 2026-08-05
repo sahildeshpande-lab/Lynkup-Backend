@@ -183,8 +183,9 @@ async def update_user_status_by_admin(
     userId: UUID,
     payload: AdminUserStatusRequest,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
+    current_user=Depends(get_current_moderator),
 ) -> ApiResponse:
+    _ = current_user
     return ApiResponse(
         message=f"user {payload.status.value} by admin",
         data=await services.admin_update_user_status(

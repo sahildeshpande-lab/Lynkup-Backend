@@ -11,7 +11,7 @@ from core.auth.services import revoke_firebase_tokens
 logger = logging.getLogger(__name__)
 
 from .common_service import _now, _revoke_refresh_token_row
-from .device_otp_service import clear_session_email_verification
+from .device_otp_service import clear_session_email_verification, deactivate_push_for_user_installations
 
 async def logout(
     payload: LogoutRequest,
@@ -51,20 +51,12 @@ async def logout(
 
     device_id = payload.device_id.strip()
 
-    installation = (
-        await db.execute(
-            select(UserInstallation).where(
-                UserInstallation.user_id == user.id,
-                UserInstallation.device_id == device_id,
-            )
-        )
-    ).scalar_one_or_none()
-
-    if installation:
-        installation.is_active = False
-        installation.last_active_at = _now()
-        db.add(installation)
-    else:
+    cleared = await deactivate_push_for_user_installations(
+        db,
+        user.id,
+        device_id=device_id,
+    )
+    if cleared == 0:
         logger.info(
             "Logout requested for user %s with unknown device_id %s",
             user.id,
@@ -84,7 +76,10 @@ async def logout(
     for token_row in token_rows:
         await _revoke_refresh_token_row(db, token_row)
 
-    clear_session_email_verification(user)
+    # Clear any pending OTP codes, but keep email_verified_at so returning to
+    # this known device does not require OTP again.
+    user.email_otp = None
+    user.email_otp_created_at = None
     user.updated_at = _now()
     db.add(user)
 
@@ -98,7 +93,13 @@ async def logout(
                 exc_info=True,
             )
 
+    # Invalidate Stream Chat tokens so the client must mint a new one after next login.
+    from apps.chat.service import revoke_stream_user_tokens_best_effort
+
+    await revoke_stream_user_tokens_best_effort(user)
+
     await db.commit()
+
 
 async def logout_all(current_user: User, db: AsyncSession) -> dict:
     rows = (await db.execute(select(RefreshToken).where(RefreshToken.user_id == current_user.id, RefreshToken.revoked_at == None))).scalars().all()
@@ -109,10 +110,32 @@ async def logout_all(current_user: User, db: AsyncSession) -> dict:
         await db.execute(select(UserInstallation).where(UserInstallation.user_id == current_user.id))
     ).scalars().all()
     for installation in installation_rows:
+        fcm_token = (installation.fcm_token or "").strip()
+        if fcm_token:
+            try:
+                from apps.notifications.services.topic_service import TopicService
+
+                await TopicService.unsubscribe_device_from_user_topics(
+                    db,
+                    current_user.id,
+                    fcm_token=fcm_token,
+                )
+            except Exception:
+                logger.exception(
+                    "Topic unsubscribe failed during logout-all user_id=%s",
+                    current_user.id,
+                )
         await db.delete(installation)
 
+    # Logout-all removes every trusted device, so the next sign-in requires OTP.
+    # Keep account status as-is (do not downgrade active → pending).
     clear_session_email_verification(current_user)
     current_user.updated_at = _now()
     db.add(current_user)
+
+    from apps.chat.service import revoke_stream_user_tokens_best_effort
+
+    await revoke_stream_user_tokens_best_effort(current_user)
+
     await db.commit()
     return {"logged_out_all": True}

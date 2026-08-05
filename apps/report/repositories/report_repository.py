@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -68,6 +68,82 @@ async def get_duplicate_report(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+async def get_previous_report_comments(
+    db: AsyncSession,
+    *,
+    entity_type: ReportEntityType,
+    entity_id: UUID,
+    exclude_report_id: UUID,
+) -> list[tuple[Report, User | None, Profile | None]]:
+    """
+    Fetch prior reviewed moderation comments for the same entity.
+
+    Includes reports that already have an admin_comment, excluding the current
+    report. Ordered by updated_at ASC for chronological history.
+    """
+    moderator_user = aliased(User, name="previous_moderator_user")
+    moderator_profile = aliased(Profile, name="previous_moderator_profile")
+
+    stmt = (
+        select(Report, moderator_user, moderator_profile)
+        .outerjoin(moderator_user, moderator_user.id == Report.moderator_id)
+        .outerjoin(moderator_profile, moderator_profile.user_id == Report.moderator_id)
+        .where(
+            Report.entity_type == entity_type,
+            Report.entity_id == entity_id,
+            Report.id != exclude_report_id,
+            Report.admin_comment.is_not(None),
+            Report.admin_comment != "",
+            Report.status.in_((ReportStatus.rejected, ReportStatus.actioned)),
+        )
+        .order_by(Report.updated_at.asc(), Report.created_at.asc())
+    )
+    return list((await db.execute(stmt)).all())
+
+
+async def get_previous_report_comments_for_entities(
+    db: AsyncSession,
+    *,
+    entity_type: ReportEntityType,
+    entity_ids: list[UUID],
+    exclude_report_ids: list[UUID],
+) -> list[tuple[Report, User | None, Profile | None]]:
+    """
+    Batch-fetch prior reviewed moderation comments for many entities.
+
+    Excludes the latest/current report ids shown on the queue rows. Ordered by
+    entity_id, then updated_at ASC for chronological history per entity.
+    """
+    if not entity_ids:
+        return []
+
+    moderator_user = aliased(User, name="batch_previous_moderator_user")
+    moderator_profile = aliased(Profile, name="batch_previous_moderator_profile")
+
+    conditions = [
+        Report.entity_type == entity_type,
+        Report.entity_id.in_(entity_ids),
+        Report.admin_comment.is_not(None),
+        Report.admin_comment != "",
+        Report.status.in_((ReportStatus.rejected, ReportStatus.actioned)),
+    ]
+    if exclude_report_ids:
+        conditions.append(Report.id.notin_(exclude_report_ids))
+
+    stmt = (
+        select(Report, moderator_user, moderator_profile)
+        .outerjoin(moderator_user, moderator_user.id == Report.moderator_id)
+        .outerjoin(moderator_profile, moderator_profile.user_id == Report.moderator_id)
+        .where(*conditions)
+        .order_by(
+            Report.entity_id.asc(),
+            Report.updated_at.asc(),
+            Report.created_at.asc(),
+        )
+    )
+    return list((await db.execute(stmt)).all())
+
+
 async def get_reports(
     db: AsyncSession,
     *,
@@ -123,6 +199,40 @@ async def count_reports(
     )
     stmt = select(func.count(Report.id)).where(*conditions)
     return int((await db.execute(stmt)).scalar_one())
+
+
+async def sync_open_report_moderator_for_post(
+    db: AsyncSession,
+    *,
+    post_id: UUID,
+    moderator_id: UUID,
+) -> None:
+    """Reassign open reports when a post's moderator changes (e.g. deleted moderator → Super Admin).
+
+    Updates under_review reports for the post itself and for comments on that post.
+    """
+    from apps.engagement.db_models import Comment
+
+    comment_ids_stmt = select(Comment.id).where(Comment.post_id == post_id)
+    now = datetime.now(timezone.utc)
+    stmt = (
+        update(Report)
+        .where(
+            Report.status == ReportStatus.under_review,
+            or_(
+                and_(
+                    Report.entity_type == ReportEntityType.post,
+                    Report.entity_id == post_id,
+                ),
+                and_(
+                    Report.entity_type == ReportEntityType.comment,
+                    Report.entity_id.in_(comment_ids_stmt),
+                ),
+            ),
+        )
+        .values(moderator_id=moderator_id, updated_at=now)
+    )
+    await db.execute(stmt)
 
 
 async def update_report(
@@ -239,10 +349,12 @@ async def get_reported_entities(
 
     ranked = (
         select(
+            Report.id.label("report_id"),
             Report.entity_type.label("entity_type"),
             Report.entity_id.label("entity_id"),
             Report.status.label("status"),
             Report.moderator_id.label("moderator_id"),
+            Report.admin_comment.label("admin_comment"),
             Report.created_at.label("latest_reported_at"),
             func.count(Report.id)
             .over(partition_by=(Report.entity_type, Report.entity_id))
@@ -266,11 +378,13 @@ async def get_reported_entities(
 
     stmt = (
         select(
+            ranked.c.report_id,
             ranked.c.entity_type,
             ranked.c.entity_id,
             ranked.c.report_count,
             ranked.c.status,
             ranked.c.moderator_id,
+            ranked.c.admin_comment,
             ranked.c.latest_reported_at,
             ranked.c.created_at,
             ranked.c.updated_at,
@@ -285,11 +399,13 @@ async def get_reported_entities(
     rows = (await db.execute(stmt)).all()
     return [
         {
+            "report_id": row.report_id,
             "entity_type": row.entity_type,
             "entity_id": row.entity_id,
             "report_count": int(row.report_count),
             "status": row.status,
             "moderator_id": row.moderator_id,
+            "admin_comment": row.admin_comment,
             "latest_reported_at": row.latest_reported_at,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
@@ -319,3 +435,50 @@ async def count_reported_entities(
     )
     stmt = select(func.count()).select_from(grouped)
     return int((await db.execute(stmt)).scalar_one())
+
+
+async def count_reported_entities_summary_by_status(
+    db: AsyncSession,
+    *,
+    entity_type: ReportEntityType,
+    moderator_id: UUID | None = None,
+) -> dict[str, int]:
+    """
+    Count reported entities grouped by the latest report status for each entity.
+
+    Used for moderation dashboard tab badges; independent of list status filter.
+    """
+    conditions = _report_filter_conditions(
+        entity_type=entity_type,
+        moderator_id=moderator_id,
+    )
+
+    ranked = (
+        select(
+            Report.status.label("status"),
+            func.row_number()
+            .over(
+                partition_by=(Report.entity_type, Report.entity_id),
+                order_by=(Report.created_at.desc(), Report.id.desc()),
+            )
+            .label("rn"),
+        )
+        .where(*conditions)
+        .subquery()
+    )
+
+    stmt = (
+        select(ranked.c.status, func.count())
+        .where(ranked.c.rn == 1)
+        .group_by(ranked.c.status)
+    )
+    rows = (await db.execute(stmt)).all()
+
+    summary = {
+        ReportStatus.under_review.value: 0,
+        ReportStatus.actioned.value: 0,
+        ReportStatus.rejected.value: 0,
+    }
+    for report_status, count in rows:
+        summary[report_status.value] = int(count)
+    return summary

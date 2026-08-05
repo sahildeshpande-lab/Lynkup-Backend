@@ -23,6 +23,7 @@ PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
+
 async def _fetch_user_profile(db: AsyncSession, user: User) -> Profile | None:
     stmt = select(Profile).where(Profile.user_id == user.id)
     return (await db.execute(stmt)).scalar_one_or_none()

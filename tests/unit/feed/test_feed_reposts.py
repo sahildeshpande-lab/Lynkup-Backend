@@ -111,6 +111,7 @@ async def test_get_feed_service_normal_post():
         first_name="Alice",
         last_name="Smith",
         profile_photo_url="alice_photo.png",
+        profile_visibility="private",
     )
 
     feed_item = {
@@ -165,6 +166,7 @@ async def test_get_feed_service_normal_post():
         assert formatted["first_name"] == "Alice"
         assert formatted["last_name"] == "Smith"
         assert "alice_photo.png" in formatted["profilePhoto_url"]
+        assert formatted["profile_visibility"] == "private"
         assert formatted["is_connected"] is True
         assert formatted["is_requested"] is True
         assert formatted["university"] == "Lynkup University"
@@ -208,6 +210,7 @@ async def test_get_feed_service_repost_item():
         first_name="Alice",
         last_name="Smith",
         profile_photo_url="alice_photo.png",
+        profile_visibility="public",
     )
 
     reposter_profile = SimpleNamespace(
@@ -215,6 +218,7 @@ async def test_get_feed_service_repost_item():
         first_name="Bob",
         last_name="Jones",
         profile_photo_url="bob_photo.png",
+        profile_visibility="private",
     )
 
     feed_item = {
@@ -278,6 +282,7 @@ async def test_get_feed_service_repost_item():
         assert formatted["first_name"] == "Bob"
         assert formatted["last_name"] == "Jones"
         assert "bob_photo.png" in formatted["profilePhoto_url"]
+        assert formatted["profile_visibility"] == "private"
         assert formatted["is_connected"] is False
         assert formatted["is_requested"] is True
         assert formatted["university"] == "Reposter University"
@@ -300,6 +305,7 @@ async def test_get_feed_service_repost_item():
         assert nested["first_name"] == "Alice"
         assert nested["last_name"] == "Smith"
         assert "alice_photo.png" in nested["profilePhoto_url"]
+        assert nested["profile_visibility"] == "public"
         assert nested["is_connected"] is True
         assert nested["is_requested"] is False
         assert nested["university"] == "Original University"

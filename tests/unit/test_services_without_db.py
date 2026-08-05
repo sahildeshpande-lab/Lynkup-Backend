@@ -85,12 +85,10 @@ async def test_search_universities_and_academic_interests(mock_db, scalar_result
     chemistry = SimpleNamespace(id=5, name="Chemistry", education_level_id=1, is_active=True)
     ai = SimpleNamespace(id=1, name="Artificial Intelligence", education_level_id=2, is_active=True)
 
-    # education levels + interests + countries + hashtags
+    # education levels + interests + hashtags
     db = mock_db(
         scalar_result(values=[bachelors, masters]),
         scalar_result(values=[chemistry, ai]),
-        scalar_result(0),
-        scalar_result(values=[]),
         scalar_result(0),
         scalar_result(values=[]),
     )
@@ -108,8 +106,7 @@ async def test_search_universities_and_academic_interests(mock_db, scalar_result
         },
     ]
     assert "interests" not in info
-    assert info["countries"]["items"] == []
-    assert info["countries"]["totalItems"] == 0
+    assert "countries" not in info
     assert info["hashtags"]["items"] == []
     assert info["hashtags"]["totalItems"] == 0
 
@@ -151,6 +148,37 @@ async def test_create_academic_interest_rejects_case_and_spelling_duplicates(
 
     db.add.assert_not_called()
     db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_academic_interest_allows_same_name_on_different_education_level(
+    mock_db, scalar_result, monkeypatch
+):
+    education_level = SimpleNamespace(id=1, name="Bachelors", is_active=True)
+    db = mock_db(scalar_result(education_level))
+
+    async def set_generated_id(interest):
+        interest.id = 11
+
+    db.refresh.side_effect = set_generated_id
+
+    find_calls: list[dict] = []
+
+    async def _fake_find(name, db_session, *, education_level_id=None):
+        find_calls.append({"name": name, "education_level_id": education_level_id})
+        return None
+
+    import apps.profiles.services.interest_service as interest_service
+
+    monkeypatch.setattr(interest_service, "_find_existing_academic_interest", _fake_find)
+
+    result = await create_academic_interest("AI", 1, db)
+
+    assert result["name"] == "AI"
+    assert result["educationLevelId"] == "1"
+    assert find_calls == [{"name": "AI", "education_level_id": 1}]
+    db.add.assert_called_once()
+    db.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

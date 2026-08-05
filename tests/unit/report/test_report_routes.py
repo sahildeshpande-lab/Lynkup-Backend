@@ -105,6 +105,12 @@ def test_get_reports_admin_success():
 def test_get_reported_entities_admin_success():
     mock_data = {
         "items": [],
+        "summary": {
+            "under_review": 0,
+            "actioned": 0,
+            "rejected": 0,
+        },
+        "total": 0,
         "page": 1,
         "pageSize": 20,
         "totalItems": 0,
@@ -122,13 +128,14 @@ def test_get_reported_entities_admin_success():
     ) as detail_svc:
         response = client.get(
             "/api/v1/admin/reports/details",
-            params={"entity_type": "post"},
+            params={"entity_type": "post", "status": "under_review"},
         )
 
     assert response.status_code == status.HTTP_200_OK
     assert response.json()["status"] is True
     assert response.json()["message"] == "Reported entities fetched successfully."
     detail_svc.assert_awaited_once()
+    assert detail_svc.await_args.kwargs["status"].value == "under_review"
 
 
 def test_get_report_by_id_admin_success():

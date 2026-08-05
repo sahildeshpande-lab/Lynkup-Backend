@@ -45,10 +45,7 @@ Schema changes for Milestone 2:
 ## Swagger API
 
 Swagger UI:
-[http://localhost:8000/docs](http://localhost:8000/docs)
-
-OpenAPI JSON:
-[http://localhost:8000/openapi.json](http://localhost:8000/openapi.json)
+[https://kampulynk-stage-app-pvj6t.ondigitalocean.app/docs](https://kampulynk-stage-app-pvj6t.ondigitalocean.app/docs)
 
 ### Key endpoints (Milestone 2)
 

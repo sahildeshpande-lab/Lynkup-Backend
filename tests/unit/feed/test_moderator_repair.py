@@ -54,10 +54,20 @@ async def test_repair_reassigns_deleted_moderator_posts_to_superadmin(monkeypatc
 
     monkeypatch.setattr(ps, "_fetch_superadmin_user_ids", AsyncMock(return_value=[superadmin_id]))
     monkeypatch.setattr(ps, "_assign_moderator_for_review", AsyncMock())
+    sync_reports = AsyncMock()
+    monkeypatch.setattr(
+        "apps.report.repositories.report_repository.sync_open_report_moderator_for_post",
+        sync_reports,
+    )
 
     await ps._repair_unassigned_moderators(db, target_state=PostState.published)
 
     assert post.moderator_id == superadmin_id
+    sync_reports.assert_awaited_once_with(
+        db,
+        post_id=post.id,
+        moderator_id=superadmin_id,
+    )
     db.add.assert_called_with(post)
     db.commit.assert_awaited_once()
 

@@ -47,6 +47,17 @@ async def update_bookmark(
         try:
             await create_bookmark(db, user_id, payload.post_id)
             await db.commit()
+            from apps.recommendations.services.engagement_keyword_service import (
+                apply_engagement_keyword_update_best_effort,
+            )
+
+            await apply_engagement_keyword_update_best_effort(
+                db,
+                user_id,
+                payload.post_id,
+                "bookmark",
+                added=True,
+            )
         except IntegrityError:
             await db.rollback()
             logger.warning(
@@ -75,6 +86,17 @@ async def update_bookmark(
         try:
             await delete_bookmark(db, existing)
             await db.commit()
+            from apps.recommendations.services.engagement_keyword_service import (
+                apply_engagement_keyword_update_best_effort,
+            )
+
+            await apply_engagement_keyword_update_best_effort(
+                db,
+                user_id,
+                payload.post_id,
+                "bookmark",
+                added=False,
+            )
         except Exception:
             await db.rollback()
             logger.exception(

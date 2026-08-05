@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 from datetime import timedelta
 from uuid import uuid4
 from fastapi.responses import HTMLResponse
@@ -7,12 +8,13 @@ from sqlmodel import select
 from sqlalchemy.orm import selectinload
 from pwdlib import PasswordHash
 from pwdlib.hashers.bcrypt import BcryptHasher
-from apps.accounts.db_models import User, UserInstallation
+from apps.accounts.db_models import User
 from apps.profiles.db_models import Profile
 from common.enums import OnboardingStatus, UserStatus, inactive_account_message
 from core.auth.config import settings as auth_settings
 from core.email_service import send_otp_email, send_verification_success_email, build_email_verified_success_html
 from ..schemas import ApiResponse, LoginRequest, ResendOtpRequest, OtpVerifyRequest, UserBaseResponse
+logger = logging.getLogger(__name__)
 PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 
 from .common_service import _fetch_user_profile, _generate_otp, _now
@@ -20,6 +22,7 @@ from .device_otp_service import (
     attach_otp_flags,
     evaluate_device_otp_requirement,
     send_otp_challenge,
+    upsert_user_installation,
 )
 
 async def _issue_auth_session(user: User, db: AsyncSession) -> dict:
@@ -108,7 +111,22 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
             device_id,
             installation=installation,
             is_new_device=is_new_device,
+            platform=payload.platform,
+            fcm_token=payload.fcm_token,
         )
+
+        # Best-effort sync: never fail login if Firebase sync fails.
+        try:
+            from apps.notifications.services.topic_service import TopicService
+
+            profile = await _fetch_user_profile(db, user)
+            if profile is not None:
+                await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
+        except Exception:
+            logger.exception(
+                "Firebase topic sync failed during login (OTP flow) user_id=%s",
+                user.id,
+            )
 
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()
@@ -128,12 +146,39 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     user.updated_at = _now()
     db.add(user)
 
-    if installation:
-        installation.last_active_at = _now()
-        installation.is_active = True
-        db.add(installation)
+    await upsert_user_installation(
+        db,
+        user.id,
+        device_id,
+        platform=payload.platform,
+        fcm_token=payload.fcm_token,
+        now=_now(),
+    )
 
     await db.commit()
+
+    # Best-effort sync: never fail login if Firebase sync fails.
+    try:
+        from apps.notifications.services.topic_service import TopicService
+
+        profile = await _fetch_user_profile(db, user)
+        if profile is not None:
+            await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
+    except Exception:
+        logger.exception(
+            "Firebase topic sync failed during login (no-OTP flow) user_id=%s",
+            user.id,
+        )
+
+    try:
+        from apps.chat.service import sync_stream_user_on_auth
+
+        await sync_stream_user_on_auth(user, db)
+    except Exception:
+        logger.exception(
+            "Stream user sync failed during login (no-OTP flow) user_id=%s",
+            user.id,
+        )
 
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
@@ -178,6 +223,29 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
             profile = (await db.execute(stmt_profile)).scalar_one_or_none()
             full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip() if profile else None
             await send_verification_success_email(user.email, full_name)
+
+        try:
+            from apps.notifications.services.topic_service import TopicService
+
+            stmt_profile = select(Profile).where(Profile.user_id == user.id)
+            profile = (await db.execute(stmt_profile)).scalar_one_or_none()
+            if profile is not None:
+                await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
+        except Exception:
+            logger.exception(
+                "Firebase topic sync failed during OTP verification user_id=%s",
+                user.id,
+            )
+
+        try:
+            from apps.chat.service import sync_stream_user_on_auth
+
+            await sync_stream_user_on_auth(user, db)
+        except Exception:
+            logger.exception(
+                "Stream user sync failed during OTP verification user_id=%s",
+                user.id,
+            )
 
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()

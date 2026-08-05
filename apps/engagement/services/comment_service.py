@@ -181,6 +181,17 @@ async def create_post_comment(
             await update_post_comment_count(db, post_id, 1)
         await db.commit()
         await db.refresh(comment)
+        from apps.recommendations.services.engagement_keyword_service import (
+            apply_engagement_keyword_update_best_effort,
+        )
+
+        await apply_engagement_keyword_update_best_effort(
+            db,
+            user_id,
+            post_id,
+            "comment",
+            added=True,
+        )
     except Exception:
         await db.rollback()
         raise HTTPException(

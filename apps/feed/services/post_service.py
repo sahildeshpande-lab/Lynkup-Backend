@@ -17,6 +17,8 @@ from core.images import generate_download_url, generate_profile_image_url
 from apps.connections.services.connection_service import is_blocked
 
 from .media_service import _verify_and_attach_media
+from apps.recommendations.services.post_keyword_service import log_post_keywords_best_effort
+
 from .revision_service import _build_content_dict, _create_revision, _sync_hashtags
 from apps.moderation.services.moderator_assignment_service import (
     assign_next_moderator_round_robin,
@@ -25,6 +27,71 @@ from apps.moderation.services.moderator_assignment_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _capture_user_topics(db: AsyncSession, user_id: UUID) -> set[str]:
+    from apps.profiles.db_models.profile_db_model import Profile
+    from apps.notifications.services.topic_service import TopicService
+
+    profile = (
+        await db.execute(select(Profile).where(Profile.user_id == user_id))
+    ).scalar_one_or_none()
+    if profile is None:
+        return set()
+    return await TopicService.capture_topics(db, profile)
+
+
+async def _sync_user_topics_best_effort(
+    db: AsyncSession,
+    user_id: UUID,
+    *,
+    old_topics: set[str],
+) -> None:
+    from apps.profiles.db_models.profile_db_model import Profile
+    from apps.notifications.services.topic_service import TopicService
+
+    try:
+        profile = (
+            await db.execute(select(Profile).where(Profile.user_id == user_id))
+        ).scalar_one_or_none()
+        if profile is None:
+            return
+        await TopicService.sync_user_topics(
+            db,
+            user_id,
+            old_topics=old_topics,
+            profile=profile,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to sync Firebase topics after post change user_id=%s",
+            user_id,
+        )
+
+
+def _should_sync_topics_for_post_state(
+    post_state: PostState,
+    *,
+    previous_state: PostState | None = None,
+) -> bool:
+    if post_state == PostState.published:
+        return True
+    return previous_state == PostState.published
+
+
+def _should_sync_topics_for_post(
+    post_state: PostState,
+    *,
+    previous_state: PostState | None = None,
+    hashtag_content_changed: bool = False,
+) -> bool:
+    if _should_sync_topics_for_post_state(post_state, previous_state=previous_state):
+        return True
+    return hashtag_content_changed and (
+        post_state == PostState.published or previous_state == PostState.published
+    )
+
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -46,20 +113,42 @@ def _extract_post_media(post: Post) -> list[dict]:
                 })
     return media_data
 
+def _resolve_person_name(profile=None, user=None) -> str | None:
+    if profile:
+        parts = [part for part in (profile.first_name, profile.last_name) if part]
+        name = " ".join(parts).strip()
+        if name:
+            return name
+    if user:
+        email = getattr(user, "email", None)
+        if email:
+            return email
+    return None
+
+
 def _resolve_moderator_name(mod_user=None, mod_profile=None) -> str | None:
-    moderator_name = None
-    if mod_profile:
-        parts = [part for part in (mod_profile.first_name, mod_profile.last_name) if part]
-        moderator_name = " ".join(parts).strip() or None
-    if not moderator_name and mod_user:
-        moderator_name = mod_user.email
-    return moderator_name
+    return _resolve_person_name(mod_profile, mod_user)
+
+
+def _normalize_profile_visibility(profile) -> str:
+    """Return 'private' only when visibility is private; otherwise 'public'.
+
+    ``connections_only`` and ``None`` both map to ``public`` for API responses.
+    """
+    if profile is None:
+        return "public"
+    raw = getattr(profile, "profile_visibility", None)
+    if raw is None:
+        return "public"
+    value = raw.value if hasattr(raw, "value") else str(raw)
+    return "private" if value == "private" else "public"
 
 
 def format_post_detail(
     post: Post,
     *,
     author_profile=None,
+    author_user=None,
     moderator_user=None,
     moderator_profile=None,
     is_connected: bool | None = None,
@@ -75,6 +164,9 @@ def format_post_detail(
 ) -> dict:
     """
     Format a Post model and its attachments into a dictionary matching PostDetailData schema.
+
+    ``profile_visibility`` is always the post author's visibility (never mixed with
+    a reposter). Set last so enrichment cannot overwrite it.
     """
     media_data = _extract_post_media(post)
 
@@ -85,9 +177,12 @@ def format_post_detail(
         if viewer_user_id is None
         else viewer_user_id != post.author_user_id
     )
+    author_profile = author_profile or getattr(post, "_author_profile", None)
+    author_user = author_user or getattr(post, "_author_user", None)
     data = {
         "id": post.id,
         "author_user_id": post.author_user_id,
+        "author_name": _resolve_person_name(author_profile, author_user),
         "state": state_value,
         "status": state_value,
         "revision_number": post.revision_number,
@@ -98,6 +193,7 @@ def format_post_detail(
         },
         "created_at": post.created_at,
         "updated_at": post.updated_at,
+        "is_edited": bool(getattr(post, "is_edited", False)),
         "like_count": post.like_count,
         "repost_count": post.repost_count,
         "share_count": getattr(post, "share_count", 0),
@@ -121,7 +217,6 @@ def format_post_detail(
         "media": media_data,
         "reposted_data": reposted_data,
     }
-    author_profile = author_profile or getattr(post, "_author_profile", None)
     if author_profile is not None:
         photo_url = (
             generate_profile_image_url(author_profile.profile_photo_url)
@@ -138,7 +233,11 @@ def format_post_detail(
     if is_requested is not None:
         data["is_requested"] = is_requested
     if profile_details is not None:
-        data.update(profile_details)
+        # Strip any accidental visibility key so author visibility stays authoritative.
+        details = {k: v for k, v in profile_details.items() if k != "profile_visibility"}
+        data.update(details)
+    # Author's profile_visibility only — set last to avoid duplicates/overwrites.
+    data["profile_visibility"] = _normalize_profile_visibility(author_profile)
     return data
 
 
@@ -167,6 +266,10 @@ def format_repost_item(
     """
     Format a repost as a common post object for the reposter, with the original
     post nested under ``reposted_data`` only (not mixed into the outer object).
+
+    Visibility ownership:
+    - top-level ``profile_visibility`` -> reposting user
+    - ``reposted_data.profile_visibility`` -> original post author
     """
     nested = format_post_detail(
         original_post,
@@ -184,6 +287,8 @@ def format_repost_item(
         reposted_data=None,
         viewer_user_id=viewer_user_id,
     )
+    # Original author visibility lives only under reposted_data.
+    nested["profile_visibility"] = _normalize_profile_visibility(original_author_profile)
 
     rp_photo = None
     if reposter_profile is not None and reposter_profile.profile_photo_url:
@@ -221,6 +326,7 @@ def format_repost_item(
         },
         "created_at": reposted_at,
         "updated_at": reposted_at,
+        "is_edited": False,
         "like_count": original_post.like_count,
         "repost_count": original_post.repost_count,
         "share_count": getattr(original_post, "share_count", 0),
@@ -243,7 +349,10 @@ def format_repost_item(
     if reposter_is_requested is not None:
         data["is_requested"] = reposter_is_requested
     if reposter_details is not None:
-        data.update(reposter_details)
+        details = {k: v for k, v in reposter_details.items() if k != "profile_visibility"}
+        data.update(details)
+    # Reposter visibility only at top level — set last to avoid duplicates/overwrites.
+    data["profile_visibility"] = _normalize_profile_visibility(reposter_profile)
     return data
 
 # Post states that require a moderator to be assigned for review.
@@ -377,6 +486,7 @@ async def _repair_unassigned_moderators(
     now = utc_now()
     for post in posts:
         try:
+            old_moderator_id = post.moderator_id
             if post.moderator_id is None:
                 await _assign_moderator_for_review(post, db)
             elif fallback_superadmin_id is not None:
@@ -386,6 +496,21 @@ async def _repair_unassigned_moderators(
                 db.add(post)
             else:
                 await _assign_moderator_for_review(post, db)
+
+            if (
+                post.moderator_id is not None
+                and post.moderator_id != old_moderator_id
+            ):
+                from apps.report.repositories.report_repository import (
+                    sync_open_report_moderator_for_post,
+                )
+
+                await sync_open_report_moderator_for_post(
+                    db,
+                    post_id=post.id,
+                    moderator_id=post.moderator_id,
+                )
+
             await db.commit()
         except Exception:
             await db.rollback()
@@ -468,12 +593,26 @@ async def save_post_service(
                     replace=False,
                 )
 
+            old_topics = (
+                await _capture_user_topics(db, user_id)
+                if _should_sync_topics_for_post_state(post_state)
+                else set()
+            )
             await _sync_hashtags(post.id, content_dict, db)
             await _create_revision(post, user_id, db)
             await _assign_moderator_for_review(post, db)
 
             await db.commit()
             await db.refresh(post)
+            logger.info(
+                "[post-keyword-extraction]\nPost created\npost_id=%s\nuser_id=%s\nstate=%s",
+                post.id,
+                user_id,
+                post.state.value if hasattr(post.state, "value") else post.state,
+            )
+            await log_post_keywords_best_effort(post.id, content_dict, user_id=user_id, db=db)
+            if _should_sync_topics_for_post_state(post_state):
+                await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
         except ApiError:
             await db.rollback()
             raise
@@ -530,6 +669,11 @@ async def save_post_service(
                 replace=True,
             )
 
+        old_topics = (
+            await _capture_user_topics(db, user_id)
+            if _should_sync_topics_for_post_state(post_state, previous_state=previous_state)
+            else set()
+        )
         await _sync_hashtags(post.id, content_dict, db)
         await _create_revision(post, user_id, db)
         await _assign_moderator_for_review(
@@ -538,6 +682,15 @@ async def save_post_service(
 
         await db.commit()
         await db.refresh(post)
+        logger.info(
+            "[post-keyword-extraction]\nPost created\npost_id=%s\nuser_id=%s\nstate=%s",
+            post.id,
+            user_id,
+            post.state.value if hasattr(post.state, "value") else post.state,
+        )
+        await log_post_keywords_best_effort(post.id, content_dict, user_id=user_id, db=db)
+        if _should_sync_topics_for_post_state(post_state, previous_state=previous_state):
+            await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
     except ApiError:
         await db.rollback()
         raise
@@ -578,6 +731,8 @@ async def edit_post_service(
     if post.author_user_id != user_id:
         raise ApiError("Post does not belong to the authenticated user")
 
+    previous_state = post.state
+
     # Validate media count if media payload is provided
     if payload.media is not None:
         try:
@@ -611,7 +766,17 @@ async def edit_post_service(
             post.state = PostState.draft
 
     post.revision_number += 1
+    post.is_edited = True
     post.updated_at = utc_now()
+
+    hashtag_content_changed = payload.content is not None and (
+        payload.content.caption is not None or payload.content.content_html is not None
+    )
+    should_sync_topics = _should_sync_topics_for_post(
+        post.state,
+        previous_state=previous_state,
+        hashtag_content_changed=hashtag_content_changed,
+    )
 
     try:
         # Manage media attachments if provided
@@ -624,6 +789,9 @@ async def edit_post_service(
                 replace=True,
             )
 
+        old_topics = (
+            await _capture_user_topics(db, user_id) if should_sync_topics else set()
+        )
         # Re-sync hashtags from current caption and content_html
         await _sync_hashtags(post.id, merged_content, db)
 
@@ -632,6 +800,15 @@ async def edit_post_service(
 
         await db.commit()
         await db.refresh(post)
+        logger.info(
+            "[post-keyword-extraction]\nPost created\npost_id=%s\nuser_id=%s\nstate=%s",
+            post.id,
+            user_id,
+            post.state.value if hasattr(post.state, "value") else post.state,
+        )
+        await log_post_keywords_best_effort(post.id, merged_content, user_id=user_id, db=db)
+        if should_sync_topics:
+            await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
     except ApiError:
         await db.rollback()
         raise
@@ -676,6 +853,12 @@ async def publish_post_service(
     else:
         post.state = PostState.published
 
+    old_topics = (
+        await _capture_user_topics(db, user_id)
+        if _should_sync_topics_for_post_state(post.state, previous_state=previous_state)
+        else set()
+    )
+
     # Increment revision number and update timestamp
     post.revision_number += 1
     post.updated_at = utc_now()
@@ -690,6 +873,20 @@ async def publish_post_service(
 
         await db.commit()
         await db.refresh(post)
+        logger.info(
+            "[post-keyword-extraction]\nPost published\npost_id=%s\nuser_id=%s\nstate=%s",
+            post.id,
+            user_id,
+            post.state.value if hasattr(post.state, "value") else post.state,
+        )
+        await log_post_keywords_best_effort(
+            post.id,
+            post.content,
+            user_id=user_id,
+            db=db,
+        )
+        if _should_sync_topics_for_post_state(post.state, previous_state=previous_state):
+            await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
     except Exception as e:
         await db.rollback()
         raise ApiError("Failed to publish post")
@@ -710,7 +907,6 @@ async def publish_post_service(
             )
 
     return post
-
 
 async def admin_publish_post_service(
     post_id: UUID,
@@ -830,11 +1026,14 @@ async def admin_publish_post_service(
 async def get_post_service(
     post_id: UUID,
     user_id: UUID,
-    db: AsyncSession
+    db: AsyncSession,
+    *,
+    viewer_role: str | None = None,
 ) -> Post:
     """
     Retrieve details of a specific post.
     Validates visibility access permissions.
+    Moderators and superadmins can view posts regardless of feed visibility rules.
     """
     from common.user_visibility import is_hidden_account_status
 
@@ -847,6 +1046,9 @@ async def get_post_service(
     if not row:
         raise ApiError("Post not found")
     post, author = row
+
+    if viewer_role in ("moderator", "superadmin"):
+        return post
 
     # Hide posts from suspended/banned/deleting authors for other viewers.
     if post.author_user_id != user_id and is_hidden_account_status(author.status):
@@ -882,6 +1084,50 @@ async def get_post_service(
                 raise ApiError("Post is not accessible")
 
     return post
+
+
+async def build_post_detail_response(
+    db: AsyncSession,
+    post: Post,
+    *,
+    viewer_user_id: UUID | None = None,
+) -> dict:
+    """Load author and moderator context, then format a single post for API responses."""
+    from sqlalchemy.orm import aliased
+
+    from apps.accounts.db_models import User
+    from apps.profiles.db_models import Profile
+
+    author_profile = (
+        await db.execute(select(Profile).where(Profile.user_id == post.author_user_id))
+    ).scalar_one_or_none()
+    author_user = (
+        await db.execute(select(User).where(User.id == post.author_user_id))
+    ).scalar_one_or_none()
+
+    moderator_user = None
+    moderator_profile = None
+    if post.moderator_id is not None:
+        ModeratorProfile = aliased(Profile)
+        row = (
+            await db.execute(
+                select(User, ModeratorProfile)
+                .outerjoin(ModeratorProfile, ModeratorProfile.user_id == User.id)
+                .where(User.id == post.moderator_id)
+            )
+        ).first()
+        if row:
+            moderator_user, moderator_profile = row
+
+    return format_post_detail(
+        post,
+        author_profile=author_profile,
+        author_user=author_user,
+        moderator_user=moderator_user,
+        moderator_profile=moderator_profile,
+        viewer_user_id=viewer_user_id,
+    )
+
 
 async def list_draft_posts_service(
     user_id: UUID,
@@ -1321,6 +1567,9 @@ def _format_reviewed_post_item(
         "is_moderator_reviewed": post.is_moderator_reviewed,
         "reviewed_at": post.reviewed_at,
         "created_at": post.created_at,
+        "updated_at": post.updated_at,
+        "is_edited": bool(getattr(post, "is_edited", False)),
+        "revision_number": post.revision_number,
         "like_count": getattr(post, "like_count", 0) or 0,
         "repost_count": getattr(post, "repost_count", 0) or 0,
         "share_count": getattr(post, "share_count", 0) or 0,
