@@ -102,6 +102,96 @@ async def create_campaign_audience(
     return len(rows)
 
 
+async def get_campaign_audience_for_user(
+    db: AsyncSession,
+    user_id: UUID,
+    campaign_ids: list[UUID],
+) -> dict[UUID, NotificationCampaignAudience]:
+    """Return audience rows keyed by campaign_id for the given user."""
+    if not campaign_ids:
+        return {}
+
+    unique_campaign_ids = list(dict.fromkeys(campaign_ids))
+    stmt = select(NotificationCampaignAudience).where(
+        NotificationCampaignAudience.user_id == user_id,
+        NotificationCampaignAudience.campaign_id.in_(unique_campaign_ids),
+    )
+    rows = list((await db.execute(stmt)).scalars().all())
+    return {row.campaign_id: row for row in rows}
+
+
+async def mark_campaign_audience_read(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    campaign_id: UUID,
+) -> NotificationCampaignAudience:
+    """Mark a campaign as read for one user, creating an audience row if needed."""
+    stmt = select(NotificationCampaignAudience).where(
+        NotificationCampaignAudience.user_id == user_id,
+        NotificationCampaignAudience.campaign_id == campaign_id,
+    )
+    audience = (await db.execute(stmt)).scalar_one_or_none()
+    now = utc_now()
+    if audience is None:
+        audience = NotificationCampaignAudience(
+            campaign_id=campaign_id,
+            user_id=user_id,
+            is_read=True,
+            read_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(audience)
+    else:
+        audience.is_read = True
+        audience.read_at = now
+        audience.updated_at = now
+        db.add(audience)
+    await db.flush()
+    await db.refresh(audience)
+    return audience
+
+
+async def mark_all_campaign_audience_read(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    campaign_ids: list[UUID],
+) -> int:
+    """Mark every listed campaign as read for the user, upserting audience rows."""
+    if not campaign_ids:
+        return 0
+
+    now = utc_now()
+    existing = await get_campaign_audience_for_user(db, user_id, campaign_ids)
+    updated = 0
+    for campaign_id in dict.fromkeys(campaign_ids):
+        audience = existing.get(campaign_id)
+        if audience is None:
+            db.add(
+                NotificationCampaignAudience(
+                    campaign_id=campaign_id,
+                    user_id=user_id,
+                    is_read=True,
+                    read_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            updated += 1
+            continue
+        if not audience.is_read:
+            audience.is_read = True
+            audience.read_at = now
+            audience.updated_at = now
+            db.add(audience)
+            updated += 1
+    if updated:
+        await db.flush()
+    return updated
+
+
 async def list_campaign_audience_user_ids(
     db: AsyncSession,
     campaign_id: UUID,

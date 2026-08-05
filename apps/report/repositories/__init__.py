@@ -1,5 +1,6 @@
 from .report_repository import (
     count_reported_entities,
+    count_reported_entities_summary_by_status,
     count_reports,
     count_reports_by_entity_ids,
     count_reports_by_entity_keys,
@@ -17,6 +18,7 @@ from .report_repository import (
 
 __all__ = [
     "count_reported_entities",
+    "count_reported_entities_summary_by_status",
     "count_reports",
     "count_reports_by_entity_ids",
     "count_reports_by_entity_keys",

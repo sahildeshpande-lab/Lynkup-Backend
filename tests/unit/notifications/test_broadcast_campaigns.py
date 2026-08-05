@@ -512,13 +512,18 @@ async def test_list_notifications_merges_personal_and_broadcasts(mock_db) -> Non
             "_user_topic_set",
             AsyncMock(return_value={"interest_ai", "major_cs"}),
         ),
+        patch.object(
+            svc,
+            "get_campaign_audience_for_user",
+            AsyncMock(return_value={}),
+        ),
     ):
         response = await svc.list_notifications(db, user_id=user_id)
 
     assert response.status is True
     items = response.data["items"]
     assert [item["title"] for item in items] == ["Campus news", "Request", "AI update"]
-    assert items[0]["is_read"] is False  # broadcast forced unread in API
+    assert items[0]["is_read"] is False
     assert items[1]["campaign_id"] is None
 
 
@@ -665,3 +670,183 @@ async def test_dispatch_announcement_skips_push_for_opted_out_users(mock_db) -> 
     )
     load_tokens.assert_awaited_once_with(db, push_eligible)
     push.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_list_notifications_uses_campaign_audience_read_state(mock_db) -> None:
+    from apps.notifications.services import notification_service as svc
+
+    db = mock_db()
+    user_id = uuid4()
+    campaign_id = uuid4()
+    read_at = datetime(2026, 2, 1, tzinfo=timezone.utc)
+    announcement = SimpleNamespace(
+        id=uuid4(),
+        notification_type=SimpleNamespace(name="ANNOUNCEMENT"),
+        notification_type_id=uuid4(),
+        campaign_id=campaign_id,
+        title="Campus news",
+        body="hello",
+        deep_link_payload={"broadcast": True},
+        is_read=False,
+        read_at=None,
+        created_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+    )
+    audience = SimpleNamespace(
+        campaign_id=campaign_id,
+        is_read=True,
+        read_at=read_at,
+    )
+
+    with (
+        patch.object(
+            svc,
+            "_get_or_create_preferences",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    in_app_enabled=True,
+                    category_preferences={"ANNOUNCEMENT": True},
+                )
+            ),
+        ),
+        patch.object(
+            svc,
+            "get_default_category_preferences",
+            AsyncMock(return_value={"ANNOUNCEMENT": True}),
+        ),
+        patch.object(
+            svc,
+            "list_personal_notifications_for_user",
+            AsyncMock(return_value=[]),
+        ),
+        patch.object(
+            svc,
+            "list_broadcast_notifications",
+            AsyncMock(return_value=[announcement]),
+        ),
+        patch.object(
+            svc,
+            "get_campaign_audience_for_user",
+            AsyncMock(return_value={campaign_id: audience}),
+        ),
+    ):
+        response = await svc.list_notifications(db, user_id=user_id)
+
+    assert response.status is True
+    assert response.data["items"][0]["is_read"] is True
+    assert response.data["items"][0]["read_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_mark_as_read_broadcast_persists_campaign_audience(mock_db) -> None:
+    from apps.notifications.services import notification_service as svc
+
+    db = mock_db()
+    user_id = uuid4()
+    campaign_id = uuid4()
+    notification_id = uuid4()
+    read_at = datetime(2026, 2, 2, tzinfo=timezone.utc)
+    broadcast = SimpleNamespace(
+        id=notification_id,
+        notification_type=SimpleNamespace(name="ANNOUNCEMENT"),
+        notification_type_id=uuid4(),
+        campaign_id=campaign_id,
+        title="Campus news",
+        body="hello",
+        deep_link_payload={"broadcast": True},
+        is_read=False,
+        read_at=None,
+        created_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+    )
+    audience = SimpleNamespace(
+        campaign_id=campaign_id,
+        is_read=True,
+        read_at=read_at,
+    )
+
+    with (
+        patch.object(
+            svc,
+            "get_notification_for_user",
+            AsyncMock(return_value=None),
+        ),
+        patch.object(
+            svc,
+            "get_broadcast_notification_by_id",
+            AsyncMock(return_value=broadcast),
+        ),
+        patch.object(
+            svc,
+            "_user_topic_set",
+            AsyncMock(return_value=set()),
+        ),
+        patch.object(
+            svc,
+            "mark_campaign_audience_read",
+            AsyncMock(return_value=audience),
+        ) as mark_audience,
+    ):
+        response = await svc.mark_as_read(
+            db,
+            user_id=user_id,
+            notification_id=notification_id,
+        )
+
+    mark_audience.assert_awaited_once_with(
+        db,
+        user_id=user_id,
+        campaign_id=campaign_id,
+    )
+    db.commit.assert_awaited_once()
+    assert response.status is True
+    assert response.data.is_read is True
+
+
+@pytest.mark.asyncio
+async def test_mark_all_read_includes_broadcast_campaign_audience(mock_db) -> None:
+    from apps.notifications.services import notification_service as svc
+
+    db = mock_db()
+    user_id = uuid4()
+    campaign_id = uuid4()
+    broadcast = SimpleNamespace(
+        id=uuid4(),
+        notification_type=SimpleNamespace(name="ANNOUNCEMENT"),
+        notification_type_id=uuid4(),
+        campaign_id=campaign_id,
+        title="Campus news",
+        body="hello",
+        deep_link_payload={"broadcast": True},
+        is_read=False,
+        read_at=None,
+        created_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+    )
+
+    with (
+        patch.object(
+            svc,
+            "persist_mark_all_read",
+            AsyncMock(return_value=2),
+        ),
+        patch.object(
+            svc,
+            "_list_unified_notifications_for_user",
+            AsyncMock(return_value=[(broadcast, True, False, None)]),
+        ),
+        patch.object(
+            svc,
+            "mark_all_campaign_audience_read",
+            AsyncMock(return_value=1),
+        ) as mark_all_audience,
+    ):
+        response = await svc.mark_all_read(db, user_id=user_id)
+
+    mark_all_audience.assert_awaited_once_with(
+        db,
+        user_id=user_id,
+        campaign_ids=[campaign_id],
+    )
+    db.commit.assert_awaited_once()
+    assert response.status is True
+    assert response.data["updated_count"] == 3
+

@@ -40,6 +40,8 @@ async def test_lifespan_starts_and_stops_email_cron(monkeypatch) -> None:
 
     async with lifespan(app):
         await asyncio.wait_for(cron_started.wait(), timeout=1)
+        assert hasattr(app.state, "recommendation_models")
+        assert app.state.recommendation_models.is_ready is False
 
     assert cron_cancelled.is_set()
     init_mock.assert_called_once()

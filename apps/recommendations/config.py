@@ -19,6 +19,15 @@ class RecommendationSettings(BaseSettings):
         alias="SEMANTIC_SCHOLAR_BASE_URL",
     )
     min_keyword_score: float = Field(default=0.45, alias="MIN_KEYWORD_SCORE", ge=0.0, le=1.0)
+    hf_home: str | None = Field(
+        default=None,
+        alias="HF_HOME",
+        description=(
+            "Optional Hugging Face cache directory shared across deployments. "
+            "When set, SentenceTransformer/KeyBERT reuse cached weights instead "
+            "of downloading on every startup."
+        ),
+    )
 
 
 settings = RecommendationSettings()

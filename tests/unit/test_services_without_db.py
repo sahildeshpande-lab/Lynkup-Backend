@@ -85,12 +85,10 @@ async def test_search_universities_and_academic_interests(mock_db, scalar_result
     chemistry = SimpleNamespace(id=5, name="Chemistry", education_level_id=1, is_active=True)
     ai = SimpleNamespace(id=1, name="Artificial Intelligence", education_level_id=2, is_active=True)
 
-    # education levels + interests + countries + hashtags
+    # education levels + interests + hashtags
     db = mock_db(
         scalar_result(values=[bachelors, masters]),
         scalar_result(values=[chemistry, ai]),
-        scalar_result(0),
-        scalar_result(values=[]),
         scalar_result(0),
         scalar_result(values=[]),
     )
@@ -108,8 +106,7 @@ async def test_search_universities_and_academic_interests(mock_db, scalar_result
         },
     ]
     assert "interests" not in info
-    assert info["countries"]["items"] == []
-    assert info["countries"]["totalItems"] == 0
+    assert "countries" not in info
     assert info["hashtags"]["items"] == []
     assert info["hashtags"]["totalItems"] == 0
 

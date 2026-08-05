@@ -1,97 +1,49 @@
 from __future__ import annotations
 
 import logging
-import time
-from datetime import datetime, timezone
-import re 
+import re
+from typing import Any
 
+from apps.recommendations.services.model_registry import get_registry
 
 logger = logging.getLogger(__name__)
 
-nlp = None
-kw_model = None
-
-_KEYBERT_MODEL = "all-MiniLM-L6-v2"
-_SPACY_MODEL = "en_core_web_sm"
-
-
-def _timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat()
+# Backward-compatible module aliases populated after startup initialization.
+nlp: Any | None = None
+kw_model: Any | None = None
 
 
 def initialize_models() -> None:
-    """Load the spaCy model once during application startup."""
-    global nlp
+    """Load spaCy and KeyBERT once during application startup.
 
-    total_start = time.perf_counter()
-    logger.info("[%s] Enter initialize_models()", _timestamp())
+    Thread-safe and idempotent. Each worker process loads its own model instances.
+    """
+    global nlp, kw_model
 
-    if nlp is not None:
-        logger.info("[%s] spaCy model already initialized; skipping duplicate startup load.", _timestamp())
-        return
+    registry = get_registry()
+    registry.initialize()
+    nlp = registry.nlp
+    kw_model = registry.kw_model
 
-    spacy_start = time.perf_counter()
-    logger.info("[%s] Loading spaCy model...", _timestamp())
-    try:
-        import spacy
 
-        logger.info("[%s] spaCy package imported.", _timestamp())
-        logger.info("[%s] Beginning spaCy model load for %s", _timestamp(), _SPACY_MODEL)
-        nlp = spacy.load(_SPACY_MODEL)
-        logger.info(
-            "[%s] spaCy model loaded successfully (%.2f sec)",
-            _timestamp(),
-            time.perf_counter() - spacy_start,
-        )
-    except Exception:
-        logger.exception("[%s] Failed while loading spaCy", _timestamp())
-        raise
-
-    logger.info(
-        "[%s] initialize_models() completed successfully (Total: %.2f sec). "
-        "KeyBERT will load lazily on first keyword extraction request.",
-        _timestamp(),
-        time.perf_counter() - total_start,
+def get_keyword_model() -> Any:
+    """Return the cached KeyBERT model loaded during startup."""
+    registry = get_registry()
+    if registry.is_ready:
+        return registry.kw_model
+    raise RuntimeError(
+        "KeyBERT model is not initialized. "
+        "Ensure initialize_models() runs during application startup."
     )
 
 
-def get_keyword_model():
-    """Return the cached KeyBERT model, loading it on first use."""
-    global kw_model
-
-    if kw_model is not None:
-        logger.info("[%s] KeyBERT model already cached; reusing existing instance.", _timestamp())
-        return kw_model
-
-    load_start = time.perf_counter()
-    logger.info("[%s] Loading KeyBERT model for the first time...", _timestamp())
-    try:
-        from keybert import KeyBERT
-
-        logger.info("[%s] Beginning KeyBERT initialization for %s", _timestamp(), _KEYBERT_MODEL)
-        kw_model = KeyBERT(model=_KEYBERT_MODEL)
-        logger.info(
-            "[%s] KeyBERT model loaded successfully (%.2f sec).",
-            _timestamp(),
-            time.perf_counter() - load_start,
-        )
-    except Exception:
-        logger.exception("[%s] Failed while loading KeyBERT", _timestamp())
-        raise
-
-    return kw_model
-
-
 def _ensure_initialized() -> None:
-    if nlp is None:
-        try:
-            initialize_models()
-        except Exception as exc:
-            raise RuntimeError(
-                "Recommendation models are not initialized. "
-                "Install spaCy and the configured language model before using "
-                "keyword extraction."
-            ) from exc
+    if not get_registry().is_ready:
+        raise RuntimeError(
+            "Recommendation models are not initialized. "
+            "Install spaCy/KeyBERT dependencies and ensure initialize_models() "
+            "runs during application startup."
+        )
 
 
 def extract_hashtags(text: str) -> list[str]:
@@ -101,19 +53,15 @@ def extract_hashtags(text: str) -> list[str]:
 
 
 def remove_hashtags(text: str) -> str:
-    """
-    Remove hashtags before preprocessing.
-    """
+    """Remove hashtags before preprocessing."""
     return re.sub(r"#\w+", "", text)
 
 
 def preprocess_text(text: str) -> str:
-    """
-    Remove stop words, punctuation, numbers and lemmatize.
-    """
+    """Remove stop words, punctuation, numbers and lemmatize."""
     _ensure_initialized()
 
-    doc = nlp(text)
+    doc = get_registry().nlp(text)
 
     tokens = [
         token.lemma_.lower()
@@ -142,7 +90,7 @@ def extract_keywords(processed_text: str) -> list[tuple[str, float]]:
         processed_text,
         keyphrase_ngram_range=(1, 3),
         top_n=10,
-        stop_words=None,      # Already removed by spaCy
+        stop_words=None,  # Already removed by spaCy
         use_maxsum=True,
         nr_candidates=20,
     )
@@ -190,5 +138,4 @@ def extract_post_keywords(text: str) -> dict:
 
 
 if __name__ == "__main__":
-
     initialize_models()

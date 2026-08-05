@@ -169,6 +169,14 @@ class NotificationCampaignAudience(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     campaign_id: UUID = Field(foreign_key="notification_campaigns.id", nullable=False)
     user_id: UUID = Field(foreign_key="users.id", nullable=False)
+    is_read: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default=text("false")),
+    )
+    read_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
     created_at: datetime = Field(
         default_factory=utc_now,
         sa_column=Column(DateTime(timezone=True), nullable=False),

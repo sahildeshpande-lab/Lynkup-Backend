@@ -96,16 +96,32 @@ async def search_recommendation_papers(
 async def get_recommendation_settings(
     db: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_admin),
+    page: int | None = Query(default=None, ge=1, description="Page number for settings history"),
+    pageSize: int | None = Query(
+        default=None,
+        ge=1,
+        le=200,
+        description="Page size for settings history",
+    ),
 ) -> ApiResponse:
-    """Return current recommendation settings plus complete settings history."""
+    """Return current recommendation settings plus settings change history.
+
+    Optional ``page`` / ``pageSize`` paginate ``history`` via
+    ``common.pagination.build_paginated_response``. If both are omitted,
+    ``history`` is the full list.
+    """
     logger.info(
-        "[recommendation-settings]\nadmin_id=%s\naction=GET",
+        "[recommendation-settings]\nadmin_id=%s\naction=GET\npage=%s\npageSize=%s",
         current_user.id,
+        page,
+        pageSize,
     )
 
     data = await RecommendationSettingsService().get_settings_with_history(
         db,
         admin_user_id=current_user.id,
+        page=page,
+        page_size=pageSize,
     )
     return ApiResponse(
         message="Recommendation settings fetched successfully.",

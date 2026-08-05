@@ -108,7 +108,7 @@ Ticket links were not present in the repository, so this table is ready for the 
 | M4-004 | Admin ANNOUNCEMENT / TOPIC campaigns       | https://kampulynk.atlassian.net/browse/SCRUM-141 |     |
 | M4-005 | Keyword extraction and engagement scoring  | https://kampulynk.atlassian.net/browse/SCRUM-40  |
 | M4-006 | Semantic Scholar recommendation generation | https://kampulynk.atlassian.net/browse/SCRUM-40  |
-|  |
+|        |
 
 ## Branch / Repo
 

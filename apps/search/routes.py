@@ -60,6 +60,24 @@ async def list_academics_info(
     return ApiResponse(message="Academics info fetched successfully", data=data)
 
 
+@router.get("/countries", response_model=ApiResponse)
+async def list_countries(
+    query: Optional[str] = Query(None, description="Filter countries by name or iso_code (case-insensitive)"),
+    page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
+    pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user_or_superadmin),
+) -> ApiResponse:
+    data = await services.list_countries(
+        query=query,
+        page=page,
+        page_size=pageSize,
+        db=db,
+    )
+    message = "No countries found" if data["totalItems"] == 0 else "Countries fetched successfully"
+    return ApiResponse(message=message, data=data)
+
+
 @router.get("/majors", response_model=ApiResponse)
 async def list_majors(
     query: Optional[str] = Query(None, description="Filter majors by name (case-insensitive)"),
@@ -157,8 +175,9 @@ async def search_posts(
     query: str | None = Query(
         default=None,
         description=(
-            "Search post caption/content and author first/last name. "
-            "Example: query=Sahil returns posts by authors named Sahil and posts mentioning Sahil."
+            "Search post caption/content, author first/last name, or author major/minor. "
+            "Example: query=Computer Science returns posts from authors with that major "
+            "and posts whose caption/content mentions the term."
         ),
     ),
     hashtag: list[str] | None = Query(
@@ -191,7 +210,7 @@ async def search_posts(
     country: list[str] | None = Query(
         default=None,
         description=(
-            "Filter by author profile country name, iso_code, or country id from /academicsinfo. "
+            "Filter by author profile country name, iso_code, or country id from /countries. "
             "Multiple values are OR'd: repeat the query param and/or use pipe-separated values "
             "(e.g. country=India&country=US or India|US)."
         ),

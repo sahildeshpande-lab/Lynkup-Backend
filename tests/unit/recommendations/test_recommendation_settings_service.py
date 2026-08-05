@@ -30,6 +30,11 @@ class _FakeResult:
     def one_or_none(self):
         return self._rows[0] if self._rows else None
 
+    def scalar_one(self):
+        if not self._rows:
+            raise AssertionError("Expected one scalar result")
+        return self._rows[0]
+
 
 class _FakeSession:
     def __init__(
@@ -38,10 +43,12 @@ class _FakeSession:
         *,
         history_rows: list | None = None,
         profile_rows: list | None = None,
+        history_count: int | None = None,
     ) -> None:
         self._rows = list(rows or [])
         self._history_rows = list(history_rows or [])
         self._profile_rows = list(profile_rows or [])
+        self._history_count = history_count
         self.execute = AsyncMock(side_effect=self._execute)
         self.add = MagicMock()
         self.commit = AsyncMock()
@@ -49,6 +56,13 @@ class _FakeSession:
 
     def _execute(self, stmt):
         stmt_str = str(stmt)
+        if "count" in stmt_str.lower() and "learning_recommendation_settings_logs" in stmt_str:
+            count = (
+                self._history_count
+                if self._history_count is not None
+                else len(self._history_rows)
+            )
+            return _FakeResult([count])
         if "learning_recommendation_settings_logs" in stmt_str:
             return _FakeResult(self._history_rows)
         if "profiles" in stmt_str:
@@ -239,3 +253,54 @@ async def test_get_settings_with_history_returns_change_diffs() -> None:
             "new_value": 1,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_get_settings_with_history_returns_paginated_history() -> None:
+    admin_id = uuid4()
+    existing = LearningRecommendationSettings(
+        is_enabled=True,
+        generation_frequency_days=7,
+        max_recommendations=20,
+        updated_by=admin_id,
+    )
+    older = LearningRecommendationSettingsLog(
+        id=uuid4(),
+        is_enabled=True,
+        generation_frequency_days=1,
+        max_recommendations=10,
+        updated_by=admin_id,
+        created_at=datetime.now(timezone.utc) - timedelta(days=2),
+    )
+    newer = LearningRecommendationSettingsLog(
+        id=uuid4(),
+        is_enabled=False,
+        generation_frequency_days=7,
+        max_recommendations=20,
+        updated_by=admin_id,
+        created_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    session = _FakeSession(
+        rows=[existing],
+        history_rows=[
+            (newer, "John", "Doe"),
+            (older, "Sahil", "Deshpande"),
+        ],
+        profile_rows=[("John", "Doe")],
+        history_count=2,
+    )
+
+    data = await RecommendationSettingsService().get_settings_with_history(
+        session,  # type: ignore[arg-type]
+        admin_user_id=admin_id,
+        page=1,
+        page_size=1,
+    )
+
+    assert data["current_settings"]["updated_by"] == "John Doe"
+    assert data["history"]["page"] == 1
+    assert data["history"]["pageSize"] == 1
+    assert data["history"]["totalItems"] == 2
+    assert data["history"]["totalPages"] == 2
+    assert len(data["history"]["items"]) == 1
+    assert data["history"]["items"][0]["id"] == newer.id

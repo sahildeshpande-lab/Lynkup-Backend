@@ -5,12 +5,16 @@ from apps.profiles.normalization import (
 )
 
 
-def test_normalize_major_minor_lowercases_and_collapses_whitespace() -> None:
-    assert normalize_major_minor("AI") == "ai"
-    assert normalize_major_minor("aI") == "ai"
-    assert normalize_major_minor("Ai") == "ai"
-    assert normalize_major_minor("ai") == "ai"
-    assert normalize_major_minor("  Computer   Science  ") == "computer science"
+def test_normalize_major_minor_title_cases_and_collapses_whitespace() -> None:
+    assert normalize_major_minor("AI") == "Ai"
+    assert normalize_major_minor("aI") == "Ai"
+    assert normalize_major_minor("Ai") == "Ai"
+    assert normalize_major_minor("ai") == "Ai"
+    assert normalize_major_minor("  Computer   Science  ") == "Computer Science"
+    assert normalize_major_minor("computer science") == "Computer Science"
+    assert normalize_major_minor("Computer science") == "Computer Science"
+    assert normalize_major_minor("computer Science") == "Computer Science"
+    assert normalize_major_minor("Computer Science") == "Computer Science"
     assert normalize_major_minor("   ") is None
     assert normalize_major_minor(None) is None
 
@@ -26,8 +30,8 @@ def test_normalize_named_program_list_dedupes_case_variants() -> None:
         ]
     )
     assert result == [
-        {"name": "ai"},
-        {"name": "computer science"},
+        {"name": "Ai"},
+        {"name": "Computer Science"},
     ]
 
 
@@ -40,4 +44,4 @@ def test_collect_normalized_program_names_merges_sources() -> None:
         None,
         [],
     )
-    assert names == ["ai", "math"]
+    assert names == ["Ai", "Math"]

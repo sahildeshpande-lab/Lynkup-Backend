@@ -82,7 +82,9 @@ async def list_reports_admin_route(
     description=(
         "Return one row per reported entity for the moderation dashboard, "
         "including previous moderation comments for each entity. "
-        "Optionally filter by status (under_review, actioned, rejected). "
+        "Includes summary counts by status (under_review, actioned, rejected), "
+        "total across all statuses, and paginated items. "
+        "Optionally filter items by status (under_review, actioned, rejected). "
         "Admin/moderator only."
     ),
 )

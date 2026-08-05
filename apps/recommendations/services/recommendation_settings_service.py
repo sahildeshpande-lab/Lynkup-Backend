@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -14,6 +15,7 @@ from apps.profiles.db_models import (
 )
 from apps.profiles.db_models.profile_db_model import Profile
 from apps.profiles.services.response_service import _compose_full_name
+from common.pagination import build_paginated_response
 
 logger = logging.getLogger(__name__)
 
@@ -194,15 +196,25 @@ class RecommendationSettingsService:
         first_name, last_name = row
         return _compose_full_name(first_name, last_name) or None
 
+    async def count_settings_history(self, session: AsyncSession) -> int:
+        stmt = select(func.count()).select_from(LearningRecommendationSettingsLog)
+        return int((await session.execute(stmt)).scalar_one())
+
     async def get_settings_history(
         self,
         session: AsyncSession,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Return history newest-first as change diffs with updater display names.
 
         Uses a single query with an outer join to profiles (no N+1).
         Each item is compared against the next-older log; the oldest item is
         compared against the initial default settings snapshot.
+
+        When ``limit`` is set, one extra row is fetched so the last item on the
+        page can still diff against the next-older log entry.
         """
         stmt = (
             select(
@@ -216,10 +228,13 @@ class RecommendationSettingsService:
             )
             .order_by(LearningRecommendationSettingsLog.created_at.desc())
         )
+        if limit is not None:
+            stmt = stmt.offset(max(offset, 0)).limit(limit + 1)
         rows = (await session.execute(stmt)).all()
 
+        display_rows = rows if limit is None else rows[:limit]
         history: list[dict[str, Any]] = []
-        for index, (log, first_name, last_name) in enumerate(rows):
+        for index, (log, first_name, last_name) in enumerate(display_rows):
             if index + 1 < len(rows):
                 previous_snapshot = _settings_snapshot(rows[index + 1][0])
             else:
@@ -244,6 +259,8 @@ class RecommendationSettingsService:
         session: AsyncSession,
         *,
         admin_user_id: UUID,
+        page: int | None = None,
+        page_size: int | None = None,
     ) -> dict[str, Any]:
         """Return current settings plus change-diff history for the admin GET API."""
         settings = await self.get_settings(
@@ -256,7 +273,24 @@ class RecommendationSettingsService:
             session,
             settings.updated_by,
         )
-        history = await self.get_settings_history(session)
+
+        if page is not None and page_size is not None:
+            total_items = await self.count_settings_history(session)
+            offset = (page - 1) * page_size
+            history_items = await self.get_settings_history(
+                session,
+                offset=offset,
+                limit=page_size,
+            )
+            history = build_paginated_response(
+                history_items,
+                page,
+                page_size,
+                total_items,
+            ).model_dump()
+        else:
+            history = await self.get_settings_history(session)
+
         return {
             "current_settings": current_settings,
             "history": history,

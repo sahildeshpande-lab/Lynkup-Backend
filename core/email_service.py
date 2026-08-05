@@ -451,9 +451,8 @@ def _otp_template_details(otp_purpose: str) -> tuple[str, str]:
 def _build_otp_display_html(otp: str, brand_blue: str) -> str:
     """Build a responsive OTP card for embedding inside a centered parent <td>.
 
-    Desktop: content-sized card with original padding, border, and font sizes.
-    Mobile: fluid width (100% of available space) with equal side margins via
-    the parent ``otp-wrapper`` and media-query rules in ``base_email.html``.
+    Desktop and mobile: fluid width (100% of the OTP wrapper) with equal side
+    margins via the parent ``otp-wrapper`` and CSS rules in ``base_email.html``.
 
     Digits are rendered as separate table cells so any OTP length (4/5/6/8)
     works consistently across Gmail, Apple Mail, Outlook, Yahoo, and Samsung Mail.
@@ -470,19 +469,18 @@ def _build_otp_display_html(otp: str, brand_blue: str) -> str:
         for digit in digits
     )
 
-    # Outermost table is content-sized on desktop; mobile CSS sets width:100%.
+    # Outermost table spans full OTP wrapper width on desktop and mobile.
     return (
         '<table class="otp-outer-table" role="presentation" cellpadding="0" cellspacing="0" border="0" '
-        'align="center" style="margin:0 auto;border-collapse:collapse;">'
+        'align="center" style="margin:0 auto;border-collapse:collapse;width:100%;">'
         "<tr>"
         f'<td class="otp-card" align="center" '
         f'style="padding:24px;background-color:#F8FAFC;border:2px dashed {brand_blue};'
-        'border-radius:12px;text-align:center;">'
+        'border-radius:12px;text-align:center;width:100%;box-sizing:border-box;">'
         f'<p class="otp-label" style="font-size:10px;font-weight:600;color:{brand_blue};'
         "letter-spacing:2px;text-transform:uppercase;"
         "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
         'margin:0 0 16px;text-align:center;">'
-        "Your OTP"
         "</p>"
         '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
         'align="center" style="margin:0 auto;border-collapse:collapse;">'
@@ -710,7 +708,6 @@ def build_email_verified_success_html(full_name: str | None = None) -> str:
         f'<div style="font-size:16px;font-weight:700;margin-bottom:16px;">Email Verified Successfully</div>'
         f'<p style="margin:0 0 14px;">{greeting}</p>'
         f'<p style="margin:0 0 14px;">Your email address has been verified successfully.</p>'
-        f'<p style="margin:0;">You can now proceed with onboarding.</p>'
     )
     return _render_email_layout("Email Verified Successfully", body_html)
 

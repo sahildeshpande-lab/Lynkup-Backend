@@ -109,10 +109,10 @@ async def admin_signin(payload: AdminLoginRequest, db: AsyncSession) -> ApiRespo
     stmt = select(User).options(selectinload(User.roles)).where(User.email == payload.email.lower())
     user = (await db.execute(stmt)).scalar_one_or_none()
     if not user:
-        return ApiResponse(status=False, message="User not found . Please sign up.", data=None)
+        return ApiResponse(status=False, message="Incorrect Username or Password.", data=None)
 
     if not user.password_hash or not PASSWORD_HASHER.verify(payload.password, user.password_hash):
-        return ApiResponse(status=False, message="Invalid credentials", data=None)
+        return ApiResponse(status=False, message="Incorrect Username or Password.", data=None)
 
     if user.role == "user":
         return ApiResponse(status=False, message="Forbidden: Admin access required", data=None)

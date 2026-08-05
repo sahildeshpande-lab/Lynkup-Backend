@@ -44,8 +44,8 @@ async def test_all_email_builders_and_senders():
     # Digits are rendered in separate <td> cells (not space-joined).
     for digit in "123456":
         assert f">{digit}</td>" in html_otp
-    assert "Your OTP" in html_otp
     assert "otp-card" in html_otp
+    assert 'class="otp-card"' in html_otp and "width:100%" in html_otp
 
     html_notif = build_notification_email_html("Test Title", "Test Body")
     assert "Test Title" in html_notif

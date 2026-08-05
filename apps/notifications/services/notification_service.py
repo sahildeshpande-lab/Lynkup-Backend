@@ -10,6 +10,9 @@ from sqlmodel import select
 from apps.notifications.db_models import Notification
 from apps.notifications.repositories.campaign_audience_repository import (
     get_active_fcm_tokens_for_users,
+    get_campaign_audience_for_user,
+    mark_all_campaign_audience_read,
+    mark_campaign_audience_read,
 )
 from apps.notifications.repositories.notification_repository import (
     create_notification as persist_notification,
@@ -76,13 +79,18 @@ def _to_notification_item(
     notification: Notification,
     *,
     is_broadcast: bool = False,
+    broadcast_is_read: bool | None = None,
+    broadcast_read_at=None,
 ) -> NotificationItem:
     type_name = None
     if getattr(notification, "notification_type", None) is not None:
         type_name = notification.notification_type.name
-    # Broadcast rows are shared; per-user read state is not stored without a schema change.
-    is_read = False if is_broadcast else notification.is_read
-    read_at = None if is_broadcast else notification.read_at
+    if is_broadcast:
+        is_read = bool(broadcast_is_read)
+        read_at = broadcast_read_at
+    else:
+        is_read = notification.is_read
+        read_at = notification.read_at
     return NotificationItem(
         id=notification.id,
         notification_type=type_name,
@@ -129,8 +137,8 @@ async def _list_unified_notifications_for_user(
     user_id: UUID,
     *,
     is_read: bool | None = None,
-) -> list[tuple[Notification, bool]]:
-    """Return (notification, is_broadcast) pairs newest-first, respecting preferences."""
+) -> list[tuple[Notification, bool, bool, Any]]:
+    """Return (notification, is_broadcast, is_read, read_at) tuples newest-first."""
     preference = await _get_or_create_preferences(db, user_id)
     if not preference.in_app_enabled:
         return []
@@ -151,11 +159,7 @@ async def _list_unified_notifications_for_user(
         if _notification_type_enabled(row, enabled_categories)
     ]
 
-    # Broadcast rows have no per-user read state and are always exposed as is_read=false.
-    if is_read is True:
-        broadcasts: list[Notification] = []
-    else:
-        broadcasts = await list_broadcast_notifications(db)
+    broadcasts = await list_broadcast_notifications(db)
 
     user_topics: set[str] | None = None
     visible_broadcasts: list[Notification] = []
@@ -179,10 +183,28 @@ async def _list_unified_notifications_for_user(
             continue
         visible_broadcasts.append(notification)
 
-    merged: list[tuple[Notification, bool]] = [
-        *((row, False) for row in personal),
-        *((row, True) for row in visible_broadcasts),
+    audience_by_campaign = await get_campaign_audience_for_user(
+        db,
+        user_id,
+        [notification.campaign_id for notification in visible_broadcasts if notification.campaign_id],
+    )
+
+    merged: list[tuple[Notification, bool, bool, Any]] = [
+        (row, False, row.is_read, row.read_at) for row in personal
     ]
+    for notification in visible_broadcasts:
+        campaign_id = notification.campaign_id
+        audience = audience_by_campaign.get(campaign_id) if campaign_id else None
+        broadcast_is_read = audience.is_read if audience is not None else False
+        broadcast_read_at = audience.read_at if audience is not None else None
+        if is_read is True and not broadcast_is_read:
+            continue
+        if is_read is False and broadcast_is_read:
+            continue
+        merged.append(
+            (notification, True, broadcast_is_read, broadcast_read_at),
+        )
+
     merged.sort(key=lambda item: item[0].created_at, reverse=True)
     return merged
 
@@ -307,8 +329,13 @@ async def list_notifications(
         end = start + resolved_page_size
         page_rows = merged[start:end]
         items = [
-            _to_notification_item(row, is_broadcast=is_broadcast)
-            for row, is_broadcast in page_rows
+            _to_notification_item(
+                row,
+                is_broadcast=is_broadcast,
+                broadcast_is_read=is_read_value if is_broadcast else None,
+                broadcast_read_at=read_at_value if is_broadcast else None,
+            )
+            for row, is_broadcast, is_read_value, read_at_value in page_rows
         ]
         data = build_paginated_response(
             items,
@@ -318,8 +345,13 @@ async def list_notifications(
         ).model_dump(mode="json")
     else:
         items = [
-            _to_notification_item(row, is_broadcast=is_broadcast)
-            for row, is_broadcast in merged
+            _to_notification_item(
+                row,
+                is_broadcast=is_broadcast,
+                broadcast_is_read=is_read_value if is_broadcast else None,
+                broadcast_read_at=read_at_value if is_broadcast else None,
+            )
+            for row, is_broadcast, is_read_value, read_at_value in merged
         ]
         data = {"items": [item.model_dump(mode="json") for item in items]}
 
@@ -370,10 +402,27 @@ async def mark_as_read(
             response_cls=MarkNotificationReadResponse,
         )
 
-    # Shared broadcast row — acknowledge read without mutating global state.
+    if broadcast.campaign_id is None:
+        return error_response(
+            "Notification not found.",
+            response_cls=MarkNotificationReadResponse,
+        )
+
+    audience = await mark_campaign_audience_read(
+        db,
+        user_id=user_id,
+        campaign_id=broadcast.campaign_id,
+    )
+    await db.commit()
+
     return success_response(
         "Notification marked as read.",
-        _to_notification_item(broadcast, is_broadcast=True),
+        _to_notification_item(
+            broadcast,
+            is_broadcast=True,
+            broadcast_is_read=audience.is_read,
+            broadcast_read_at=audience.read_at,
+        ),
         response_cls=MarkNotificationReadResponse,
     )
 
@@ -384,6 +433,21 @@ async def mark_all_read(
     user_id: UUID,
 ) -> MarkAllNotificationsReadResponse:
     updated = await persist_mark_all_read(db, user_id)
+    visible_broadcasts = await _list_unified_notifications_for_user(
+        db,
+        user_id,
+        is_read=None,
+    )
+    campaign_ids = [
+        notification.campaign_id
+        for notification, is_broadcast, is_read_value, _read_at in visible_broadcasts
+        if is_broadcast and notification.campaign_id is not None and not is_read_value
+    ]
+    updated += await mark_all_campaign_audience_read(
+        db,
+        user_id=user_id,
+        campaign_ids=campaign_ids,
+    )
     await db.commit()
     return success_response(
         "All notifications marked as read.",

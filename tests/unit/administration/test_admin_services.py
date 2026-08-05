@@ -539,7 +539,7 @@ async def test_admin_signin_invalid_credentials() -> None:
             payload = AdminLoginRequest(email=email, password="WrongPassword123!")
             res = await admin_signin(payload, session)
             assert res.status is False
-            assert "Invalid credentials" in res.message
+            assert "Incorrect Username or Password." in res.message
     finally:
         await engine.dispose()
 

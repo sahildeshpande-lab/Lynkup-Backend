@@ -105,6 +105,12 @@ def test_get_reports_admin_success():
 def test_get_reported_entities_admin_success():
     mock_data = {
         "items": [],
+        "summary": {
+            "under_review": 0,
+            "actioned": 0,
+            "rejected": 0,
+        },
+        "total": 0,
         "page": 1,
         "pageSize": 20,
         "totalItems": 0,

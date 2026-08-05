@@ -100,7 +100,6 @@ async def _get_academics_info(query, page, page_size, db) -> dict:
                 "interests": [{"id": "1", "name": "Artificial Intelligence"}],
             },
         ],
-        "countries": {"items": [], "page": 1, "pageSize": 20, "totalItems": 0, "totalPages": 0},
         "hashtags": {"items": [], "page": 1, "pageSize": 20, "totalItems": 0, "totalPages": 0},
     }
 
@@ -115,6 +114,7 @@ def test_get_academics_info_returns_success(monkeypatch) -> None:
     assert body["status"] is True
     assert body["message"] == "Academics info fetched successfully"
     assert "interests" not in body["data"]
+    assert "countries" not in body["data"]
     assert "educationLevels" in body["data"]
     assert body["data"]["educationLevels"][0] == {
         "id": "1",
@@ -124,13 +124,38 @@ def test_get_academics_info_returns_success(monkeypatch) -> None:
     assert body["data"]["educationLevels"][1]["interests"][0]["name"] == "Artificial Intelligence"
 
 
-def test_list_majors_returns_lowercase_combined_values(monkeypatch) -> None:
+def test_list_countries_returns_success(monkeypatch) -> None:
+    async def _list_countries(query, page, page_size, db) -> dict:
+        assert query == "ind"
+        assert page == 1
+        assert page_size == 20
+        return {
+            "items": [{"id": "1", "name": "India", "iso_code": "IN"}],
+            "page": 1,
+            "pageSize": 20,
+            "totalItems": 1,
+            "totalPages": 1,
+        }
+
+    monkeypatch.setattr(search_routes.services, "list_countries", _list_countries)
+
+    response = client.get("/api/v1/countries", params={"query": "ind", "page": 1, "pageSize": 20})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is True
+    assert body["message"] == "Countries fetched successfully"
+    assert body["data"]["items"] == [{"id": "1", "name": "India", "iso_code": "IN"}]
+    assert body["data"]["totalItems"] == 1
+
+
+def test_list_majors_returns_title_cased_combined_values(monkeypatch) -> None:
     async def _list_majors(query, page, page_size, db) -> dict:
         assert query == "a"
         assert page == 1
         assert page_size == 20
         return {
-            "items": [{"name": "ai"}, {"name": "applied math"}],
+            "items": [{"name": "Ai"}, {"name": "Applied Math"}],
             "page": 1,
             "pageSize": 20,
             "totalItems": 2,
@@ -145,13 +170,13 @@ def test_list_majors_returns_lowercase_combined_values(monkeypatch) -> None:
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Majors fetched successfully"
-    assert body["data"]["items"] == [{"name": "ai"}, {"name": "applied math"}]
+    assert body["data"]["items"] == [{"name": "Ai"}, {"name": "Applied Math"}]
 
 
-def test_list_minors_returns_lowercase_combined_values(monkeypatch) -> None:
+def test_list_minors_returns_title_cased_combined_values(monkeypatch) -> None:
     async def _list_minors(query, page, page_size, db) -> dict:
         return {
-            "items": [{"name": "ai"}],
+            "items": [{"name": "Ai"}],
             "page": 1,
             "pageSize": 1,
             "totalItems": 1,
@@ -166,7 +191,7 @@ def test_list_minors_returns_lowercase_combined_values(monkeypatch) -> None:
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Minors fetched successfully"
-    assert body["data"]["items"] == [{"name": "ai"}]
+    assert body["data"]["items"] == [{"name": "Ai"}]
 
 
 def test_create_academic_interest_returns_created(monkeypatch) -> None:

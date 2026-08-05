@@ -116,7 +116,7 @@ async def test_profiles_get_and_update_me(monkeypatch) -> None:
             assert res_up["user"]["bio"] == "New Bio Info"
             assert res_up["user"]["firstName"] == "New"
             assert res_up["user"]["lastName"] == "User"
-            assert res_up["user"]["major"] == "biology"
+            assert res_up["user"]["major"] == "Biology"
 
         # 3. delete_user_me
         async with async_session_factory() as session:
@@ -182,7 +182,7 @@ async def test_profiles_complete_onboarding(monkeypatch) -> None:
                 db=session,
             )
             assert res["user"]["id"] == str(user.id)
-            assert res["user"]["major"] == "physics"
+            assert res["user"]["major"] == "Physics"
             assert res["user"]["country"] == str(country.id)
             assert res["user"]["country_details"]["country_name"] == "United States"
             assert res["user"]["educationLevel"] == EducationLevel.masters.value

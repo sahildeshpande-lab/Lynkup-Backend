@@ -119,8 +119,16 @@ class ReportedEntityItem(BaseModel):
     post_id: UUID | None = None
 
 
+class ReportStatusSummary(BaseModel):
+    under_review: int = 0
+    actioned: int = 0
+    rejected: int = 0
+
+
 class ReportedEntityListData(BaseModel):
     items: list[ReportedEntityItem]
+    summary: ReportStatusSummary
+    total: int
     page: int
     pageSize: int
     totalItems: int

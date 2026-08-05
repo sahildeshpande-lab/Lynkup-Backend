@@ -11,7 +11,10 @@ from .admin_campaign_repository import (
 from .campaign_audience_repository import (
     create_campaign_audience,
     get_active_fcm_tokens_for_users,
+    get_campaign_audience_for_user,
     list_campaign_audience_user_ids,
+    mark_all_campaign_audience_read,
+    mark_campaign_audience_read,
     resolve_announcement_recipients,
     resolve_topic_recipients,
 )
@@ -54,6 +57,7 @@ __all__ = [
     "filter_users_eligible_for_push",
     "get_active_fcm_tokens_for_users",
     "get_broadcast_notification_by_id",
+    "get_campaign_audience_for_user",
     "get_campaign_by_id",
     "get_campaigns",
     "get_default_category_preferences",
@@ -68,7 +72,9 @@ __all__ = [
     "list_campaign_audience_user_ids",
     "list_notifications_for_user",
     "list_personal_notifications_for_user",
+    "mark_all_campaign_audience_read",
     "mark_all_notifications_read",
+    "mark_campaign_audience_read",
     "mark_notification_as_read",
     "resolve_announcement_recipients",
     "resolve_topic_recipients",

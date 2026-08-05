@@ -5,6 +5,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+
 from fastapi import FastAPI
 
 from core.database.config import settings as db_settings
@@ -21,61 +22,60 @@ async def lifespan(app: FastAPI):
     logger = logging.getLogger(__name__)
     startup_started = time.perf_counter()
 
-    if db_settings.auto_init_db:
-        await init_db()
-        try:
-            logger.info("Start DB Migrations")
-            await run_db_migrations_programmatically()
-            logger.info("Migrations completed successfully")
-        except Exception as e:
-            logger.exception(f"Migration startup failed: {e}")
-            raise
-        logger.info(f"Initialized database at {db_settings.db_host}")
+    # if db_settings.auto_init_db:
+    #     await init_db()
+    #     try:
+    #         logger.info("Start DB Migrations")
+    #         await run_db_migrations_programmatically()
+    #         logger.info("Migrations completed successfully")
+    #     except Exception as e:
+    #         logger.exception(f"Migration startup failed: {e}")
+    #         raise
+    #     logger.info(f"Initialized database at {db_settings.db_host}")
 
-    # Load email settings from .env early so SendGrid config is available.
     from core.email.config import settings as email_settings
 
-    # Temporarily disabled: recommendation model startup (spaCy / KeyBERT).
-    # logger.info("[%s] Importing recommendation algorithm module...", _timestamp())
+    # logger.info("[%s] Importing recommendation model registry...", _timestamp())
     # from apps.recommendations.services import algorithm as recommendation_algorithm
-    #
-    # logger.info("[%s] Recommendation algorithm module imported successfully.", _timestamp())
-    #
-    # def _initialize_spacy_in_thread() -> None:
+    # from apps.recommendations.services.model_registry import get_registry
+
+    # logger.info("[%s] Recommendation model registry imported successfully.", _timestamp())
+
+    # def _initialize_recommendation_models_in_thread() -> None:
     #     thread_logger = logging.getLogger(__name__)
     #     thread_logger.info(
-    #         "[%s] spaCy initialization worker thread started.",
+    #         "[%s] Recommendation model initialization worker thread started.",
     #         _timestamp(),
     #     )
     #     recommendation_algorithm.initialize_models()
     #     thread_logger.info(
-    #         "[%s] spaCy initialization worker thread finished. "
-    #         "KeyBERT deferred to first keyword extraction request.",
+    #         "[%s] Recommendation model initialization worker thread finished.",
     #         _timestamp(),
     #     )
-    #
-    # spacy_init_started = time.perf_counter()
+
+    # models_init_started = time.perf_counter()
     # try:
-    #     logger.info("[%s] Submitting spaCy initialization to worker thread...", _timestamp())
-    #     await asyncio.to_thread(_initialize_spacy_in_thread)
     #     logger.info(
-    #         "[%s] spaCy initialization worker thread completed (%.2f sec).",
+    #         "[%s] Submitting spaCy and KeyBERT initialization to worker thread...",
     #         _timestamp(),
-    #         time.perf_counter() - spacy_init_started,
     #     )
+    #     await asyncio.to_thread(_initialize_recommendation_models_in_thread)
     #     logger.info(
-    #         "[%s] spaCy model loaded successfully during startup. "
-    #         "KeyBERT/SentenceTransformer will load lazily on first use.",
+    #         "[%s] Recommendation models initialized during startup (%.2f sec).",
     #         _timestamp(),
+    #         time.perf_counter() - models_init_started,
     #     )
     # except Exception:
     #     logger.exception(
-    #         "[%s] spaCy initialization failed during application startup after %.2f sec.",
+    #         "[%s] Recommendation model initialization failed during application startup "
+    #         "after %.2f sec.",
     #         _timestamp(),
-    #         time.perf_counter() - spacy_init_started,
+    #         time.perf_counter() - models_init_started,
     #     )
     #     raise
-    #
+
+    # app.state.recommendation_models = get_registry()
+
     # logger.info(
     #     "[%s] Recommendation startup phase completed (Total: %.2f sec).",
     #     _timestamp(),
@@ -89,8 +89,8 @@ async def lifespan(app: FastAPI):
             "SendGrid is not fully configured; transactional emails will be simulated."
         )
 
-    # Start the email sender background cron task
     from core.email_service import cron_send_emails
+
     email_cron_task = asyncio.create_task(cron_send_emails())
 
     logger.info(
@@ -100,7 +100,6 @@ async def lifespan(app: FastAPI):
     )
     yield
 
-    # Cancel the task on shutdown
     email_cron_task.cancel()
     try:
         await email_cron_task

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 
 def normalize_major_minor(value: str | None) -> str | None:
-    """Lowercase and collapse whitespace so AI / aI / Ai / ai all become ``ai``."""
+    """Title-case and collapse whitespace so case variants share one canonical form."""
     if value is None:
         return None
-    normalized = " ".join(str(value).strip().split()).lower()
+    normalized = " ".join(str(value).strip().split()).title()
     return normalized or None
 
 
@@ -39,7 +39,7 @@ def normalize_named_program_list(items: list | None) -> list | None:
 def collect_normalized_program_names(
     *sources: str | None | list | None,
 ) -> list[str]:
-    """Collect unique lowercase major/minor names from strings and named JSON lists."""
+    """Collect unique title-cased major/minor names from strings and named JSON lists."""
     combined: dict[str, str] = {}
     for source in sources:
         if source is None:

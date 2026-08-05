@@ -435,3 +435,50 @@ async def count_reported_entities(
     )
     stmt = select(func.count()).select_from(grouped)
     return int((await db.execute(stmt)).scalar_one())
+
+
+async def count_reported_entities_summary_by_status(
+    db: AsyncSession,
+    *,
+    entity_type: ReportEntityType,
+    moderator_id: UUID | None = None,
+) -> dict[str, int]:
+    """
+    Count reported entities grouped by the latest report status for each entity.
+
+    Used for moderation dashboard tab badges; independent of list status filter.
+    """
+    conditions = _report_filter_conditions(
+        entity_type=entity_type,
+        moderator_id=moderator_id,
+    )
+
+    ranked = (
+        select(
+            Report.status.label("status"),
+            func.row_number()
+            .over(
+                partition_by=(Report.entity_type, Report.entity_id),
+                order_by=(Report.created_at.desc(), Report.id.desc()),
+            )
+            .label("rn"),
+        )
+        .where(*conditions)
+        .subquery()
+    )
+
+    stmt = (
+        select(ranked.c.status, func.count())
+        .where(ranked.c.rn == 1)
+        .group_by(ranked.c.status)
+    )
+    rows = (await db.execute(stmt)).all()
+
+    summary = {
+        ReportStatus.under_review.value: 0,
+        ReportStatus.actioned.value: 0,
+        ReportStatus.rejected.value: 0,
+    }
+    for report_status, count in rows:
+        summary[report_status.value] = int(count)
+    return summary
