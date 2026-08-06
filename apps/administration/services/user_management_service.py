@@ -574,7 +574,10 @@ async def admin_edit_profile(
 async def admin_update_user_status(
     user_id: str,
     new_status: AdminUserStatus,
-    db: AsyncSession
+    db: AsyncSession,
+    *,
+    moderator_id: UUID | None = None,
+    comment: str | None = None,
 ) -> dict:
     from core.auth.services import (
         disable_firebase_user,
@@ -606,14 +609,44 @@ async def admin_update_user_status(
             detail=f"User is already {new_status.value}",
         )
 
+    firebase_error = None
     if not already_same_status:
         user.status = new_status
         user.updated_at = datetime.now(timezone.utc)
 
+        from apps.moderation.services import record_moderation_history
+        from common.enums import ReportEntityType
+
+        await record_moderation_history(
+            db,
+            entity_type=ReportEntityType.user,
+            entity_id=user.id,
+            action=new_status.value,
+            moderator_id=moderator_id,
+            comment=comment,
+        )
+
         await db.commit()
         await db.refresh(user)
 
-        firebase_error = None
+        # Notify before Firebase disable so the device still has a chance
+        # to receive the status reason push.
+        try:
+            from apps.notifications.services import notify_account_status
+
+            await notify_account_status(
+                db,
+                user_id=user.id,
+                status=new_status.value,
+                reason=comment,
+                sender_user_id=moderator_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send account status notification user_id=%s status=%s",
+                user.id,
+                new_status.value,
+            )
 
         if user.firebase_uid:
             try:

@@ -43,3 +43,13 @@ async def test_resolve_posts_count_owner_includes_flagged():
 
     assert count == 6
     count_fn.assert_awaited_once_with(db, profile_user_id)
+
+
+@pytest.mark.asyncio
+async def test_owner_visible_states_include_processing():
+    from common.enums import OWNER_VISIBLE_POST_STATES, PostState, FEED_VISIBLE_POST_STATES
+
+    assert PostState.processing in OWNER_VISIBLE_POST_STATES
+    assert PostState.flagged in OWNER_VISIBLE_POST_STATES
+    assert PostState.processing not in FEED_VISIBLE_POST_STATES
+    assert PostState.flagged not in FEED_VISIBLE_POST_STATES

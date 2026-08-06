@@ -511,7 +511,10 @@ async def _assign_moderator_for_review(
 async def _repair_unassigned_moderators_for_state(
     db: AsyncSession,
     *,
-    status: Literal["published", "flagged", "rejected", "reinstate", "escalate"] | None = None,
+    status: Literal[
+        "published", "flagged", "rejected", "reinstate", "escalate", "processing"
+    ]
+    | None = None,
     limit: int = 500,
 ) -> None:
     """Assign moderators to posts in a review state that are still unassigned."""
@@ -857,6 +860,13 @@ async def edit_post_service(
         elif payload.content.visibility == "public" and post.state == PostState.hidden:
             post.state = PostState.draft
 
+    # Flagged posts re-enter moderation as processing after the author edits.
+    # Keep the previously assigned moderator so the same reviewer gets the update.
+    if previous_state == PostState.flagged and post.state == PostState.flagged:
+        post.state = PostState.processing
+        post.is_moderator_reviewed = False
+        post.reviewed_at = None
+
     post.revision_number += 1
     post.is_edited = True
     post.updated_at = utc_now()
@@ -889,6 +899,11 @@ async def edit_post_service(
 
         # Create revision audit record
         await _create_revision(post, user_id, db)
+
+        # Re-enter review queue without overwriting an existing moderator assignment.
+        await _assign_moderator_for_review(
+            post, db, previous_state=previous_state
+        )
 
         await db.commit()
         await db.refresh(post)
@@ -1032,6 +1047,17 @@ async def admin_publish_post_service(
         rejected_post_id = post.id
         was_counted = previous_state in _COUNTED_POST_STATES
         try:
+            from apps.moderation.services import record_moderation_history
+            from common.enums import ReportEntityType
+
+            await record_moderation_history(
+                db,
+                entity_type=ReportEntityType.post,
+                entity_id=rejected_post_id,
+                action="rejected",
+                moderator_id=admin_user_id,
+                comment=notes.strip() if notes else None,
+            )
             deleted_id = await _hard_delete_post(db, post)
             await db.commit()
         except Exception:
@@ -1130,6 +1156,18 @@ async def admin_publish_post_service(
     try:
         # Create revision audit record with the acting admin as the editor
         await _create_revision(post, admin_user_id, db)
+
+        from apps.moderation.services import record_moderation_history
+        from common.enums import ReportEntityType
+
+        await record_moderation_history(
+            db,
+            entity_type=ReportEntityType.post,
+            entity_id=post.id,
+            action=status,
+            moderator_id=admin_user_id,
+            comment=notes.strip() if notes else None,
+        )
 
         await db.commit()
         await db.refresh(post)
@@ -1403,8 +1441,8 @@ def _query_states_for_list(
     """
     Profile/list ``published`` expands to the viewer-appropriate visible set.
 
-    - Owner: published + flagged + reinstate (matches owner posts_count).
-    - Visitor: published + reinstate only.
+    - Owner: published + flagged + processing + reinstate (matches owner posts_count).
+    - Visitor: published + reinstate only (never processing).
     Each post keeps its real ``state`` (not remapped).
     """
     if requested_state == PostState.published:
@@ -1858,7 +1896,10 @@ async def list_processing_posts_service(
 async def list_reviewed_posts_by_state_service(
     db: AsyncSession,
     moderator_id: UUID | None,
-    status: Literal["published", "flagged", "rejected", "reinstate", "escalate"] | None = None,
+    status: Literal[
+        "published", "flagged", "rejected", "reinstate", "escalate", "processing"
+    ]
+    | None = None,
     page: int | None = None,
     page_size: int | None = None,
     viewer_user_id: UUID | None = None,
@@ -1867,8 +1908,8 @@ async def list_reviewed_posts_by_state_service(
 
     ``Post.state`` is the single source of truth for the moderator dashboard
     tabs. ``status`` maps 1:1 to a post state (published / flagged / rejected /
-    reinstate / escalate); when omitted it defaults to ``published``. An optional
-    ``moderator_id`` additionally scopes results to a single moderator.
+    reinstate / escalate / processing); when omitted it defaults to ``published``.
+    An optional ``moderator_id`` additionally scopes results to a single moderator.
     """
     from common.pagination import build_paginated_response
     from apps.feed.repositories.post_repository import (

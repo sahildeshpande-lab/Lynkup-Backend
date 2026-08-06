@@ -21,6 +21,7 @@ class NotificationPayloadBuilder:
         "POST_FLAGGED": {"screen": "post"},
         "POST_REINSTATED": {"screen": "post"},
         "POST_REJECTED": {"screen": "post"},
+        "ACCOUNT_STATUS_CHANGED": {"screen": "account"},
         # Future examples (uncomment / fill when wiring those types):
         # "DIRECT_MESSAGE": {"screen": "chat"},
         # "TOPIC": {"screen": "notifications"},

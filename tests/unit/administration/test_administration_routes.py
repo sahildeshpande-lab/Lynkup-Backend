@@ -101,7 +101,7 @@ async def _delete_users(_user_ids: list, _role: str, _db) -> dict:
     }
 
 
-async def _update_status(_user_id: str, status, _db) -> dict:
+async def _update_status(_user_id: str, status, _db, **_kwargs) -> dict:
     return {"userId": str(_user_id), "status": status.value}
 
 
@@ -169,13 +169,31 @@ def test_admin_update_user_status(monkeypatch) -> None:
     monkeypatch.setattr(admin_routes.services, "admin_update_user_status", _update_status)
 
     user_id = "11111111-1111-1111-1111-111111111111"
-    suspend_response = client.patch(f"/api/v1/users/{user_id}/status", json={"status": "suspended"})
-    ban_response = client.patch(f"/api/v1/users/{user_id}/status", json={"status": "banned"})
+    suspend_response = client.patch(
+        f"/api/v1/users/{user_id}/status",
+        json={"status": "suspended", "note": "Repeated policy violations"},
+    )
+    ban_response = client.patch(
+        f"/api/v1/users/{user_id}/status",
+        json={"status": "banned", "note": "Severe abuse"},
+    )
 
     assert suspend_response.status_code == 200
     assert suspend_response.json()["data"]["status"] == "suspended"
     assert ban_response.status_code == 200
     assert ban_response.json()["data"]["status"] == "banned"
+
+
+def test_admin_update_user_status_requires_note_for_suspend() -> None:
+    user_id = "11111111-1111-1111-1111-111111111111"
+    response = client.patch(
+        f"/api/v1/users/{user_id}/status",
+        json={"status": "suspended"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is False
+    assert "note" in body["message"].lower()
 
 
 def test_admin_export_users(monkeypatch) -> None:

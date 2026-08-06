@@ -25,7 +25,9 @@ def _post_state_filter(state: PostState | Collection[PostState]):
 # Public-facing status values accepted by the reviewed-posts endpoint.
 # Each status maps 1:1 to a Post.state value — Post.state is the single source
 # of truth for reviewed-post filtering (dashboard tabs are driven from it).
-ReviewedPostStatus = Literal["published", "flagged", "rejected", "reinstate", "escalate"]
+ReviewedPostStatus = Literal[
+    "published", "flagged", "rejected", "reinstate", "escalate", "processing"
+]
 
 _REVIEWED_STATUS_TO_STATE: dict[str, PostState] = {
     "published": PostState.published,
@@ -33,6 +35,7 @@ _REVIEWED_STATUS_TO_STATE: dict[str, PostState] = {
     "rejected": PostState.rejected,
     "reinstate": PostState.reinstate,
     "escalate": PostState.escalate,
+    "processing": PostState.processing,
 }
 
 # Default state when no status filter is supplied.
@@ -83,6 +86,7 @@ async def count_reviewed_posts_summary_by_state(
         PostState.rejected: "rejected",
         PostState.reinstate: "reinstate",
         PostState.escalate: "escalate",
+        PostState.processing: "processing",
     }
     stmt = (
         select(Post.state, func.count(Post.id))

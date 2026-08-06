@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Optional, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
+from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator, model_validator
 
 from common.enums import Role,AdminUserStatus
 
@@ -34,6 +34,25 @@ class AdminDeleteUsersRequest(BaseModel):
 
 class AdminUserStatusRequest(BaseModel):
     status: AdminUserStatus
+    note: str | None = Field(
+        default=None,
+        max_length=5000,
+        description="Reason for the status change (required when suspending or banning).",
+    )
+
+    @field_validator("note")
+    @classmethod
+    def normalize_note(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @model_validator(mode="after")
+    def require_note_for_restrictive_status(self) -> "AdminUserStatusRequest":
+        if self.status in (AdminUserStatus.suspended, AdminUserStatus.banned) and not self.note:
+            raise ValueError("note is required when suspending or banning a user")
+        return self
 
 class TokenResponse(BaseModel):
     access_token: str

@@ -161,8 +161,9 @@ async def create_user_by_admin(
 async def get_user_by_admin(
     userId: UUID,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
+    _ = current_user
     return ApiResponse(message="user fetched", data=await services.admin_get_user(userId, db))
 
 
@@ -185,13 +186,14 @@ async def update_user_status_by_admin(
     db: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_moderator),
 ) -> ApiResponse:
-    _ = current_user
     return ApiResponse(
         message=f"user {payload.status.value} by admin",
         data=await services.admin_update_user_status(
             str(userId),
             payload.status,
-            db
+            db,
+            moderator_id=current_user.id,
+            comment=payload.note,
         )
     )
 
@@ -290,9 +292,15 @@ async def list_processing_posts(
 
 @router.get("/admin/posts/reviewed", response_model=ApiResponse)
 async def list_reviewed_posts(
-    status: Literal["published", "flagged", "rejected", "reinstate", "escalate"] | None = Query(
+    status: Literal[
+        "published", "flagged", "rejected", "reinstate", "escalate", "processing"
+    ]
+    | None = Query(
         default=None,
-        description="Filter reviewed posts by status: published, flagged, rejected, reinstate, escalate",
+        description=(
+            "Filter reviewed posts by status: published, flagged, rejected, "
+            "reinstate, escalate, processing"
+        ),
     ),
     moderator_id: str | None = Query(
         default=None,

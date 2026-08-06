@@ -53,6 +53,7 @@ _FIREBASE_TOPICS_KEY = "firebase_topics"
 POST_FLAGGED = "POST_FLAGGED"
 POST_REINSTATED = "POST_REINSTATED"
 POST_REJECTED = "POST_REJECTED"
+ACCOUNT_STATUS_CHANGED = "ACCOUNT_STATUS_CHANGED"
 
 _POST_AUTHOR_NOTIFICATION_COPY: dict[str, tuple[str, str]] = {
     POST_FLAGGED: (
@@ -695,5 +696,58 @@ async def notify_post_author(
             type_name,
             post_id,
             author_user_id,
+        )
+        return None
+
+
+async def notify_account_status(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    status: str,
+    reason: str | None = None,
+    sender_user_id: UUID | None = None,
+) -> Notification | None:
+    """
+    Notify a user that their account status changed.
+
+    Title: ``Your account is {status}``
+    Body: the moderator reason (falls back to a short default).
+
+    Never raises — status updates must succeed even when notification fails.
+    """
+    status_value = (status or "").strip().lower()
+    if not status_value:
+        return None
+
+    title = f"Your account is {status_value}"
+    body = (reason or "").strip() or f"Your account status was updated to {status_value}."
+
+    try:
+        ensured = await _ensure_notification_type(
+            db,
+            ACCOUNT_STATUS_CHANGED,
+            description="Account status changed by moderation",
+        )
+        if ensured is None:
+            return None
+
+        return await create_notification(
+            db,
+            recipient_user_id=user_id,
+            notification_type=ACCOUNT_STATUS_CHANGED,
+            title=title,
+            body=body,
+            sender_user_id=sender_user_id,
+            extra={
+                "status": status_value,
+                "reason": body,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Failed to notify account status user_id=%s status=%s",
+            user_id,
+            status_value,
         )
         return None

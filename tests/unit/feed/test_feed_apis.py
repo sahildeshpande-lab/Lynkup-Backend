@@ -1043,16 +1043,15 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
         p2 = Post(author_user_id=user.id, content={"caption": "Published Post"}, state=PostState.published)
         p3 = Post(author_user_id=user.id, content={"caption": "Flagged Post"}, state=PostState.flagged)
         p4 = Post(author_user_id=user.id, content={"caption": "Deleted Post"}, state=PostState.deleted)
-        session.add(p1)
-        session.add(p2)
-        session.add(p3)
-        session.add(p4)
+        p5 = Post(author_user_id=user.id, content={"caption": "Processing Post"}, state=PostState.processing)
+        session.add_all([p1, p2, p3, p4, p5])
         await session.commit()
     
     async with async_session_factory() as session:
+        # Owner "published" expands to published + flagged + processing + reinstate.
         published_posts, total = await list_user_posts_service(user, session, include_total=True)
-        assert len(published_posts) == 1
-        assert published_posts[0].caption == "Published Post"
+        captions = {post.caption for post in published_posts}
+        assert captions == {"Published Post", "Flagged Post", "Processing Post"}
 
         draft_posts, total = await list_user_posts_service(user, session, state="draft", include_total=True)
         assert len(draft_posts) == 1
@@ -1061,6 +1060,24 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
         flagged_posts, total = await list_user_posts_service(user, session, state="flagged", include_total=True)
         assert len(flagged_posts) == 1
         assert flagged_posts[0].caption == "Flagged Post"
+
+        processing_posts, total = await list_user_posts_service(
+            user, session, state="processing", include_total=True
+        )
+        assert len(processing_posts) == 1
+        assert processing_posts[0].caption == "Processing Post"
+
+        # Visitor listing another user is forced to public feed states only.
+        visitor_posts, total = await list_user_posts_service(
+            other,
+            session,
+            target_user_id=user.id,
+            state="processing",
+            include_total=True,
+        )
+        visitor_captions = {post.caption for post in visitor_posts}
+        assert "Processing Post" not in visitor_captions
+        assert visitor_captions == {"Published Post"}
         
         superadmin = SimpleNamespace(id=other.id, role="superadmin")
         posts_superadmin, total = await list_user_posts_service(
@@ -1072,6 +1089,48 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
         )
         assert len(posts_superadmin) == 1
         assert posts_superadmin[0].caption == "Published Post"
+
+
+@pytest.mark.asyncio
+async def test_edit_flagged_post_moves_to_processing_keeps_moderator(test_users) -> None:
+    author, moderator = test_users
+    moderator_id = moderator.id
+
+    async with async_session_factory() as session:
+        await _ensure_moderator_role(session, moderator)
+        post = Post(
+            author_user_id=author.id,
+            content={"caption": "Needs edit", "visibility": "public"},
+            state=PostState.flagged,
+            is_moderator_reviewed=True,
+            moderator_id=moderator_id,
+            reviewed_at=datetime.now(timezone.utc),
+        )
+        session.add(post)
+        await session.commit()
+        post_id = post.id
+
+    edit_payload = EditPostRequest(
+        id=post_id,
+        content=EditPostContentPayload(caption="Edited after flag"),
+    )
+    async with async_session_factory() as session:
+        updated = await edit_post_service(author.id, edit_payload, session)
+        assert updated.state == PostState.processing
+        assert updated.moderator_id == moderator_id
+        assert updated.is_moderator_reviewed is False
+        assert updated.reviewed_at is None
+        assert updated.is_edited is True
+        assert updated.caption == "Edited after flag"
+
+    async with async_session_factory() as session:
+        processing = await list_reviewed_posts_by_state_service(
+            session, moderator_id, status="processing"
+        )
+        assert len(processing["items"]) == 1
+        assert processing["items"][0]["caption"] == "Edited after flag"
+        assert processing["items"][0]["status"] == "processing"
+        assert processing["summary"]["processing"] >= 1
 
 
 @pytest.mark.asyncio

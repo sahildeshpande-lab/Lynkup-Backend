@@ -33,7 +33,7 @@ async def _resolve_posts_count(
     viewer_user_id: UUID | None,
 ) -> int:
     """
-    Owner sees published + flagged + reinstate.
+    Owner sees published + flagged + processing + reinstate.
     Visitors see the cached public count (published + reinstate only).
     """
     if viewer_user_id is None or viewer_user_id != profile_user_id:

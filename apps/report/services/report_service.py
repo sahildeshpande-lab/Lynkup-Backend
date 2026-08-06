@@ -684,6 +684,7 @@ async def _apply_actioned_report_to_entity(
     report: Report,
     *,
     moderator_id: UUID,
+    comment: str | None = None,
 ) -> str | None:
     """
     Apply side effects when a report is actioned.
@@ -722,17 +723,28 @@ async def _apply_actioned_report_to_entity(
             )
 
             await decrement_posts_count_for_user(db, post.author_user_id)
+
+        from apps.moderation.services import record_moderation_history
+
+        await record_moderation_history(
+            db,
+            entity_type=ReportEntityType.post,
+            entity_id=post.id,
+            action="flagged",
+            moderator_id=moderator_id,
+            comment=comment,
+        )
         return None
 
     if report.entity_type == ReportEntityType.comment:
-        comment = await get_comment_by_id(db, report.entity_id)
-        if comment is None:
+        comment_row = await get_comment_by_id(db, report.entity_id)
+        if comment_row is None:
             return "Reported comment not found"
-        if comment.is_deleted:
+        if comment_row.is_deleted:
             return None
-        if comment.parent_comment_id is None:
-            await update_post_comment_count(db, comment.post_id, -1)
-        await mark_comment_deleted(db, comment)
+        if comment_row.parent_comment_id is None:
+            await update_post_comment_count(db, comment_row.post_id, -1)
+        await mark_comment_deleted(db, comment_row)
         return None
 
     if report.entity_type == ReportEntityType.user:
@@ -747,6 +759,17 @@ async def _apply_actioned_report_to_entity(
         user.status = UserStatus.suspended
         user.updated_at = datetime.now(timezone.utc)
         db.add(user)
+
+        from apps.moderation.services import record_moderation_history
+
+        await record_moderation_history(
+            db,
+            entity_type=ReportEntityType.user,
+            entity_id=user.id,
+            action="suspended",
+            moderator_id=moderator_id,
+            comment=comment,
+        )
 
         if user.firebase_uid:
             try:
@@ -781,6 +804,7 @@ async def review_report_admin_service(
                 db,
                 report,
                 moderator_id=current_admin_id,
+                comment=payload.admin_comment,
             )
             if action_error:
                 await db.rollback()

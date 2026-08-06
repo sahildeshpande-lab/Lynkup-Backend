@@ -19,7 +19,7 @@ def utc_now() -> datetime:
 
 
 class ModerationHistory(SQLModel, table=True):
-    """Immutable audit log of moderation actions across users, posts, and comments."""
+    """Immutable audit log of moderation actions for posts and users."""
 
     __tablename__ = "moderation_history"
 

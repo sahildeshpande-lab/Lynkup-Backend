@@ -94,10 +94,13 @@ FEED_VISIBLE_POST_STATES: tuple[PostState, ...] = (
     PostState.reinstate,
 )
 
-# Owner profile count / own post list: include flagged so authors still see moderated posts.
+# Owner profile count / own post list: include flagged + processing so authors
+# still see moderated / re-submitted posts. Visitors use the cached public count
+# (published + reinstate only) and never see processing.
 OWNER_VISIBLE_POST_STATES: tuple[PostState, ...] = (
     PostState.published,
     PostState.flagged,
+    PostState.processing,
     PostState.reinstate,
 )
 

@@ -40,6 +40,10 @@ async def test_admin_flag_decrements_posts_count(mock_db):
     with (
         patch.object(svc, "_create_revision", AsyncMock()),
         patch(
+            "apps.moderation.services.record_moderation_history",
+            AsyncMock(),
+        ),
+        patch(
             "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
             AsyncMock(),
         ) as dec,
@@ -69,6 +73,7 @@ async def test_admin_publish_from_flagged_increments_posts_count(mock_db):
 
     with (
         patch.object(svc, "_create_revision", AsyncMock()),
+        patch("apps.moderation.services.record_moderation_history", AsyncMock()),
         patch(
             "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
             AsyncMock(),
@@ -157,6 +162,7 @@ async def test_admin_reject_hard_deletes_post(mock_db):
 
     with (
         patch.object(svc, "_hard_delete_post", AsyncMock(return_value=post.id)),
+        patch("apps.moderation.services.record_moderation_history", AsyncMock()),
         patch(
             "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
             AsyncMock(),
@@ -184,6 +190,7 @@ async def test_admin_escalate_assigns_superadmin_and_stores_notes(mock_db):
 
     with (
         patch.object(svc, "_create_revision", AsyncMock()),
+        patch("apps.moderation.services.record_moderation_history", AsyncMock()),
         patch.object(
             svc,
             "_fetch_superadmin_user_ids",
@@ -215,9 +222,10 @@ async def test_admin_escalate_assigns_superadmin_and_stores_notes(mock_db):
 
 
 @pytest.mark.asyncio
-async def test_admin_escalate_requires_notes(mock_db):
+async def test_admin_escalate_allows_blank_notes(mock_db):
     post = _post(state=PostState.published)
     admin_id = uuid.uuid4()
+    superadmin_id = uuid.uuid4()
     db = mock_db()
 
     post_result = MagicMock()
@@ -226,8 +234,24 @@ async def test_admin_escalate_requires_notes(mock_db):
     author_result.first.return_value = None
     db.execute = AsyncMock(side_effect=[post_result, author_result])
 
-    with pytest.raises(Exception) as exc_info:
-        await svc.admin_publish_post_service(
+    with (
+        patch.object(svc, "_create_revision", AsyncMock()),
+        patch("apps.moderation.services.record_moderation_history", AsyncMock()),
+        patch.object(
+            svc,
+            "_fetch_superadmin_user_ids",
+            AsyncMock(return_value=[superadmin_id]),
+        ),
+        patch(
+            "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
+            AsyncMock(),
+        ),
+        patch(
+            "apps.profiles.services.profile_stats_service.increment_posts_count_for_user",
+            AsyncMock(),
+        ),
+    ):
+        result = await svc.admin_publish_post_service(
             post.id,
             "escalate",
             admin_id,
@@ -235,4 +259,69 @@ async def test_admin_escalate_requires_notes(mock_db):
             notes="   ",
         )
 
-    assert "notes" in str(exc_info.value).lower()
+    assert result.state == PostState.escalate
+    assert result.moderation_notes is None
+
+
+@pytest.mark.asyncio
+async def test_edit_flagged_post_moves_to_processing_keeps_moderator(mock_db):
+    from apps.feed.schemas import EditPostContentPayload, EditPostRequest
+
+    moderator_id = uuid.uuid4()
+    author_id = uuid.uuid4()
+    post = SimpleNamespace(
+        id=uuid.uuid4(),
+        author_user_id=author_id,
+        state=PostState.flagged,
+        content={"caption": "Needs edit", "visibility": "public"},
+        moderator_id=moderator_id,
+        is_moderator_reviewed=True,
+        reviewed_at=object(),
+        revision_number=2,
+        updated_at=None,
+        is_edited=False,
+        attachments=[],
+    )
+    db = mock_db()
+    post_result = MagicMock()
+    post_result.scalar_one_or_none.return_value = post
+    db.execute = AsyncMock(return_value=post_result)
+
+    payload = EditPostRequest(
+        id=post.id,
+        content=EditPostContentPayload(caption="Edited after flag"),
+    )
+
+    with (
+        patch.object(svc, "_sync_hashtags", AsyncMock()),
+        patch.object(svc, "_create_revision", AsyncMock()),
+        patch.object(svc, "_assign_moderator_for_review", AsyncMock()) as assign_mod,
+        patch.object(svc, "log_post_keywords_best_effort", AsyncMock()),
+        patch.object(svc, "_should_sync_topics_for_post", return_value=False),
+    ):
+        result = await svc.edit_post_service(author_id, payload, db)
+
+    assert result.state == PostState.processing
+    assert result.moderator_id == moderator_id
+    assert result.is_moderator_reviewed is False
+    assert result.reviewed_at is None
+    assert result.is_edited is True
+    assert result.content["caption"] == "Edited after flag"
+    assign_mod.assert_awaited_once()
+    assert assign_mod.await_args.args[0] is post
+    assert assign_mod.await_args.kwargs["previous_state"] == PostState.flagged
+
+
+@pytest.mark.asyncio
+async def test_query_states_owner_published_includes_processing():
+    from common.enums import FEED_VISIBLE_POST_STATES, OWNER_VISIBLE_POST_STATES
+
+    owner_states = svc._query_states_for_list(PostState.published, is_owner=True)
+    visitor_states = svc._query_states_for_list(PostState.published, is_owner=False)
+
+    assert owner_states == OWNER_VISIBLE_POST_STATES
+    assert PostState.processing in owner_states
+    assert visitor_states == FEED_VISIBLE_POST_STATES
+    assert PostState.processing not in visitor_states
+
+    assert svc._query_states_for_list(PostState.processing, is_owner=True) == PostState.processing

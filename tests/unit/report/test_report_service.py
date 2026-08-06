@@ -396,10 +396,13 @@ async def test_apply_actioned_report_flags_post(mock_db, scalar_result):
     db = mock_db(scalar_result(post))
     moderator_id = uuid.uuid4()
 
-    with patch(
-        "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
-        AsyncMock(),
-    ) as dec:
+    with (
+        patch(
+            "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
+            AsyncMock(),
+        ) as dec,
+        patch("apps.moderation.services.record_moderation_history", AsyncMock()) as hist,
+    ):
         error = await svc._apply_actioned_report_to_entity(db, report, moderator_id=moderator_id)
 
     assert error is None
@@ -407,6 +410,7 @@ async def test_apply_actioned_report_flags_post(mock_db, scalar_result):
     assert post.moderator_id == moderator_id
     assert post.is_moderator_reviewed is True
     dec.assert_awaited_once_with(db, post.author_user_id)
+    hist.assert_awaited_once()
     db.add.assert_called()
 
 
@@ -424,7 +428,10 @@ async def test_apply_actioned_report_flags_post_skips_decrement_when_already_fla
     with patch(
         "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
         AsyncMock(),
-    ) as dec:
+    ) as dec, patch(
+        "apps.moderation.services.record_moderation_history",
+        AsyncMock(),
+    ):
         error = await svc._apply_actioned_report_to_entity(db, report, moderator_id=moderator_id)
 
     assert error is None
@@ -444,7 +451,10 @@ async def test_apply_actioned_report_flags_post_skips_decrement_for_draft(mock_d
     with patch(
         "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
         AsyncMock(),
-    ) as dec:
+    ) as dec, patch(
+        "apps.moderation.services.record_moderation_history",
+        AsyncMock(),
+    ):
         error = await svc._apply_actioned_report_to_entity(db, report, moderator_id=moderator_id)
 
     assert error is None
