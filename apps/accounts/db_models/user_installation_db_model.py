@@ -23,6 +23,14 @@ class UserInstallation(SQLModel, table=True):
     installed_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
     last_active_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     is_active: bool = Field(default=True, sa_column=Column(Boolean, nullable=False, server_default=text("true")))
+    is_device_verified: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default=text("false")),
+    )
+    verified_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
     __table_args__ = (
         Index("ix_user_installations_user_id_device_id", "user_id", "device_id", unique=True),

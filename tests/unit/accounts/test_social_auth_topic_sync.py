@@ -74,7 +74,7 @@ async def test_build_device_auth_session_syncs_topics_after_otp_challenge(mock_d
             "evaluate_device_otp_requirement",
             AsyncMock(return_value=(None, True, True)),
         ),
-        patch.object(reg_svc, "send_otp_challenge", AsyncMock(return_value="123456")),
+        patch.object(reg_svc, "begin_otp_challenge", AsyncMock(return_value=True)),
         patch.object(reg_svc, "_fetch_user_profile", AsyncMock(return_value=profile)),
         patch.object(reg_svc, "_issue_auth_session", AsyncMock(return_value={"token": "abc"})),
         patch(

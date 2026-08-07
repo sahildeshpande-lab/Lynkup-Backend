@@ -20,8 +20,10 @@ PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 from .common_service import _fetch_user_profile, _generate_otp, _now
 from .device_otp_service import (
     attach_otp_flags,
+    begin_otp_challenge,
+    ensure_unverified_installation,
     evaluate_device_otp_requirement,
-    send_otp_challenge,
+    mark_device_verified,
     upsert_user_installation,
 )
 
@@ -105,7 +107,7 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     )
 
     if needs_otp:
-        await send_otp_challenge(
+        email_sent = await begin_otp_challenge(
             db,
             user,
             device_id,
@@ -133,12 +135,17 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
 
         data = attach_otp_flags(
             await _issue_auth_session(user, db),
-            email_sent=True,
+            email_sent=email_sent,
             needs_otp=True,
+        )
+        message = (
+            "Verification email sent. Please verify your OTP."
+            if email_sent
+            else "Please verify your OTP."
         )
         return ApiResponse(
             status=True,
-            message="Verification email sent. Please verify your OTP.",
+            message=message,
             data=data,
         )
 
@@ -210,12 +217,22 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
         return ApiResponse(status=False, message="OTP has expired. Please request a new OTP", data=None)
 
     if user.email_otp == payload.otp:
+        now = _now()
         onboarding_completed = user.onboarding_status == OnboardingStatus.completed
-        user.email_verified_at = _now()
+        user.email_verified_at = now
         user.status = UserStatus.active
         user.email_otp = None
         user.email_otp_created_at = None
+        user.updated_at = now
         db.add(user)
+
+        # Only mark the device trusted after OTP validation succeeds.
+        await mark_device_verified(
+            db,
+            user.id,
+            payload.device_id,
+            now=now,
+        )
         await db.commit()
 
         if not onboarding_completed:
@@ -293,14 +310,24 @@ async def resend_otp(payload: ResendOtpRequest, firebase_user: dict, db: AsyncSe
     if user.firebase_uid != firebase_user["uid"]:
         return ApiResponse(status=False, message="Unauthorized action for this user account", data=None)
 
-    # Enforce cooldown based on configuration (default 2 minutes)
-    # cooldown = timedelta(minutes=auth_settings.resend_otp_cooldown_minutes)
-    # if user.email_otp_created_at and (_now() - user.email_otp_created_at) < cooldown:
-    #       return ApiResponse(status=False, message="Please wait for 10 mins before resending OTP. A verification code has already been sent to your email.", data=None)
+    device_id = payload.device_id.strip()
+    if not device_id:
+        return ApiResponse(status=False, message="device_id is required", data=None)
+
+    now = _now()
+    # Keep the installation unverified; only /verify-otp may trust a device.
+    await ensure_unverified_installation(
+        db,
+        user.id,
+        device_id,
+        platform=payload.platform,
+        now=now,
+    )
+
     otp = _generate_otp()
     user.email_otp = otp
-    user.email_otp_created_at = _now()
-    user.updated_at = _now()
+    user.email_otp_created_at = now
+    user.updated_at = now
     db.add(user)
     await db.commit()
     await send_otp_email(user.email, otp, "email_verification")

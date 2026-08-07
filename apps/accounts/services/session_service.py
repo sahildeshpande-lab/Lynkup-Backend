@@ -76,8 +76,8 @@ async def logout(
     for token_row in token_rows:
         await _revoke_refresh_token_row(db, token_row)
 
-    # Clear any pending OTP codes, but keep email_verified_at so returning to
-    # this known device does not require OTP again.
+    # Clear any pending OTP codes. Keep is_device_verified so returning to this
+    # verified device after logout does not require OTP again.
     user.email_otp = None
     user.email_otp_created_at = None
     user.updated_at = _now()

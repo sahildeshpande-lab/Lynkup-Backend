@@ -173,11 +173,55 @@ class OtpVerifyRequest(BaseModel):
     email: EmailStr
     otp: str
     firebaseId: str
+    device_id: str = Field(min_length=1)
+    platform: str | None = Field(
+        default=None,
+        max_length=20,
+        description="Optional client platform (e.g. android, ios).",
+    )
+
+    @field_validator("device_id")
+    @classmethod
+    def normalize_device_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("device_id cannot be blank")
+        return normalized
+
+    @field_validator("platform")
+    @classmethod
+    def normalize_optional_strings(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 class ResendOtpRequest(BaseModel):
     email: EmailStr
     firebaseId: str
+    device_id: str = Field(min_length=1)
+    platform: str | None = Field(
+        default=None,
+        max_length=20,
+        description="Optional client platform (e.g. android, ios).",
+    )
+
+    @field_validator("device_id")
+    @classmethod
+    def normalize_device_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("device_id cannot be blank")
+        return normalized
+
+    @field_validator("platform")
+    @classmethod
+    def normalize_optional_strings(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 class ForgotPasswordRequest(BaseModel):

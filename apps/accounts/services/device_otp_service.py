@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +10,7 @@ from sqlmodel import select
 from apps.accounts.db_models import User, UserInstallation
 from apps.accounts.services.common_service import _generate_otp, _now
 from common.enums import UserStatus
+from core.auth.config import settings as auth_settings
 from core.email_service import send_otp_email
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,14 @@ def clear_session_email_verification(user: User) -> None:
     user.email_verified_at = None
     user.email_otp = None
     user.email_otp_created_at = None
+
+
+def has_unexpired_otp(user: User) -> bool:
+    """Return True when the user already has a non-expired email OTP."""
+    if not user.email_otp or not user.email_otp_created_at:
+        return False
+    age = _now() - user.email_otp_created_at
+    return age <= timedelta(minutes=auth_settings.otp_expire_minutes)
 
 
 async def release_fcm_token_from_other_installations(
@@ -189,6 +198,8 @@ async def upsert_user_installation(
             installed_at=timestamp,
             last_active_at=timestamp,
             is_active=True,
+            is_device_verified=False,
+            verified_at=None,
         )
         db.add(installation)
         return installation
@@ -203,6 +214,97 @@ async def upsert_user_installation(
     return installation
 
 
+async def ensure_unverified_installation(
+    db: AsyncSession,
+    user_id,
+    device_id: str,
+    *,
+    platform: str | None = None,
+    fcm_token: str | None = None,
+    now: datetime | None = None,
+) -> UserInstallation:
+    """Ensure an installation row exists for OTP challenge without trusting it.
+
+    Creates a row when missing. Never creates duplicates for ``(user_id, device_id)``.
+    Never sets ``is_device_verified=True`` (only ``mark_device_verified`` / verify-otp may).
+    Does not demote an already-verified device if called defensively.
+    """
+    timestamp = now or _now()
+    normalized_platform = (platform or "").strip() or None
+    normalized_fcm_token = (fcm_token or "").strip() or None
+
+    if normalized_fcm_token is not None:
+        await release_fcm_token_from_other_installations(
+            db,
+            normalized_fcm_token,
+            keep_user_id=user_id,
+        )
+
+    installation = await get_user_installation(db, user_id, device_id)
+    if installation is None:
+        installation = UserInstallation(
+            user_id=user_id,
+            device_id=device_id,
+            platform=normalized_platform,
+            fcm_token=normalized_fcm_token,
+            app_version=None,
+            installed_at=timestamp,
+            last_active_at=timestamp,
+            is_active=True,
+            is_device_verified=False,
+            verified_at=None,
+        )
+        db.add(installation)
+        return installation
+
+    installation.is_active = True
+    installation.last_active_at = timestamp
+    if not installation.is_device_verified:
+        installation.is_device_verified = False
+        installation.verified_at = None
+    if normalized_platform is not None:
+        installation.platform = normalized_platform
+    if normalized_fcm_token is not None:
+        installation.fcm_token = normalized_fcm_token
+    db.add(installation)
+    return installation
+
+
+async def mark_device_verified(
+    db: AsyncSession,
+    user_id,
+    device_id: str,
+    *,
+    now: datetime | None = None,
+) -> UserInstallation:
+    """Mark the matching installation as a trusted/verified device.
+
+    This is the only path that may set ``is_device_verified=True``.
+    """
+    timestamp = now or _now()
+    installation = await get_user_installation(db, user_id, device_id)
+    if installation is None:
+        installation = UserInstallation(
+            user_id=user_id,
+            device_id=device_id,
+            platform=None,
+            fcm_token=None,
+            app_version=None,
+            installed_at=timestamp,
+            last_active_at=timestamp,
+            is_active=True,
+            is_device_verified=True,
+            verified_at=timestamp,
+        )
+    else:
+        installation.is_device_verified = True
+        installation.verified_at = timestamp
+        installation.last_active_at = timestamp
+        installation.is_active = True
+    db.add(installation)
+    return installation
+
+
 async def evaluate_device_otp_requirement(
     db: AsyncSession,
     user: User,
@@ -210,17 +312,70 @@ async def evaluate_device_otp_requirement(
 ) -> tuple[UserInstallation | None, bool, bool]:
     """Decide whether this sign-in needs an OTP challenge.
 
-    OTP is required when:
-    - the device has never been seen (no ``UserInstallation`` row), or
-    - the account email has never been verified (``email_verified_at`` is null).
-
-    A known device that was only deactivated by logout still counts as trusted,
-    so returning to it after manual logout does **not** require OTP again.
+    Once ``is_device_verified=True`` for ``(user_id, device_id)``, OTP is never
+    required again for that device — including after logout (``is_active`` may
+    be false; successful login reactivates it). Merely having an installation
+    row is not enough to bypass OTP.
     """
     installation = await get_user_installation(db, user.id, device_id)
     is_new_device = installation is None
-    needs_otp = user.email_verified_at is None or is_new_device
+    is_trusted = installation is not None and bool(installation.is_device_verified)
+    needs_otp = not is_trusted
     return installation, is_new_device, needs_otp
+
+
+async def begin_otp_challenge(
+    db: AsyncSession,
+    user: User,
+    device_id: str,
+    *,
+    installation: UserInstallation | None = None,
+    is_new_device: bool = False,
+    platform: str | None = None,
+    fcm_token: str | None = None,
+) -> bool:
+    """Prepare an OTP challenge for an unverified device.
+
+    Ensures an unverified installation row exists. Reuses an unexpired OTP
+    without sending another email. Generates and emails a new OTP only when
+    none is valid.
+
+    Returns ``True`` when a new OTP email was sent, otherwise ``False``.
+    """
+    del installation, is_new_device  # retained for call-site compatibility
+    now = _now()
+    await db.refresh(user)
+
+    already_active = user.status == UserStatus.active
+    # Never downgrade an active account back to pending.
+    if not already_active:
+        user.email_verified_at = None
+        user.status = UserStatus.pending
+    user.updated_at = now
+    db.add(user)
+
+    await ensure_unverified_installation(
+        db,
+        user.id,
+        device_id,
+        platform=platform,
+        fcm_token=fcm_token,
+        now=now,
+    )
+
+    if has_unexpired_otp(user):
+        await db.commit()
+        return False
+
+    otp = _generate_otp()
+    user.email_otp = otp
+    user.email_otp_created_at = now
+    user.updated_at = now
+    db.add(user)
+
+    await db.commit()
+    await send_otp_email(user.email, otp, "email_verification")
+    return True
 
 
 async def send_otp_challenge(
@@ -233,28 +388,25 @@ async def send_otp_challenge(
     platform: str | None = None,
     fcm_token: str | None = None,
 ) -> str:
-    """Issue an OTP challenge for email or new-device verification.
+    """Force-issue a new OTP challenge (always generates and sends).
 
-    Account status becomes ``pending`` only when the user is not already
-    ``active``. Once active, status is never downgraded by OTP challenges
-    (e.g. signing in on a new device).
+    Prefer ``begin_otp_challenge`` for login/signup so unexpired OTPs are reused.
     """
     now = _now()
-    otp = _generate_otp()
     await db.refresh(user)
 
     already_active = user.status == UserStatus.active
 
+    otp = _generate_otp()
     user.email_otp = otp
     user.email_otp_created_at = now
-    # Never downgrade an active account back to pending.
     if not already_active:
         user.email_verified_at = None
         user.status = UserStatus.pending
     user.updated_at = now
     db.add(user)
 
-    await upsert_user_installation(
+    await ensure_unverified_installation(
         db,
         user.id,
         device_id,

@@ -56,7 +56,10 @@ async def social_auth(
 
         if created:
             msg = "Signup successful"
-        elif message == "Verification email sent. Please verify your OTP.":
+        elif message in (
+            "Verification email sent. Please verify your OTP.",
+            "Please verify your OTP.",
+        ):
             msg = message
         else:
             msg = "Login successful"
