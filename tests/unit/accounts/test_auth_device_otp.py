@@ -445,6 +445,46 @@ async def test_mark_device_verified_updates_installation(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_mark_pending_active_device_verified_uses_active_install(mock_db):
+    from apps.accounts.services.device_otp_service import mark_pending_active_device_verified
+
+    installation = _installation(is_active=True, is_device_verified=False)
+    installation.verified_at = None
+    db = mock_db()
+    user_id = uuid.uuid4()
+
+    with (
+        patch(
+            "apps.accounts.services.device_otp_service.get_pending_active_unverified_installation",
+            AsyncMock(return_value=installation),
+        ),
+        patch(
+            "apps.accounts.services.device_otp_service.mark_device_verified",
+            AsyncMock(return_value=installation),
+        ) as mark_verified,
+    ):
+        result = await mark_pending_active_device_verified(db, user_id)
+
+    assert result is installation
+    mark_verified.assert_awaited_once_with(db, user_id, "device-1", now=None)
+
+
+@pytest.mark.asyncio
+async def test_mark_pending_active_device_verified_none_when_missing(mock_db):
+    from apps.accounts.services.device_otp_service import mark_pending_active_device_verified
+
+    db = mock_db()
+
+    with patch(
+        "apps.accounts.services.device_otp_service.get_pending_active_unverified_installation",
+        AsyncMock(return_value=None),
+    ):
+        result = await mark_pending_active_device_verified(db, uuid.uuid4())
+
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_verify_otp_marks_device_and_clears_otp(mock_db):
     user = _user()
     user.onboarding_status = "completed"
@@ -453,12 +493,16 @@ async def test_verify_otp_marks_device_and_clears_otp(mock_db):
     payload = SimpleNamespace(
         email=user.email,
         otp="1234",
-        device_id="device-1",
     )
+    pending = _installation(is_active=True, is_device_verified=False)
     db = mock_db()
 
     with (
-        patch.object(auth_svc, "mark_device_verified", AsyncMock()) as mark_verified,
+        patch.object(
+            auth_svc,
+            "mark_pending_active_device_verified",
+            AsyncMock(return_value=pending),
+        ) as mark_pending,
         patch.object(auth_svc, "_issue_auth_session", AsyncMock(return_value={"user": {}})),
         patch.object(auth_svc, "send_verification_success_email", AsyncMock()) as success_email,
         patch("apps.chat.service.sync_stream_user_on_auth", AsyncMock()),
@@ -480,7 +524,7 @@ async def test_verify_otp_marks_device_and_clears_otp(mock_db):
     assert response.status is True
     assert user.email_otp is None
     assert user.email_otp_created_at is None
-    mark_verified.assert_awaited_once()
+    mark_pending.assert_awaited_once()
     success_email.assert_not_called()
     assert response.data["needsOtp"] is False
     assert response.data["emailSent"] is False

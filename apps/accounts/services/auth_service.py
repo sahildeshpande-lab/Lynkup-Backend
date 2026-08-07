@@ -23,7 +23,7 @@ from .device_otp_service import (
     begin_otp_challenge,
     ensure_unverified_installation,
     evaluate_device_otp_requirement,
-    mark_device_verified,
+    mark_pending_active_device_verified,
     upsert_user_installation,
 )
 
@@ -229,17 +229,13 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
         user.updated_at = now
         db.add(user)
 
-        # Only mark the device trusted after OTP validation succeeds.
-        device_id = (payload.device_id or "").strip() or None
-        device_verified = False
-        if device_id:
-            await mark_device_verified(
-                db,
-                user.id,
-                device_id,
-                now=now,
-            )
-            device_verified = True
+        # Trust the install activated at login (device_id comes from login, not verify payload).
+        installation = await mark_pending_active_device_verified(
+            db,
+            user.id,
+            now=now,
+        )
+        device_verified = installation is not None
         await db.commit()
 
         if not onboarding_completed:

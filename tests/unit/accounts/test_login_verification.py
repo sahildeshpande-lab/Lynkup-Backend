@@ -289,13 +289,13 @@ async def test_verify_otp_marks_device_verified_and_subsequent_login_bypasses(db
             email=email,
             otp=otp,
             firebaseId="valid-id-token",
-            device_id="new-trusted-device",
         ),
         firebase_user=firebase_claims,
         db=db_session,
     )
     assert verify_response.status is True
     assert verify_response.data["needsOtp"] is False
+    assert verify_response.data["isDeviceVerified"] is True
 
     await db_session.refresh(installation)
     assert installation.is_device_verified is True
@@ -484,17 +484,21 @@ async def test_login_after_verify_otp_does_not_revert_to_pending(db_session: Asy
 
     login_response = await login(payload=login_payload, firebase_user=firebase_claims, db=db_session)
     assert login_response.status is True
-    assert login_response.data["emailSent"] is True
+    # Unexpired OTP already exists, so login reuses it and does not resend email.
+    assert login_response.data["needsOtp"] is True
+    assert login_response.data["emailSent"] is False
+    assert login_response.data["isDeviceVerified"] is False
+    assert not sent_emails
 
     refreshed = await db_session.get(User, user.id)
     current_otp = refreshed.email_otp
+    assert current_otp == "1234"
 
     verify_response = await verify_otp(
         payload=OtpVerifyRequest(
             email=email,
             otp=current_otp,
             firebaseId="valid-id-token",
-            device_id="device-1",
         ),
         firebase_user=firebase_claims,
         db=db_session,
@@ -857,7 +861,6 @@ async def test_verify_otp_skips_success_email_when_onboarding_completed(db_sessi
             email=email,
             otp=otp,
             firebaseId="valid-id-token",
-            device_id="completed-device",
         ),
         firebase_user={"uid": uid, "email": email},
         db=db_session,

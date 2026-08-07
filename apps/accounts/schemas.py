@@ -171,17 +171,11 @@ class OtpVerifyRequest(BaseModel):
     email: EmailStr
     otp: str
     firebaseId: str
-    device_id: str | None = None
     platform: str | None = Field(
         default=None,
         max_length=20,
         description="Optional client platform (e.g. android, ios).",
     )
-
-    @field_validator("device_id")
-    @classmethod
-    def normalize_device_id(cls, value: str | None) -> str | None:
-        return _normalize_optional_device_id(value)
 
     @field_validator("platform")
     @classmethod

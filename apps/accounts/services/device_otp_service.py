@@ -270,6 +270,29 @@ async def ensure_unverified_installation(
     return installation
 
 
+async def get_pending_active_unverified_installation(
+    db: AsyncSession,
+    user_id,
+) -> UserInstallation | None:
+    """Return the latest active, unverified install for this user (from login OTP).
+
+    Login with ``device_id`` creates/refreshes that row via
+    ``ensure_unverified_installation``. Verify-OTP uses this lookup instead of
+    accepting ``device_id`` in the payload.
+    """
+    stmt = (
+        select(UserInstallation)
+        .where(
+            UserInstallation.user_id == user_id,
+            UserInstallation.is_active.is_(True),
+            UserInstallation.is_device_verified.is_(False),
+        )
+        .order_by(UserInstallation.last_active_at.desc().nulls_last())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def mark_device_verified(
     db: AsyncSession,
     user_id,
@@ -303,6 +326,19 @@ async def mark_device_verified(
         installation.is_active = True
     db.add(installation)
     return installation
+
+
+async def mark_pending_active_device_verified(
+    db: AsyncSession,
+    user_id,
+    *,
+    now: datetime | None = None,
+) -> UserInstallation | None:
+    """Trust the pending install activated during login OTP (no verify payload device_id)."""
+    pending = await get_pending_active_unverified_installation(db, user_id)
+    if pending is None:
+        return None
+    return await mark_device_verified(db, user_id, pending.device_id, now=now)
 
 
 async def evaluate_device_otp_requirement(
