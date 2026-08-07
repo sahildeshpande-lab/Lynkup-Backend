@@ -34,7 +34,7 @@ async def update_moderation_words_route(
     return ApiResponse(message="Words updated successfully", data=data)
 
 
-@router.get("/history", response_model=ApiResponse)
+@router.get("/status-history", response_model=ApiResponse)
 async def get_moderation_history(
     entity_id: UUID = Query(..., description="Post or user id to fetch moderation history for"),
     db: AsyncSession = Depends(get_session),
