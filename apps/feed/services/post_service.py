@@ -694,7 +694,7 @@ async def save_post_service(
                 else set()
             )
             await _sync_hashtags(post.id, content_dict, db)
-            await _create_revision(post, user_id, db)
+            await _create_revision(post, user_id, db, previous_state=None)
             await _assign_moderator_for_review(post, db)
 
             await db.commit()
@@ -770,7 +770,7 @@ async def save_post_service(
             else set()
         )
         await _sync_hashtags(post.id, content_dict, db)
-        await _create_revision(post, user_id, db)
+        await _create_revision(post, user_id, db, previous_state=previous_state)
         await _assign_moderator_for_review(
             post, db, previous_state=previous_state
         )
@@ -898,7 +898,7 @@ async def edit_post_service(
         await _sync_hashtags(post.id, merged_content, db)
 
         # Create revision audit record
-        await _create_revision(post, user_id, db)
+        await _create_revision(post, user_id, db, previous_state=previous_state)
 
         # Re-enter review queue without overwriting an existing moderator assignment.
         await _assign_moderator_for_review(
@@ -976,7 +976,7 @@ async def publish_post_service(
         await _assign_moderator_for_review(post, db, previous_state=previous_state)
 
         # Create revision audit record
-        await _create_revision(post, user_id, db)
+        await _create_revision(post, user_id, db, previous_state=previous_state)
 
         await db.commit()
         await db.refresh(post)
@@ -1155,7 +1155,7 @@ async def admin_publish_post_service(
 
     try:
         # Create revision audit record with the acting admin as the editor
-        await _create_revision(post, admin_user_id, db)
+        await _create_revision(post, admin_user_id, db, previous_state=previous_state)
 
         from apps.moderation.services import record_moderation_history
         from common.enums import ReportEntityType

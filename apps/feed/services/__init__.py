@@ -7,7 +7,13 @@ from . import media_service as _service_module_0
 from .media_service import upload_post_media_service, _verify_and_attach_media, get_media_type
 
 from . import revision_service as _service_module_1
-from .revision_service import _build_content_dict, _build_media_snapshot, _create_revision, _sync_hashtags
+from .revision_service import (
+    _build_content_dict,
+    _build_media_snapshot,
+    _create_revision,
+    _sync_hashtags,
+    list_post_revisions_service,
+)
 
 from . import post_service as _service_module_2
 from .post_service import utc_now, format_post_detail, build_post_detail_response, format_repost_item, save_post_service, edit_post_service, publish_post_service, admin_publish_post_service, get_post_service, delete_post_service, list_draft_posts_service, delete_draft_post_service, list_user_posts_service, list_user_posts_items_service, get_profile_visibility_block_message, list_processing_posts_service, list_reviewed_posts_by_state_service
@@ -37,6 +43,7 @@ __all__ = [
     "_build_media_snapshot",
     "_create_revision",
     "_sync_hashtags",
+    "list_post_revisions_service",
     "utc_now",
     "format_post_detail",
     "build_post_detail_response",

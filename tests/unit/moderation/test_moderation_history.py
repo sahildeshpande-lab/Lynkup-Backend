@@ -10,11 +10,12 @@ from fastapi.testclient import TestClient
 
 from apps.moderation import routes as moderation_routes
 from apps.moderation.services import moderation_history_service as history_svc
-from common.enums import ReportEntityType
+from common.enums import PostState, ReportEntityType
 from common.exceptions import ApiError
 from core.database.session import get_session
 from core.security.auth import get_current_user_moderator_or_superadmin
 from entrypoints.api import app
+from apps.feed.services.revision_service import _should_trigger_moderation_review
 
 client = TestClient(app)
 
@@ -39,7 +40,7 @@ def _override_deps():
     app.dependency_overrides.pop(get_current_user_moderator_or_superadmin, None)
 
 
-def test_get_history_route(monkeypatch) -> None:
+def test_get_status_history_route(monkeypatch) -> None:
     entity_id = uuid.uuid4()
     taken_at = datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc)
 
@@ -58,7 +59,7 @@ def test_get_history_route(monkeypatch) -> None:
 
     monkeypatch.setattr(moderation_routes, "list_moderation_history_service", _mock_list)
 
-    response = client.get("/api/v1/history", params={"entity_id": str(entity_id)})
+    response = client.get("/api/v1/status-history", params={"entity_id": str(entity_id)})
 
     assert response.status_code == 200
     body = response.json()
@@ -73,8 +74,8 @@ def test_get_history_route(monkeypatch) -> None:
     assert "action_taken_at" in item
 
 
-def test_get_history_route_requires_entity_id() -> None:
-    response = client.get("/api/v1/history")
+def test_get_status_history_route_requires_entity_id() -> None:
+    response = client.get("/api/v1/status-history")
     assert response.status_code == 200
     body = response.json()
     assert body["status"] is False
@@ -94,6 +95,18 @@ async def test_record_moderation_history_rejects_comment_entity():
 
 
 @pytest.mark.asyncio
+async def test_record_moderation_history_rejects_processing_action():
+    db = AsyncMock()
+    with pytest.raises(ApiError, match="processing"):
+        await history_svc.record_moderation_history(
+            db,
+            entity_type=ReportEntityType.post,
+            entity_id=uuid.uuid4(),
+            action="processing",
+        )
+
+
+@pytest.mark.asyncio
 async def test_list_moderation_history_formats_rows():
     db = AsyncMock()
     entity_id = uuid.uuid4()
@@ -107,9 +120,15 @@ async def test_list_moderation_history_formats_rows():
     moderator = SimpleNamespace(email="mod@example.com")
     profile = SimpleNamespace(first_name="Ada", last_name="Lovelace")
 
-    with patch(
-        "apps.moderation.services.moderation_history_service.get_history_by_entity_id",
-        AsyncMock(return_value=[(history, moderator, profile)]),
+    with (
+        patch(
+            "apps.moderation.services.moderation_history_service.get_history_by_entity_id",
+            AsyncMock(return_value=[(history, moderator, profile)]),
+        ),
+        patch(
+            "apps.feed.repositories.post_revision_repository.get_processing_events",
+            AsyncMock(return_value=[]),
+        ),
     ):
         rows = await history_svc.list_moderation_history_service(db, entity_id)
 
@@ -123,3 +142,73 @@ async def test_list_moderation_history_formats_rows():
             "action_taken_at": history.created_at,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_list_moderation_history_merges_processing_events():
+    db = AsyncMock()
+    entity_id = uuid.uuid4()
+    flagged_at = datetime(2026, 8, 6, 10, 0, tzinfo=timezone.utc)
+    processing_at = datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc)
+    reinstate_at = datetime(2026, 8, 6, 14, 0, tzinfo=timezone.utc)
+
+    flagged = SimpleNamespace(
+        id=uuid.uuid4(),
+        entity_id=entity_id,
+        action="flagged",
+        comment="fix needed",
+        created_at=flagged_at,
+    )
+    reinstate = SimpleNamespace(
+        id=uuid.uuid4(),
+        entity_id=entity_id,
+        action="reinstate",
+        comment=None,
+        created_at=reinstate_at,
+    )
+    processing_rev = SimpleNamespace(
+        post_id=entity_id,
+        created_at=processing_at,
+    )
+
+    with (
+        patch(
+            "apps.moderation.services.moderation_history_service.get_history_by_entity_id",
+            AsyncMock(
+                return_value=[
+                    (reinstate, None, None),
+                    (flagged, None, None),
+                ]
+            ),
+        ),
+        patch(
+            "apps.feed.repositories.post_revision_repository.get_processing_events",
+            AsyncMock(return_value=[processing_rev]),
+        ),
+    ):
+        rows = await history_svc.list_moderation_history_service(db, entity_id)
+
+    assert [r["action_taken"] for r in rows] == ["reinstate", "processing", "flagged"]
+    processing = rows[1]
+    assert processing["id"] is None
+    assert processing["entity_id"] == entity_id
+    assert processing["moderator_name"] is None
+    assert processing["comment"] == "Author edited after moderator review."
+    assert processing["action_taken_at"] == processing_at
+
+
+@pytest.mark.parametrize(
+    ("previous", "current", "expected"),
+    [
+        (PostState.flagged, PostState.processing, True),
+        (PostState.published, PostState.processing, True),
+        (PostState.reinstate, PostState.processing, True),
+        (PostState.rejected, PostState.processing, True),
+        (PostState.processing, PostState.processing, False),
+        (PostState.flagged, PostState.flagged, False),
+        (PostState.draft, PostState.processing, False),
+        (None, PostState.processing, False),
+    ],
+)
+def test_should_trigger_moderation_review(previous, current, expected):
+    assert _should_trigger_moderation_review(previous, current) is expected

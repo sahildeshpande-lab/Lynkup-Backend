@@ -28,6 +28,7 @@ from apps.feed.services import (
     get_profile_visibility_block_message,
     get_feed_service,
     format_post_detail,
+    list_post_revisions_service,
 )
 
 router = APIRouter(tags=["6] Feed / Posts"])
@@ -97,6 +98,22 @@ async def get_post(
     return success_response(
         "Post retrieved successfully",
         post_data,
+        response_cls=ApiResponse,
+    )
+
+
+@router.get("/postrevision", response_model=ApiResponse)
+async def list_post_revisions(
+    post_id: UUID = Query(..., description="Post id to fetch content revisions for"),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    db: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """Return every content revision snapshot for a post (newest first)."""
+    _ = current_user
+    data = await list_post_revisions_service(db, post_id)
+    return success_response(
+        "Post revisions fetched successfully",
+        data,
         response_cls=ApiResponse,
     )
 
