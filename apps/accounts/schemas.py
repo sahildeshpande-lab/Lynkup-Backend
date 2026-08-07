@@ -12,6 +12,13 @@ from common.enums import Role, SocialProvider
 from common.schemas import ApiResponse
 
 
+def _normalize_optional_device_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 class SocialAuthRequest(BaseModel):
     loginType: SocialProvider
     firebaseId: str
@@ -19,7 +26,7 @@ class SocialAuthRequest(BaseModel):
     firstName: Optional[str] = None
     lastName: Optional[str] = None
     user: Role = "user"
-    device_id: str
+    device_id: str | None = None
     fullName: Optional[str] = None
     platform: str | None = Field(
         default=None,
@@ -35,11 +42,8 @@ class SocialAuthRequest(BaseModel):
 
     @field_validator("device_id")
     @classmethod
-    def normalize_device_id(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("device_id cannot be blank")
-        return normalized
+    def normalize_device_id(cls, value: str | None) -> str | None:
+        return _normalize_optional_device_id(value)
 
     @field_validator("platform", "fcm_token")
     @classmethod
@@ -65,7 +69,7 @@ class EmailSignupRequest(BaseModel):
     password: str = Field(min_length=8, max_length=20)
     role: Role
     firebaseId: str
-    device_id: str
+    device_id: str | None = None
     platform: str | None = Field(
         default=None,
         max_length=20,
@@ -78,11 +82,8 @@ class EmailSignupRequest(BaseModel):
 
     @field_validator("device_id")
     @classmethod
-    def normalize_device_id(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("device_id cannot be blank")
-        return normalized
+    def normalize_device_id(cls, value: str | None) -> str | None:
+        return _normalize_optional_device_id(value)
 
     @field_validator("platform", "fcm_token")
     @classmethod
@@ -122,7 +123,7 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
     firebaseId: str
-    device_id: str
+    device_id: str | None = None
     platform: str | None = Field(
         default=None,
         max_length=20,
@@ -135,11 +136,8 @@ class LoginRequest(BaseModel):
 
     @field_validator("device_id")
     @classmethod
-    def normalize_device_id(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("device_id cannot be blank")
-        return normalized
+    def normalize_device_id(cls, value: str | None) -> str | None:
+        return _normalize_optional_device_id(value)
 
     @field_validator("platform", "fcm_token")
     @classmethod
@@ -173,7 +171,7 @@ class OtpVerifyRequest(BaseModel):
     email: EmailStr
     otp: str
     firebaseId: str
-    device_id: str = Field(min_length=1)
+    device_id: str | None = None
     platform: str | None = Field(
         default=None,
         max_length=20,
@@ -182,11 +180,8 @@ class OtpVerifyRequest(BaseModel):
 
     @field_validator("device_id")
     @classmethod
-    def normalize_device_id(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("device_id cannot be blank")
-        return normalized
+    def normalize_device_id(cls, value: str | None) -> str | None:
+        return _normalize_optional_device_id(value)
 
     @field_validator("platform")
     @classmethod
@@ -200,7 +195,7 @@ class OtpVerifyRequest(BaseModel):
 class ResendOtpRequest(BaseModel):
     email: EmailStr
     firebaseId: str
-    device_id: str = Field(min_length=1)
+    device_id: str | None = None
     platform: str | None = Field(
         default=None,
         max_length=20,
@@ -209,11 +204,8 @@ class ResendOtpRequest(BaseModel):
 
     @field_validator("device_id")
     @classmethod
-    def normalize_device_id(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("device_id cannot be blank")
-        return normalized
+    def normalize_device_id(cls, value: str | None) -> str | None:
+        return _normalize_optional_device_id(value)
 
     @field_validator("platform")
     @classmethod

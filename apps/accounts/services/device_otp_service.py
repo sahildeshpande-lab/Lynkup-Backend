@@ -308,7 +308,7 @@ async def mark_device_verified(
 async def evaluate_device_otp_requirement(
     db: AsyncSession,
     user: User,
-    device_id: str,
+    device_id: str | None,
 ) -> tuple[UserInstallation | None, bool, bool]:
     """Decide whether this sign-in needs an OTP challenge.
 
@@ -316,7 +316,12 @@ async def evaluate_device_otp_requirement(
     required again for that device — including after logout (``is_active`` may
     be false; successful login reactivates it). Merely having an installation
     row is not enough to bypass OTP.
+
+    When ``device_id`` is omitted, the device cannot be trusted and OTP is required.
     """
+    if not device_id:
+        return None, True, True
+
     installation = await get_user_installation(db, user.id, device_id)
     is_new_device = installation is None
     is_trusted = installation is not None and bool(installation.is_device_verified)
@@ -327,7 +332,7 @@ async def evaluate_device_otp_requirement(
 async def begin_otp_challenge(
     db: AsyncSession,
     user: User,
-    device_id: str,
+    device_id: str | None = None,
     *,
     installation: UserInstallation | None = None,
     is_new_device: bool = False,
@@ -336,9 +341,9 @@ async def begin_otp_challenge(
 ) -> bool:
     """Prepare an OTP challenge for an unverified device.
 
-    Ensures an unverified installation row exists. Reuses an unexpired OTP
-    without sending another email. Generates and emails a new OTP only when
-    none is valid.
+    Ensures an unverified installation row exists when ``device_id`` is provided.
+    Reuses an unexpired OTP without sending another email. Generates and emails
+    a new OTP only when none is valid.
 
     Returns ``True`` when a new OTP email was sent, otherwise ``False``.
     """
@@ -354,14 +359,15 @@ async def begin_otp_challenge(
     user.updated_at = now
     db.add(user)
 
-    await ensure_unverified_installation(
-        db,
-        user.id,
-        device_id,
-        platform=platform,
-        fcm_token=fcm_token,
-        now=now,
-    )
+    if device_id:
+        await ensure_unverified_installation(
+            db,
+            user.id,
+            device_id,
+            platform=platform,
+            fcm_token=fcm_token,
+            now=now,
+        )
 
     if has_unexpired_otp(user):
         await db.commit()

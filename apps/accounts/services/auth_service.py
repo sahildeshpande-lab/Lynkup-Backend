@@ -98,9 +98,7 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     if user.status in (UserStatus.suspended, UserStatus.banned):
         return ApiResponse(status=False, message=inactive_account_message(user.status), data=None)
 
-    device_id = payload.device_id.strip()
-    if not device_id:
-        return ApiResponse(status=False, message="device_id is required", data=None)
+    device_id = (payload.device_id or "").strip() or None
 
     installation, is_new_device, needs_otp = await evaluate_device_otp_requirement(
         db,
@@ -156,14 +154,15 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     user.updated_at = _now()
     db.add(user)
 
-    await upsert_user_installation(
-        db,
-        user.id,
-        device_id,
-        platform=payload.platform,
-        fcm_token=payload.fcm_token,
-        now=_now(),
-    )
+    if device_id:
+        await upsert_user_installation(
+            db,
+            user.id,
+            device_id,
+            platform=payload.platform,
+            fcm_token=payload.fcm_token,
+            now=_now(),
+        )
 
     await db.commit()
 
@@ -231,12 +230,16 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
         db.add(user)
 
         # Only mark the device trusted after OTP validation succeeds.
-        await mark_device_verified(
-            db,
-            user.id,
-            payload.device_id,
-            now=now,
-        )
+        device_id = (payload.device_id or "").strip() or None
+        device_verified = False
+        if device_id:
+            await mark_device_verified(
+                db,
+                user.id,
+                device_id,
+                now=now,
+            )
+            device_verified = True
         await db.commit()
 
         if not onboarding_completed:
@@ -274,7 +277,7 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
             await _issue_auth_session(user, db),
             email_sent=False,
             needs_otp=False,
-            is_device_verified=True,
+            is_device_verified=device_verified,
         )
         return ApiResponse(status=True, message="OTP successfully verified", data=data)
 
@@ -315,19 +318,17 @@ async def resend_otp(payload: ResendOtpRequest, firebase_user: dict, db: AsyncSe
     if user.firebase_uid != firebase_user["uid"]:
         return ApiResponse(status=False, message="Unauthorized action for this user account", data=None)
 
-    device_id = payload.device_id.strip()
-    if not device_id:
-        return ApiResponse(status=False, message="device_id is required", data=None)
-
+    device_id = (payload.device_id or "").strip() or None
     now = _now()
     # Keep the installation unverified; only /verify-otp may trust a device.
-    await ensure_unverified_installation(
-        db,
-        user.id,
-        device_id,
-        platform=payload.platform,
-        now=now,
-    )
+    if device_id:
+        await ensure_unverified_installation(
+            db,
+            user.id,
+            device_id,
+            platform=payload.platform,
+            now=now,
+        )
 
     otp = _generate_otp()
     user.email_otp = otp

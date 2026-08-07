@@ -142,24 +142,25 @@ async def _refresh_user_topic_subscriptions_best_effort(
 async def _build_device_auth_session(
     db: AsyncSession,
     user: User,
-    device_id: str,
+    device_id: str | None,
     *,
     platform: str | None = None,
     fcm_token: str | None = None,
 ) -> tuple[dict, str]:
     from sqlalchemy.orm import selectinload
 
+    normalized_device_id = (device_id or "").strip() or None
     installation, is_new_device, needs_otp = await evaluate_device_otp_requirement(
         db,
         user,
-        device_id,
+        normalized_device_id,
     )
 
     if needs_otp:
         email_sent = await begin_otp_challenge(
             db,
             user,
-            device_id,
+            normalized_device_id,
             installation=installation,
             is_new_device=is_new_device,
             platform=platform,
@@ -187,14 +188,15 @@ async def _build_device_auth_session(
     user.updated_at = _now()
     db.add(user)
 
-    await upsert_user_installation(
-        db,
-        user.id,
-        device_id,
-        platform=platform,
-        fcm_token=fcm_token,
-        now=_now(),
-    )
+    if normalized_device_id:
+        await upsert_user_installation(
+            db,
+            user.id,
+            normalized_device_id,
+            platform=platform,
+            fcm_token=fcm_token,
+            now=_now(),
+        )
 
     await db.commit()
     await _refresh_user_topic_subscriptions_best_effort(db, user, context="no-otp flow")
@@ -443,20 +445,22 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
                 db.add(profile)
 
             # Ensure unverified installation exists (never mark trusted here).
-            await ensure_unverified_installation(
-                db,
-                existing_user_email.id,
-                payload.device_id,
-                platform=payload.platform,
-                fcm_token=payload.fcm_token,
-                now=now,
-            )
+            device_id = (payload.device_id or "").strip() or None
+            if device_id:
+                await ensure_unverified_installation(
+                    db,
+                    existing_user_email.id,
+                    device_id,
+                    platform=payload.platform,
+                    fcm_token=payload.fcm_token,
+                    now=now,
+                )
             await db.commit()
 
             email_sent = await begin_otp_challenge(
                 db,
                 existing_user_email,
-                payload.device_id,
+                device_id,
                 platform=payload.platform,
                 fcm_token=payload.fcm_token,
             )
@@ -528,20 +532,22 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     db.add(profile)
 
     # 4. Create unverified installation — never mark trusted during signup.
-    await ensure_unverified_installation(
-        db,
-        user.id,
-        payload.device_id,
-        platform=payload.platform,
-        fcm_token=payload.fcm_token,
-        now=now,
-    )
+    device_id = (payload.device_id or "").strip() or None
+    if device_id:
+        await ensure_unverified_installation(
+            db,
+            user.id,
+            device_id,
+            platform=payload.platform,
+            fcm_token=payload.fcm_token,
+            now=now,
+        )
     await db.commit()
 
     email_sent = await begin_otp_challenge(
         db,
         user,
-        payload.device_id,
+        device_id,
         is_new_device=True,
         platform=payload.platform,
         fcm_token=payload.fcm_token,
