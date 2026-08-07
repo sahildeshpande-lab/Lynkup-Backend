@@ -1048,24 +1048,28 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
         await session.commit()
     
     async with async_session_factory() as session:
-        # Owner "published" expands to published + flagged + processing + reinstate.
+        # Owner list returns published + flagged + processing (+ reinstate) regardless of status filter.
+        expected_owner = {"Published Post", "Flagged Post", "Processing Post"}
         published_posts, total = await list_user_posts_service(user, session, include_total=True)
         captions = {post.caption for post in published_posts}
-        assert captions == {"Published Post", "Flagged Post", "Processing Post"}
+        assert captions == expected_owner
 
         draft_posts, total = await list_user_posts_service(user, session, state="draft", include_total=True)
         assert len(draft_posts) == 1
         assert draft_posts[0].caption == "Draft Post"
 
         flagged_posts, total = await list_user_posts_service(user, session, state="flagged", include_total=True)
-        assert len(flagged_posts) == 1
-        assert flagged_posts[0].caption == "Flagged Post"
+        assert {post.caption for post in flagged_posts} == expected_owner
 
         processing_posts, total = await list_user_posts_service(
             user, session, state="processing", include_total=True
         )
-        assert len(processing_posts) == 1
-        assert processing_posts[0].caption == "Processing Post"
+        assert {post.caption for post in processing_posts} == expected_owner
+        assert {post.state for post in processing_posts} == {
+            PostState.published,
+            PostState.flagged,
+            PostState.processing,
+        }
 
         # Visitor listing another user is forced to public feed states only.
         visitor_posts, total = await list_user_posts_service(

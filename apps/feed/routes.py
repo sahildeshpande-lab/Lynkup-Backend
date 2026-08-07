@@ -138,7 +138,11 @@ async def list_user_posts(
     user_id: UUID | None = Query(default=None, description="Filter posts by user id"),
     state: str = Query(
         default="published",
-        description="Filter posts by state",
+        description=(
+            "Filter posts by state. For the owner, processing/published/flagged "
+            "all return the combined owner-visible set (real status kept per post). "
+            "Use draft for drafts only."
+        ),
         enum=["published", "processing", "flagged", "draft"],
     ),
     page: int | None = Query(default=None, ge=1),

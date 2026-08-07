@@ -324,4 +324,7 @@ async def test_query_states_owner_published_includes_processing():
     assert visitor_states == FEED_VISIBLE_POST_STATES
     assert PostState.processing not in visitor_states
 
-    assert svc._query_states_for_list(PostState.processing, is_owner=True) == PostState.processing
+    # Owner list ignores status filter (except draft) and always returns the visible set.
+    assert svc._query_states_for_list(PostState.processing, is_owner=True) == OWNER_VISIBLE_POST_STATES
+    assert svc._query_states_for_list(PostState.flagged, is_owner=True) == OWNER_VISIBLE_POST_STATES
+    assert svc._query_states_for_list(PostState.draft, is_owner=True) == PostState.draft

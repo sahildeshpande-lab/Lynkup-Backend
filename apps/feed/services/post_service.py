@@ -1439,14 +1439,19 @@ def _query_states_for_list(
     is_owner: bool = False,
 ) -> PostState | tuple[PostState, ...]:
     """
-    Profile/list ``published`` expands to the viewer-appropriate visible set.
+    Resolve which post states to load for GET /posts.
 
-    - Owner: published + flagged + processing + reinstate (matches owner posts_count).
-    - Visitor: published + reinstate only (never processing).
-    Each post keeps its real ``state`` (not remapped).
+    For now, owners always get processing + published + flagged + reinstate
+    regardless of the ``state`` query (except ``draft``, which stays exact).
+    Visitors still only see published + reinstate.
+    Each post keeps its real ``state`` / ``status`` (not remapped).
     """
+    if requested_state == PostState.draft:
+        return PostState.draft
+    if is_owner:
+        return OWNER_VISIBLE_POST_STATES
     if requested_state == PostState.published:
-        return OWNER_VISIBLE_POST_STATES if is_owner else FEED_VISIBLE_POST_STATES
+        return FEED_VISIBLE_POST_STATES
     return requested_state
 
 
@@ -1620,7 +1625,12 @@ async def list_user_posts_items_service(
     from apps.feed.db_models import PostAttachment
 
     repost_items = []
-    if requested_state == PostState.published and effective_user_id is not None:
+    include_reposts = (
+        requested_state != PostState.draft
+        and effective_user_id is not None
+        and (is_owner or requested_state == PostState.published)
+    )
+    if include_reposts:
         # Find all reposts by this user (original post may be published or reinstate)
         repost_stmt = (
             sa_select(Repost, Post, Profile)
