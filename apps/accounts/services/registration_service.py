@@ -178,6 +178,7 @@ async def _build_device_auth_session(
                 await _issue_auth_session(user, db),
                 email_sent=email_sent,
                 needs_otp=True,
+                is_device_verified=False,
             ),
             message,
         )
@@ -204,6 +205,7 @@ async def _build_device_auth_session(
             await _issue_auth_session(user, db),
             email_sent=False,
             needs_otp=False,
+            is_device_verified=True,
         ),
         "Login successful",
     )
@@ -470,6 +472,7 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
                 await _issue_auth_session(user, db),
                 email_sent=email_sent,
                 needs_otp=True,
+                is_device_verified=False,
             )
             return ApiResponse(status=True, message="Signup successful", data=data)
         else:
@@ -552,5 +555,6 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
         await _issue_auth_session(user, db),
         email_sent=email_sent,
         needs_otp=True,
+        is_device_verified=False,
     )
     return ApiResponse(status=True, message="Signup successful", data=data)

@@ -425,7 +425,9 @@ def attach_otp_flags(
     *,
     email_sent: bool,
     needs_otp: bool,
+    is_device_verified: bool = False,
 ) -> dict:
     session_data["emailSent"] = email_sent
     session_data["needsOtp"] = needs_otp
+    session_data["isDeviceVerified"] = is_device_verified
     return session_data

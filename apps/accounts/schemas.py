@@ -321,6 +321,7 @@ class UserAuthSessionResponse(BaseModel):
     user: UserBaseResponse
     emailSent: bool = False
     needsOtp: bool = False
+    isDeviceVerified: bool = False
 
 
 class UserAuthResponse(ApiResponse):
@@ -342,6 +343,7 @@ class AuthSessionResponse(BaseModel):
     user: AuthUserResponse
     emailSent: bool = False
     needsOtp: bool = False
+    isDeviceVerified: bool = False
     access_token: str | None = None
     refresh_token: str | None = None
     token_type: str = "bearer"

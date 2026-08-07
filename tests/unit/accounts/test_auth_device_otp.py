@@ -183,6 +183,7 @@ async def test_login_sends_otp_when_verification_required(mock_db):
     assert response.status is True
     assert response.data["needsOtp"] is True
     assert response.data["emailSent"] is True
+    assert response.data["isDeviceVerified"] is False
 
 
 @pytest.mark.asyncio
@@ -218,6 +219,7 @@ async def test_login_reuses_unexpired_otp_without_resending(mock_db):
     assert response.status is True
     assert response.data["needsOtp"] is True
     assert response.data["emailSent"] is False
+    assert response.data["isDeviceVerified"] is False
     assert response.message == "Please verify your OTP."
 
 
@@ -258,6 +260,7 @@ async def test_login_success_without_otp_when_verified_same_device(mock_db):
     assert response.status is True
     assert response.message == "Login successful"
     assert response.data["needsOtp"] is False
+    assert response.data["isDeviceVerified"] is True
 
 
 @pytest.mark.asyncio
@@ -481,6 +484,7 @@ async def test_verify_otp_marks_device_and_clears_otp(mock_db):
     success_email.assert_not_called()
     assert response.data["needsOtp"] is False
     assert response.data["emailSent"] is False
+    assert response.data["isDeviceVerified"] is True
 
 
 @pytest.mark.asyncio

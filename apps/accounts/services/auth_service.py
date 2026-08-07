@@ -36,6 +36,7 @@ async def _issue_auth_session(user: User, db: AsyncSession) -> dict:
         "user": user_data,
         "emailSent": False,
         "needsOtp": user.email_verified_at is None,
+        "isDeviceVerified": False,
     }
 
 async def build_firebase_session_response(user: User, db: AsyncSession) -> dict:
@@ -46,6 +47,7 @@ async def build_firebase_session_response(user: User, db: AsyncSession) -> dict:
         "user": user_data,
         "emailSent": False,
         "needsOtp": user.email_verified_at is None,
+        "isDeviceVerified": False,
     }
 
 async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) -> ApiResponse:
@@ -137,6 +139,7 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
             await _issue_auth_session(user, db),
             email_sent=email_sent,
             needs_otp=True,
+            is_device_verified=False,
         )
         message = (
             "Verification email sent. Please verify your OTP."
@@ -197,6 +200,7 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
             await _issue_auth_session(user, db),
             email_sent=False,
             needs_otp=False,
+            is_device_verified=True,
         ),
     )
 
@@ -270,6 +274,7 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
             await _issue_auth_session(user, db),
             email_sent=False,
             needs_otp=False,
+            is_device_verified=True,
         )
         return ApiResponse(status=True, message="OTP successfully verified", data=data)
 
