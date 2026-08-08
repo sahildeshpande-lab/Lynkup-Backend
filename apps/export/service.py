@@ -16,7 +16,6 @@ from apps.export.schemas import ExportRequestAcceptedData, ExportStatusData
 from apps.export.storage import ExportStorage, get_export_storage, write_temp_zip
 from common.exceptions import ApiError
 from core.database.session import async_session_factory
-from core.email.config import settings as email_settings
 from core.email_service import _queue_email, _render_email_layout
 
 logger = logging.getLogger(__name__)
@@ -273,7 +272,13 @@ class DataExportService:
             )
             return
 
-        base_url = email_settings.base_url.rstrip("/")
+        base_url = (export_settings.base_url_export or "").rstrip("/")
+        if not base_url:
+            logger.warning(
+                "BASE_URL_EXPORT is not configured; cannot queue export email for %s",
+                export_request.id,
+            )
+            return
         download_url = f"{base_url}/api/v1/me/export/{export_request.id}/download"
         expires = _ensure_aware(export_request.download_expires_at)
         expiry_text = expires.isoformat() if expires else "the retention period ends"

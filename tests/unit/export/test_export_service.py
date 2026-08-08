@@ -239,7 +239,7 @@ async def test_queue_ready_email_uses_backend_download_url(mock_db):
     service = DataExportService(storage=FakeSpacesStorage())
 
     with patch(
-        "apps.export.service.email_settings.base_url",
+        "apps.export.service.export_settings.base_url_export",
         "https://lynkup-backend-311u.onrender.com",
     ):
         with patch("apps.export.service._queue_email", new=AsyncMock()) as queue_email:

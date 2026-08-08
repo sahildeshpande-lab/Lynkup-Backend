@@ -22,7 +22,7 @@ Personal data export for authenticated KampuLynk users.
 5. DB updated: `status=completed`, `storage_key` = Spaces object key only.
 6. Email queued to `transactional_email_log` with backend download link:
    ```text
-   {BASE_URL}/api/v1/me/export/{export_id}/download
+   {BASE_URL_EXPORT}/api/v1/me/export/{export_id}/download
    ```
    (ZIP is **not** attached.)
 7. Download endpoint authenticates, validates ownership/expiry, then redirects
@@ -46,8 +46,11 @@ Export-specific:
 ```text
 EXPORT_RETENTION_DAYS=7
 EXPORT_SIGNED_URL_EXPIRES_SECONDS=900
-BASE_URL=https://your-backend.example.com
+BASE_URL_EXPORT=https://lynkup-backend-311u.onrender.com
 ```
+
+Email download links use `BASE_URL_EXPORT` only (origin, no path). The code appends
+`/api/v1/me/export/{export_id}/download`.
 
 Do **not** use `S3_CDN_ENDPOINT` / `S3_FILE_ENDPOINT` for private export downloads.
 

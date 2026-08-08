@@ -13,6 +13,10 @@ class ExportSettings(BaseSettings):
         extra="ignore",
     )
 
+    base_url_export: str = Field(
+        default="https://lynkup-backend-311u.onrender.com",
+        alias="BASE_URL_EXPORT",
+    )
     export_retention_days: int = Field(
         default=7,
         ge=1,
