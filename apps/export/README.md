@@ -8,63 +8,55 @@ Personal data export for authenticated KampuLynk users.
 |--------|------|-------------|
 | `POST` | `/api/v1/me/export` | Request an export (requires recent Firebase auth) |
 | `GET` | `/api/v1/me/export/{export_id}` | Fetch export status |
-
-There is **no download HTTP endpoint**. The ZIP is emailed as an attachment.
+| `GET` | `/api/v1/me/export/{export_id}/download` | Auth + redirect to short-lived signed Spaces URL |
 
 ## Flow
 
-1. Authenticated user calls `POST /api/v1/me/export`.
-2. A `data_export_requests` row is created with `status=queued`.
-3. FastAPI `BackgroundTasks` runs `DataExportService.process_export`.
-4. The builder gathers user-owned JSON + media into a ZIP.
-5. `LocalExportStorage` stores `exports/<export_id>.zip`.
-6. Status becomes `completed`.
-7. An email row is inserted into `transactional_email_log` with:
-   - HTML body (reference link `{BASE_URL_EXPORT}/{export_id}`)
-   - `attachment` = absolute path to the ZIP
-   - `is_send=false`
-8. The existing email cron (`process_pending_emails`) delivers the message via SendGrid **with the ZIP attached**.
-9. After `EXPORT_RETENTION_DAYS`, call `cleanup_expired_exports()` (cron) to delete files and mark `expired`.
+1. `POST /api/v1/me/export` creates `data_export_requests` with `status=queued`.
+2. Background task builds JSON + media into a temporary local ZIP.
+3. ZIP is uploaded to DigitalOcean Spaces at:
+   ```text
+   exports/<user_id>/<export_id>.zip
+   ```
+4. Temporary local ZIP is deleted.
+5. DB updated: `status=completed`, `storage_key` = Spaces object key only.
+6. Email queued to `transactional_email_log` with backend download link:
+   ```text
+   {BASE_URL}/api/v1/me/export/{export_id}/download
+   ```
+   (ZIP is **not** attached.)
+7. Download endpoint authenticates, validates ownership/expiry, then redirects
+   to a short-lived presigned Spaces URL.
+8. Retention cleanup (external cron) deletes the Spaces object when
+   `download_expires_at` passes and sets `status=expired`, `storage_key=NULL`.
 
 ## Configuration
 
+Reuses existing Spaces credentials:
+
 ```text
-EXPORT_STORAGE_PATH=./storage/exports
+S3_BUCKET
+S3_ACCESS_KEY
+S3_SECRET_KEY
+S3_ENDPOINT
+```
+
+Export-specific:
+
+```text
 EXPORT_RETENTION_DAYS=7
-BASE_URL_EXPORT=https://lynkup-backend-311u.onrender.com
+EXPORT_SIGNED_URL_EXPIRES_SECONDS=900
+BASE_URL=https://your-backend.example.com
 ```
 
-Email reference link format:
+Do **not** use `S3_CDN_ENDPOINT` / `S3_FILE_ENDPOINT` for private export downloads.
 
-```text
-{BASE_URL_EXPORT}/{export_id}
-```
+## Security
 
-Example: `https://lynkup-backend-311u.onrender.com/<uuid>`
-
-`BASE_URL_EXPORT` is separate from the general `BASE_URL` used elsewhere (email/auth/images), so Spaces CDN hosts will not accidentally become export links.
-
-## Concurrent exports
-
-Only one `queued` or `processing` export is allowed per user at a time.
-
-## Recent authentication
-
-`POST /me/export` depends on `require_recent_auth` (Firebase `auth_time` within
-`RECENT_AUTH_MAX_AGE_SECONDS`). Clients must send a recently issued Firebase ID
-token for the export request. The status endpoint uses normal access-token auth.
-
-## Storage abstraction
-
-`ExportStorage` / `LocalExportStorage` isolate archive persistence. S3 or
-DigitalOcean Spaces backends can be added later without changing the builder.
-
-## Media limitations
-
-Media is retrieved via the existing Spaces client (`core.images.config.s3_client`)
-when configured, then local `entrypoints/static/uploads`, then public HTTP URL
-fallback. If media cannot be retrieved, the export still succeeds without that
-file.
+- Export objects are uploaded **without** public ACL.
+- Signed URLs are short-lived and never stored in PostgreSQL.
+- CDN / file endpoint public URLs are not exposed for exports.
+- Ownership and expiry are enforced on download.
 
 ## Cleanup
 
@@ -74,9 +66,9 @@ from apps.export.cleanup import cleanup_expired_exports
 await cleanup_expired_exports()
 ```
 
-Schedule this via Linux Cron (or similar). It is not started automatically by FastAPI.
+Schedule via Linux Cron. Not auto-started by FastAPI.
 
 ## Notes
 
-- Large ZIPs may hit SendGrid attachment size limits.
-- The ZIP must remain on disk until the email cron successfully sends it.
+- Presigned URLs do not reliably signal download completion, so objects are
+  retained until retention expiry rather than deleted on redirect.

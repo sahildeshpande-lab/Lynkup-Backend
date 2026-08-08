@@ -13,9 +13,10 @@ from apps.export.config import settings as export_settings
 from apps.export.enums import DataExportStatus
 from apps.export.models import DataExportRequest
 from apps.export.schemas import ExportRequestAcceptedData, ExportStatusData
-from apps.export.storage import ExportStorage, get_export_storage
+from apps.export.storage import ExportStorage, get_export_storage, write_temp_zip
 from common.exceptions import ApiError
 from core.database.session import async_session_factory
+from core.email.config import settings as email_settings
 from core.email_service import _queue_email, _render_email_layout
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,10 @@ def _ensure_aware(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def build_export_storage_key(*, user_id: UUID, export_id: UUID) -> str:
+    return f"exports/{user_id}/{export_id}.zip"
 
 
 class DataExportService:
@@ -92,6 +97,41 @@ class DataExportService:
             file_size_bytes=export_request.file_size_bytes,
         )
 
+    async def get_download_redirect_url(
+        self,
+        *,
+        user: User,
+        export_id: UUID,
+        db: AsyncSession,
+    ) -> str:
+        """Validate ownership/status/expiry and return a short-lived signed Spaces URL.
+
+        The object is NOT deleted here. Presigned URLs do not reliably signal
+        download completion; retention cleanup deletes objects after expiry.
+        """
+        export_request = await self._get_owned_export(user=user, export_id=export_id, db=db)
+
+        if export_request.status == DataExportStatus.expired:
+            raise ApiError("This export has expired.")
+        if export_request.status != DataExportStatus.completed:
+            raise ApiError("Export is not ready for download.")
+
+        expires_at = _ensure_aware(export_request.download_expires_at)
+        if expires_at is None or expires_at <= utc_now():
+            raise ApiError("This export has expired.")
+
+        if not export_request.storage_key:
+            raise ApiError("Export file is no longer available.")
+
+        if not self.storage.exists(export_request.storage_key):
+            raise ApiError("Export file is no longer available.")
+
+        try:
+            return self.storage.generate_download_url(export_request.storage_key)
+        except Exception as exc:
+            logger.exception("Failed generating signed URL for export %s", export_id)
+            raise ApiError("Export file is no longer available.") from exc
+
     async def process_export(self, export_id: UUID) -> None:
         """Background worker entrypoint. Uses its own DB session."""
         async with async_session_factory() as db:
@@ -125,11 +165,18 @@ class DataExportService:
             await db.refresh(export_request)
 
             user_id = export_request.user_id
+            temp_path = None
             try:
                 builder = DataExportBuilder(db=db, user_id=user_id, export_id=export_id)
                 zip_bytes = await builder.build_zip_bytes()
-                storage_key = f"exports/{export_id}.zip"
-                self.storage.save(storage_key, zip_bytes)
+
+                # Temporary local ZIP only for generation/upload; not final storage.
+                temp_path = write_temp_zip(zip_bytes)
+                storage_key = build_export_storage_key(
+                    user_id=user_id,
+                    export_id=export_id,
+                )
+                self.storage.upload(storage_key, zip_bytes)
 
                 completed_at = utc_now()
                 export_request.status = DataExportStatus.completed
@@ -154,12 +201,19 @@ class DataExportService:
                 export_request.error_message = str(exc)[:2000]
                 db.add(export_request)
                 await db.commit()
+            finally:
+                if temp_path is not None:
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    except Exception:
+                        logger.warning(
+                            "Failed deleting temporary export ZIP %s",
+                            temp_path,
+                            exc_info=True,
+                        )
 
     async def cleanup_expired_exports(self, db: AsyncSession) -> int:
-        """Mark expired completed exports and delete local ZIP files.
-
-        Returns the number of exports cleaned up.
-        """
+        """Delete expired export objects from Spaces and mark records expired."""
         now = utc_now()
         stmt = select(DataExportRequest).where(
             DataExportRequest.status == DataExportStatus.completed,
@@ -174,7 +228,8 @@ class DataExportService:
                     self.storage.delete(export_request.storage_key)
                 except Exception:
                     logger.exception(
-                        "Failed deleting storage for export %s", export_request.id
+                        "Failed deleting Spaces object for export %s",
+                        export_request.id,
                     )
             export_request.status = DataExportStatus.expired
             export_request.storage_key = None
@@ -207,7 +262,7 @@ class DataExportService:
         db: AsyncSession,
         export_request: DataExportRequest,
     ) -> None:
-        """Queue export-ready email (with ZIP attachment) for cron delivery."""
+        """Queue export-ready email (download link only) for cron delivery."""
         user = (
             await db.execute(select(User).where(User.id == export_request.user_id))
         ).scalar_one_or_none()
@@ -218,24 +273,8 @@ class DataExportService:
             )
             return
 
-        if not export_request.storage_key:
-            logger.warning(
-                "Cannot queue export email; storage_key missing for export %s",
-                export_request.id,
-            )
-            return
-
-        zip_path = self.storage.absolute_path(export_request.storage_key)
-        if zip_path is None or not zip_path.is_file():
-            logger.warning(
-                "Cannot queue export email; ZIP missing for export %s",
-                export_request.id,
-            )
-            return
-
-        base_url = export_settings.base_url_export.rstrip("/")
-        # Reference link for the export request (ZIP is attached to the email).
-        export_url = f"{base_url}/{export_request.id}"
+        base_url = email_settings.base_url.rstrip("/")
+        download_url = f"{base_url}/api/v1/me/export/{export_request.id}/download"
         expires = _ensure_aware(export_request.download_expires_at)
         expiry_text = expires.isoformat() if expires else "the retention period ends"
         completed = export_request.completed_at or utc_now()
@@ -246,9 +285,10 @@ class DataExportService:
             "Your KampuLynk data export is ready.</div>"
             '<p style="margin:0 0 14px;">Your data export has been generated successfully.</p>'
             f'<p style="margin:0 0 14px;">The ZIP archive <strong>{zip_filename}</strong> '
-            "is attached to this email.</p>"
-            f'<p style="margin:0 0 14px;">Export reference: '
-            f'<a href="{export_url}">{export_url}</a></p>'
+            "is ready for download.</p>"
+            '<p style="margin:0 0 14px;">Download your export:</p>'
+            f'<p style="margin:0 0 14px;"><a href="{download_url}">{download_url}</a></p>'
+            f'<p style="margin:0 0 14px;">Export reference: {export_request.id}</p>'
             f'<p style="margin:0;">This export is retained until {expiry_text}.</p>'
         )
         subject = "Your KampuLynk data export is ready"
@@ -258,13 +298,11 @@ class DataExportService:
             subject,
             html_content,
             purpose="Data Export Ready",
-            attachment=str(zip_path),
         )
         logger.info(
-            "Queued data-export email for %s (export_id=%s, attachment=%s)",
+            "Queued data-export email for %s (export_id=%s)",
             user.email,
             export_request.id,
-            zip_path,
         )
 
 

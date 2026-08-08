@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from uuid import uuid4
 from unittest.mock import AsyncMock, patch
 
@@ -11,19 +10,20 @@ from apps.export.cleanup import cleanup_expired_exports
 from apps.export.enums import DataExportStatus
 from apps.export.models import DataExportRequest
 from apps.export.service import DataExportService
-from apps.export.storage import LocalExportStorage
 from tests.unit.conftest import FakeScalarResult
+from tests.unit.export.test_export_service import FakeSpacesStorage
 
 
 @pytest.mark.asyncio
-async def test_cleanup_expired_exports_callable(export_tmp_path: Path):
+async def test_cleanup_expired_exports_callable():
     export_id = uuid4()
-    storage = LocalExportStorage(base_path=export_tmp_path)
-    key = f"exports/{export_id}.zip"
-    storage.save(key, b"zip")
+    user_id = uuid4()
+    key = f"exports/{user_id}/{export_id}.zip"
+    storage = FakeSpacesStorage()
+    storage.objects[key] = b"zip"
     record = DataExportRequest(
         id=export_id,
-        user_id=uuid4(),
+        user_id=user_id,
         status=DataExportStatus.completed,
         storage_key=key,
         download_expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
@@ -43,4 +43,4 @@ async def test_cleanup_expired_exports_callable(export_tmp_path: Path):
     assert cleaned == 1
     assert record.status == DataExportStatus.expired
     assert record.storage_key is None
-    assert not storage.exists(key)
+    assert key in storage.deleted

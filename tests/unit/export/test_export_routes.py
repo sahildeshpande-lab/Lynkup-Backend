@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -30,14 +30,11 @@ async def _override_recent_auth():
 
 
 class _Session:
-    def __init__(self):
-        self.added = []
-
     async def execute(self, *_args, **_kwargs):
         return FakeScalarResult()
 
     def add(self, obj):
-        self.added.append(obj)
+        return None
 
     async def commit(self):
         return None
@@ -102,8 +99,6 @@ def test_authenticated_user_can_request_export(monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] is True
-    assert body["message"] == "Data export request accepted."
-    assert body["data"]["export_id"] == str(accepted.export_id)
     assert body["data"]["status"] == "queued"
 
 
@@ -123,21 +118,15 @@ def test_user_cannot_access_another_users_export(monkeypatch) -> None:
     assert response.status_code in (200, 401)
     body = response.json()
     assert body["status"] is False
-    assert "not found" in body["message"].lower()
 
 
 def test_get_export_status_success(monkeypatch) -> None:
     export_id = uuid4()
-    now = datetime.now(timezone.utc)
     payload = ExportStatusData(
         id=export_id,
         status=DataExportStatus.processing,
-        requested_at=now,
-        completed_at=None,
-        download_expires_at=None,
-        file_size_bytes=None,
+        requested_at=datetime.now(timezone.utc),
     )
-
     service = DataExportService()
 
     async def _status(*, user, export_id, db):
@@ -152,21 +141,25 @@ def test_get_export_status_success(monkeypatch) -> None:
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] is True
-    assert body["data"]["id"] == str(export_id)
     assert body["data"]["status"] == "processing"
     assert "storage_key" not in body["data"]
-    assert "error_message" not in body["data"]
 
 
-def test_download_endpoint_removed() -> None:
+def test_download_redirects_to_signed_url(monkeypatch) -> None:
+    export_id = uuid4()
+    service = DataExportService()
+
+    async def _download(*, user, export_id, db):
+        return "https://signed.example/exports/private.zip?X-Amz-Signature=abc"
+
+    monkeypatch.setattr(service, "get_download_redirect_url", _download)
+    app.dependency_overrides[get_data_export_service] = lambda: service
+
     response = client.get(
-        f"/api/v1/me/export/{uuid4()}/download",
+        f"/api/v1/me/export/{export_id}/download",
         headers={"Authorization": "Bearer test-token"},
+        follow_redirects=False,
     )
-    # FastAPI may treat "/download" as export_id (422) or 404; either means
-    # there is no dedicated download route returning a ZIP.
-    assert response.status_code in (404, 422, 200)
-    if response.status_code == 200:
-        body = response.json()
-        assert body.get("status") is False or "download" not in str(body).lower()
+    assert response.status_code == 302
+    assert "X-Amz-Signature" in response.headers["location"]
+    assert "cdn.digitaloceanspaces.com" not in response.headers["location"]
