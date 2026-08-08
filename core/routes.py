@@ -33,5 +33,5 @@ def build_router() -> APIRouter:
     router.include_router(invitations_router)
     router.include_router(chat_router)
     router.include_router(notifications_router)
-    router.include_router(recommendation_router)
+    # router.include_router(recommendation_router)
     return router
