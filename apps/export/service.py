@@ -16,7 +16,6 @@ from apps.export.schemas import ExportRequestAcceptedData, ExportStatusData
 from apps.export.storage import ExportStorage, get_export_storage
 from common.exceptions import ApiError
 from core.database.session import async_session_factory
-from core.email.config import settings as email_settings
 from core.email_service import _queue_email, _render_email_layout
 
 logger = logging.getLogger(__name__)
@@ -234,7 +233,7 @@ class DataExportService:
             )
             return
 
-        base_url = email_settings.base_url.rstrip("/")
+        base_url = export_settings.base_url_export.rstrip("/")
         # Reference link for the export request (ZIP is attached to the email).
         export_url = f"{base_url}/{export_request.id}"
         expires = _ensure_aware(export_request.download_expires_at)

@@ -188,7 +188,7 @@ async def test_queue_ready_email_uses_base_url_and_attachment(export_tmp_path: P
     service = DataExportService(storage=storage)
 
     with patch(
-        "apps.export.service.email_settings.base_url",
+        "apps.export.service.export_settings.base_url_export",
         "https://lynkup-backend-311u.onrender.com",
     ):
         with patch(

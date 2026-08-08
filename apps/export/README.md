@@ -20,7 +20,7 @@ There is **no download HTTP endpoint**. The ZIP is emailed as an attachment.
 5. `LocalExportStorage` stores `exports/<export_id>.zip`.
 6. Status becomes `completed`.
 7. An email row is inserted into `transactional_email_log` with:
-   - HTML body (reference link `{BASE_URL}/{export_id}`)
+   - HTML body (reference link `{BASE_URL_EXPORT}/{export_id}`)
    - `attachment` = absolute path to the ZIP
    - `is_send=false`
 8. The existing email cron (`process_pending_emails`) delivers the message via SendGrid **with the ZIP attached**.
@@ -31,16 +31,18 @@ There is **no download HTTP endpoint**. The ZIP is emailed as an attachment.
 ```text
 EXPORT_STORAGE_PATH=./storage/exports
 EXPORT_RETENTION_DAYS=7
-BASE_URL=https://lynkup-backend-311u.onrender.com
+BASE_URL_EXPORT=https://lynkup-backend-311u.onrender.com
 ```
 
 Email reference link format:
 
 ```text
-{BASE_URL}/{export_id}
+{BASE_URL_EXPORT}/{export_id}
 ```
 
 Example: `https://lynkup-backend-311u.onrender.com/<uuid>`
+
+`BASE_URL_EXPORT` is separate from the general `BASE_URL` used elsewhere (email/auth/images), so Spaces CDN hosts will not accidentally become export links.
 
 ## Concurrent exports
 
