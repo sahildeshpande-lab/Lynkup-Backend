@@ -449,21 +449,49 @@ def _otp_template_details(otp_purpose: str) -> tuple[str, str]:
 
 
 def _build_otp_display_html(otp: str, brand_blue: str) -> str:
-    """Build the OTP display as a full-width dashed card with large spaced digits.
-    Works for any OTP length; digits are space-separated for clarity.
+    """Build a responsive OTP card for embedding inside a centered parent <td>.
+
+    Desktop and mobile: fluid width (100% of the OTP wrapper) with equal side
+    margins via the parent ``otp-wrapper`` and CSS rules in ``base_email.html``.
+
+    Digits are rendered as separate table cells so any OTP length (4/5/6/8)
+    works consistently across Gmail, Apple Mail, Outlook, Yahoo, and Samsung Mail.
     """
-    spaced = " ".join(escape(ch) for ch in otp)
+    digits = [escape(ch) for ch in str(otp or "")]
+
+    digit_cells = "".join(
+        (
+            '<td class="otp-digit" align="center" '
+            'style="padding:0 6px;font-size:30px;font-weight:700;color:#0F172A;'
+            "font-family:'Courier New',Courier,monospace;line-height:1;\""
+            f">{digit}</td>"
+        )
+        for digit in digits
+    )
+
+    # Outermost table spans full OTP wrapper width on desktop and mobile.
     return (
-        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 8px 0 4px;">'
+        '<table class="otp-outer-table" role="presentation" cellpadding="0" cellspacing="0" border="0" '
+        'align="center" style="margin:0 auto;border-collapse:collapse;width:100%;">'
         "<tr>"
-        f'<td class="otp-card" align="center" style="padding: 28px 20px; background-color: #F8FAFC; border: 2px dashed {brand_blue}; border-radius: 12px;">'
-        f'<div class="otp-label" style="font-size: 10px; font-weight: 600; color: {brand_blue}; letter-spacing: 1.5px; text-transform: uppercase; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; margin-bottom: 12px;"></div>'
-        f'<span class="otp-font otp-digits" style="font-size: 30px; font-weight: 700; color: #0F172A; letter-spacing: 12px; font-family: \'Courier New\', Courier, monospace; display: inline-block; padding-left: 12px;">{spaced}</span>'
+        f'<td class="otp-card" align="center" '
+        f'style="padding:24px;background-color:#F8FAFC;border:2px dashed {brand_blue};'
+        'border-radius:12px;text-align:center;width:100%;box-sizing:border-box;">'
+        f'<p class="otp-label" style="font-size:10px;font-weight:600;color:{brand_blue};'
+        "letter-spacing:2px;text-transform:uppercase;"
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
+        'margin:0 0 16px;text-align:center;">'
+        "</p>"
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+        'align="center" style="margin:0 auto;border-collapse:collapse;">'
+        "<tr>"
+        f"{digit_cells}"
+        "</tr>"
+        "</table>"
         "</td>"
         "</tr>"
         "</table>"
     )
-
 
 def build_otp_email_html(otp: str, otp_purpose: str = "email_verification") -> str:
     title, hero_text = _otp_template_details(otp_purpose)
@@ -680,7 +708,6 @@ def build_email_verified_success_html(full_name: str | None = None) -> str:
         f'<div style="font-size:16px;font-weight:700;margin-bottom:16px;">Email Verified Successfully</div>'
         f'<p style="margin:0 0 14px;">{greeting}</p>'
         f'<p style="margin:0 0 14px;">Your email address has been verified successfully.</p>'
-        f'<p style="margin:0;">You can now proceed with onboarding.</p>'
     )
     return _render_email_layout("Email Verified Successfully", body_html)
 

@@ -1,25 +1,29 @@
 from __future__ import annotations
+import logging
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 from sqlalchemy.orm import selectinload
-from apps.accounts.db_models import SecurityEventType, User, UserInstallation
+from apps.accounts.db_models import SecurityEventType, User
 from apps.profiles.db_models import Profile
 from common.enums import OnboardingStatus, RegistrationType, UserStatus, inactive_account_message
 from common.exceptions import ApiError
 from core.auth.config import settings as auth_settings
-from core.email_service import send_otp_email
 from ..schemas import ApiResponse, EmailSignupRequest, SocialAuthRequest
 from core.auth.services import verify_firebase_token
 LOGIN_EVENT_THROTTLE_SECONDS = auth_settings.login_event_throttle_seconds
 
 from .auth_service import _issue_auth_session
-from .common_service import AccountExistsException, _as_aware_utc, _display_name_from_firebase, _fetch_user_profile, _generate_otp, _hash_password, _now, _registration_type_from_firebase, assign_user_role, log_security_event
+from .common_service import AccountExistsException, _as_aware_utc, _display_name_from_firebase, _fetch_user_profile, _hash_password, _now, _registration_type_from_firebase, assign_user_role, log_security_event
 from .device_otp_service import (
     attach_otp_flags,
+    begin_otp_challenge,
+    ensure_unverified_installation,
     evaluate_device_otp_requirement,
-    send_otp_challenge,
+    upsert_user_installation,
 )
+
+logger = logging.getLogger(__name__)
 
 async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) -> User:
     firebase_uid = firebase_user["uid"]
@@ -115,79 +119,87 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
         )
     ).scalar_one()
 
-async def _upsert_user_installation(
+async def _refresh_user_topic_subscriptions_best_effort(
     db: AsyncSession,
-    user_id,
-    device_id: str,
-    now,
+    user: User,
+    *,
+    context: str,
 ) -> None:
-    from apps.accounts.db_models import UserInstallation
+    try:
+        from apps.notifications.services.topic_service import TopicService
 
-    stmt = select(UserInstallation).where(
-        UserInstallation.user_id == user_id,
-        UserInstallation.device_id == device_id,
-    )
-    installation = (await db.execute(stmt)).scalar_one_or_none()
-    if installation is None:
-        db.add(
-            UserInstallation(
-                user_id=user_id,
-                device_id=device_id,
-                platform=None,
-                app_version=None,
-                installed_at=now,
-                last_active_at=now,
-                is_active=True,
-            )
+        profile = await _fetch_user_profile(db, user)
+        if profile is not None:
+            await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
+    except Exception:
+        logger.exception(
+            "Firebase topic sync failed during social auth (%s) user_id=%s",
+            context,
+            user.id,
         )
-    else:
-        installation.last_active_at = now
-        installation.is_active = True
-        db.add(installation)
 
 
 async def _build_device_auth_session(
     db: AsyncSession,
     user: User,
-    device_id: str,
+    device_id: str | None,
+    *,
+    platform: str | None = None,
+    fcm_token: str | None = None,
 ) -> tuple[dict, str]:
     from sqlalchemy.orm import selectinload
 
+    normalized_device_id = (device_id or "").strip() or None
     installation, is_new_device, needs_otp = await evaluate_device_otp_requirement(
         db,
         user,
-        device_id,
+        normalized_device_id,
     )
 
     if needs_otp:
-        await send_otp_challenge(
+        email_sent = await begin_otp_challenge(
             db,
             user,
-            device_id,
+            normalized_device_id,
             installation=installation,
             is_new_device=is_new_device,
+            platform=platform,
+            fcm_token=fcm_token,
         )
+        await _refresh_user_topic_subscriptions_best_effort(db, user, context="otp flow")
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()
+        message = (
+            "Verification email sent. Please verify your OTP."
+            if email_sent
+            else "Please verify your OTP."
+        )
         return (
             attach_otp_flags(
                 await _issue_auth_session(user, db),
-                email_sent=True,
+                email_sent=email_sent,
                 needs_otp=True,
+                is_device_verified=False,
             ),
-            "Verification email sent. Please verify your OTP.",
+            message,
         )
 
     user.status = UserStatus.active
     user.updated_at = _now()
     db.add(user)
 
-    if installation:
-        installation.last_active_at = _now()
-        installation.is_active = True
-        db.add(installation)
+    if normalized_device_id:
+        await upsert_user_installation(
+            db,
+            user.id,
+            normalized_device_id,
+            platform=platform,
+            fcm_token=fcm_token,
+            now=_now(),
+        )
 
     await db.commit()
+    await _refresh_user_topic_subscriptions_best_effort(db, user, context="no-otp flow")
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
     return (
@@ -195,6 +207,7 @@ async def _build_device_auth_session(
             await _issue_auth_session(user, db),
             email_sent=False,
             needs_otp=False,
+            is_device_verified=True,
         ),
         "Login successful",
     )
@@ -314,7 +327,13 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
             db.add(profile)
 
         await db.flush()
-        session_data, message = await _build_device_auth_session(db, user, payload.device_id)
+        session_data, message = await _build_device_auth_session(
+            db,
+            user,
+            payload.device_id,
+            platform=payload.platform,
+            fcm_token=payload.fcm_token,
+        )
         return session_data, False, message
 
     user = User(
@@ -367,14 +386,19 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
     profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
 
-    await _upsert_user_installation(db, user.id, payload.device_id, now)
     await db.commit()
     await db.refresh(user)
 
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
 
-    session_data, message = await _build_device_auth_session(db, user, payload.device_id)
+    session_data, message = await _build_device_auth_session(
+        db,
+        user,
+        payload.device_id,
+        platform=payload.platform,
+        fcm_token=payload.fcm_token,
+    )
     return session_data, True, message
 
 async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSession) -> ApiResponse:
@@ -420,35 +444,26 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
                 profile.completeness_score = await calculate_completeness_score(existing_user_email.id, db)
                 db.add(profile)
 
-            # Ensure installation exists
-            from apps.accounts.db_models import UserInstallation
-            stmt_inst = select(UserInstallation).where(UserInstallation.user_id == existing_user_email.id, UserInstallation.device_id == payload.device_id)
-            inst = (await db.execute(stmt_inst)).scalar_one_or_none()
-            if not inst:
-                inst = UserInstallation(
-                    user_id=existing_user_email.id,
-                    device_id=payload.device_id,
-                    platform=None,
-                    app_version=None,
-                    installed_at=now,
-                    last_active_at=now,
-                    is_active=True,
+            # Ensure unverified installation exists (never mark trusted here).
+            device_id = (payload.device_id or "").strip() or None
+            if device_id:
+                await ensure_unverified_installation(
+                    db,
+                    existing_user_email.id,
+                    device_id,
+                    platform=payload.platform,
+                    fcm_token=payload.fcm_token,
+                    now=now,
                 )
-                db.add(inst)
-            else:
-                inst.last_active_at = now
-                inst.is_active = True
-                db.add(inst)
-
             await db.commit()
 
-            otp = _generate_otp()
-            existing_user_email.email_verified_at = None
-            existing_user_email.email_otp = otp
-            existing_user_email.email_otp_created_at = now
-            db.add(existing_user_email)
-            await db.commit()
-            await send_otp_email(email, otp, "email_verification")
+            email_sent = await begin_otp_challenge(
+                db,
+                existing_user_email,
+                device_id,
+                platform=payload.platform,
+                fcm_token=payload.fcm_token,
+            )
 
             await db.refresh(existing_user_email)
             if profile:
@@ -459,8 +474,9 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
 
             data = attach_otp_flags(
                 await _issue_auth_session(user, db),
-                email_sent=True,
+                email_sent=email_sent,
                 needs_otp=True,
+                is_device_verified=False,
             )
             return ApiResponse(status=True, message="Signup successful", data=data)
         else:
@@ -491,8 +507,8 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
         onboarding_status=OnboardingStatus.not_started,
         created_at=now,
         updated_at=now,
-        email_otp=_generate_otp(),
-        email_otp_created_at=now,
+        email_otp=None,
+        email_otp_created_at=None,
         email_verified_at=None,
     )
     db.add(user)
@@ -515,27 +531,27 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
 
-    # 4. Create UserInstallation record
-    from apps.accounts.db_models import UserInstallation
-    installation = UserInstallation(
-        user_id=user.id,
-        device_id=payload.device_id,
-        platform=None,
-        app_version=None,
-        installed_at=now,
-        last_active_at=now,
-        is_active=True,
-    )
-    db.add(installation)
+    # 4. Create unverified installation — never mark trusted during signup.
+    device_id = (payload.device_id or "").strip() or None
+    if device_id:
+        await ensure_unverified_installation(
+            db,
+            user.id,
+            device_id,
+            platform=payload.platform,
+            fcm_token=payload.fcm_token,
+            now=now,
+        )
+    await db.commit()
 
-    await db.commit()
-    otp = user.email_otp or _generate_otp()
-    user.email_otp = otp
-    user.email_otp_created_at = now
-    user.updated_at = now
-    db.add(user)
-    await db.commit()
-    await send_otp_email(email, otp, "email_verification")
+    email_sent = await begin_otp_challenge(
+        db,
+        user,
+        device_id,
+        is_new_device=True,
+        platform=payload.platform,
+        fcm_token=payload.fcm_token,
+    )
     await db.refresh(user)
     await db.refresh(profile)
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
@@ -543,7 +559,8 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
 
     data = attach_otp_flags(
         await _issue_auth_session(user, db),
-        email_sent=True,
+        email_sent=email_sent,
         needs_otp=True,
+        is_device_verified=False,
     )
     return ApiResponse(status=True, message="Signup successful", data=data)

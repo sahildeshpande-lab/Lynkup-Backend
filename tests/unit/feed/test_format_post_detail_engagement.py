@@ -31,6 +31,31 @@ def test_normalize_profile_visibility_private_only():
     ) == "private"
 
 
+def test_format_post_detail_author_name_falls_back_to_email():
+    post = SimpleNamespace(
+        id=uuid.uuid4(),
+        author_user_id=uuid.uuid4(),
+        state=SimpleNamespace(value="published"),
+        revision_number=1,
+        content={"caption": "hello", "visibility": "public"},
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        like_count=0,
+        repost_count=0,
+        share_count=0,
+        comment_count=0,
+        is_moderator_reviewed=False,
+        reviewed_at=None,
+        moderator_id=None,
+        attachments=[],
+    )
+    author_user = SimpleNamespace(email="author@example.com")
+
+    data = format_post_detail(post, author_user=author_user)
+
+    assert data["author_name"] == "author@example.com"
+
+
 def test_format_post_detail_includes_profile_visibility():
     post = SimpleNamespace(
         id=uuid.uuid4(),
@@ -57,6 +82,7 @@ def test_format_post_detail_includes_profile_visibility():
     )
 
     data = format_post_detail(post, author_profile=author_profile)
+    assert data["author_name"] == "Ada Lovelace"
     assert data["profile_visibility"] == "private"
 
 

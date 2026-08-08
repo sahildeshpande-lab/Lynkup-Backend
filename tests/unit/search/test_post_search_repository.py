@@ -104,6 +104,68 @@ def test_university_match_clause_ors_id_and_name():
     assert " OR " in compiled
 
 
+def test_build_search_filters_query_matches_author_major():
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.orm import aliased
+
+    from apps.accounts.db_models import User
+    from apps.profiles.db_models.profile_db_model import Profile
+
+    author_profile = aliased(Profile, name="author_profile")
+    author_user = aliased(User, name="author_user")
+    filters = repo._build_search_filters(
+        current_user_id=uuid.uuid4(),
+        connected_author_ids=set(),
+        query="computer science",
+        hashtag=None,
+        academic_interest=None,
+        university_name=None,
+        major=None,
+        minor=None,
+        country=None,
+        edu_level=None,
+        author_profile=author_profile,
+        author_user=author_user,
+    )
+    compiled = " ".join(
+        str(f.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        for f in filters
+    ).lower()
+    assert "major" in compiled
+    assert "computer science" in compiled
+
+
+def test_build_search_filters_major_filter_matches_author_major():
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.orm import aliased
+
+    from apps.accounts.db_models import User
+    from apps.profiles.db_models.profile_db_model import Profile
+
+    author_profile = aliased(Profile, name="author_profile")
+    author_user = aliased(User, name="author_user")
+    filters = repo._build_search_filters(
+        current_user_id=uuid.uuid4(),
+        connected_author_ids=set(),
+        query=None,
+        hashtag=None,
+        academic_interest=None,
+        university_name=None,
+        major="Computer Science",
+        minor=None,
+        country=None,
+        edu_level=None,
+        author_profile=author_profile,
+        author_user=author_user,
+    )
+    compiled = " ".join(
+        str(f.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        for f in filters
+    ).lower()
+    assert "major" in compiled
+    assert "computer science" in compiled
+
+
 def test_build_search_filters_query_matches_author_name():
     from sqlalchemy.dialects import postgresql
     from sqlalchemy.orm import aliased
@@ -133,10 +195,10 @@ def test_build_search_filters_query_matches_author_name():
     ).lower()
     assert "first_name" in compiled
     assert "last_name" in compiled
-    # Whole-word match via Postgres ~* + \y, not substring ilike (%term%).
+    # Names use whole-word regex (~* + \y); major/minor in the same OR use ilike.
     assert "~*" in compiled
     assert "sahil" in compiled
-    assert "%sahil%" not in compiled
+    assert "major" in compiled
 
 
 def test_word_boundary_match_escapes_regex_metacharacters():

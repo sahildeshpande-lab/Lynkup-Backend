@@ -5,9 +5,17 @@ from apps.profiles.db_models import Country, Profile, AcademicInterest, Educatio
 from apps.connections.db_models import ConnectionRequest, Connection, Follow, Block, ConnectionRecommendationSnapshot
 from apps.feed.db_models import Post, PostRevision, MediaAsset, PostAttachment, Hashtag, PostHashtag, Topic, PostTopic, LinkPreview
 from apps.engagement.db_models import PostReaction, Repost, Bookmark, ShareEvent, Comment, CommentReaction
-from apps.moderation.db_models import ModerationWordsConfig, ModerationAssignmentState
+from apps.moderation.db_models import ModerationWordsConfig, ModerationAssignmentState, ModerationHistory
 from apps.invitations.db_models import Invitation
 from apps.report.db_models import Report
+from apps.notifications.db_models import (
+    Notification,
+    NotificationCampaign,
+    NotificationCampaignAudience,
+    NotificationCategory,
+    NotificationPreference,
+    NotificationType,
+)
 
 __all__ = [
     "ConsentRecord",
@@ -49,6 +57,13 @@ __all__ = [
     "Report",
     "ModerationWordsConfig",
     "ModerationAssignmentState",
+    "ModerationHistory",
     "Invitation",
+    "NotificationType",
+    "NotificationCategory",
+    "NotificationPreference",
+    "NotificationCampaign",
+    "NotificationCampaignAudience",
+    "Notification"
 ]
 

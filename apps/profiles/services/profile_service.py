@@ -8,12 +8,49 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
 from common.enums import UserStatus, OnboardingStatus, EducationLevel
 
+from apps.profiles.normalization import normalize_major_minor
+
 from .completeness_service import calculate_completeness_score
 from .interest_service import _resolve_academic_interest_ids
 from .response_service import build_user_base_response
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def _apply_country_id_update(
+    profile,
+    country_id: str | None,
+    db: AsyncSession,
+) -> None:
+    from fastapi import HTTPException, status
+    from sqlmodel import select
+    from apps.profiles.db_models.country_db_model import Country
+
+    if country_id is None:
+        return
+
+    if country_id:
+        try:
+            country_uuid = UUID(str(country_id))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid country_id",
+            ) from exc
+
+        country = (
+            await db.execute(select(Country).where(Country.id == country_uuid))
+        ).scalar_one_or_none()
+        if not country:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid country_id",
+            )
+        profile.country_id = country_uuid
+    else:
+        profile.country_id = None
+
 
 async def get_profile_me(user: User, db: AsyncSession) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
@@ -26,7 +63,7 @@ async def get_profile_me(user: User, db: AsyncSession) -> dict:
         db.add(profile)
         await db.commit()
         await db.refresh(profile)
-    user_data = await build_user_base_response(user, profile, db)
+    user_data = await build_user_base_response(user, profile, db, viewer_user_id=user.id)
     return {"user": user_data}
 
 async def update_profile_me(
@@ -77,7 +114,7 @@ async def update_profile_me(
     # Major
     #
     if payload.major is not None:
-        profile.major = payload.major
+        profile.major = normalize_major_minor(payload.major)
 
     #
     # University
@@ -92,31 +129,6 @@ async def update_profile_me(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid universityId"
             )
-
-    #
-    # Country
-    #
-    if payload.countryId is not None:
-        if payload.countryId:
-            try:
-                country_uuid = UUID(payload.countryId)
-            except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid countryId",
-                )
-            from apps.profiles.db_models.country_db_model import Country
-            country = (
-                await db.execute(select(Country).where(Country.id == country_uuid))
-            ).scalar_one_or_none()
-            if not country:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid countryId",
-                )
-            profile.country_id = country_uuid
-        else:
-            profile.country_id = None
 
     current_user.onboarding_status = (
         OnboardingStatus.completed
@@ -141,6 +153,13 @@ async def update_profile_me(
     await db.refresh(current_user)
     await db.refresh(profile)
 
+    from apps.recommendations.services.post_keyword_service import (
+        refresh_profile_extracted_keywords_best_effort,
+    )
+    await refresh_profile_extracted_keywords_best_effort(db, user_id=current_user.id)
+
+    
+
     # Temporarily disabled: profile updated email
     # try:
     #     import logging
@@ -157,7 +176,8 @@ async def update_profile_me(
     user_data = await build_user_base_response(
         current_user,
         profile,
-        db
+        db,
+        viewer_user_id=current_user.id,
     )
 
     return {
@@ -178,7 +198,7 @@ async def delete_user_me(user: User, db: AsyncSession) -> dict:
         profile = (
             await db.execute(select(Profile).where(Profile.user_id == user.id))
         ).scalar_one_or_none()
-        user_data = await build_user_base_response(user, profile, db)
+        user_data = await build_user_base_response(user, profile, db, viewer_user_id=user.id)
         return {
             "deleted": True,
             "status": user.status.value if hasattr(user.status, "value") else str(user.status),
@@ -221,7 +241,7 @@ async def delete_user_me(user: User, db: AsyncSession) -> dict:
     profile = (
         await db.execute(select(Profile).where(Profile.user_id == user.id))
     ).scalar_one_or_none()
-    user_data = await build_user_base_response(user, profile, db)
+    user_data = await build_user_base_response(user, profile, db, viewer_user_id=user.id)
     return {
         "deleted": True,
         "status": user.status.value if hasattr(user.status, "value") else str(user.status),
@@ -296,7 +316,9 @@ async def get_my_profile_service(
         await db.commit()
         await db.refresh(profile)
 
-    user_data = await build_user_base_response(target_user, profile, db)
+    user_data = await build_user_base_response(
+        target_user, profile, db, viewer_user_id=user.id
+    )
 
     # Inject relationship flags when viewing another user's profile
     if effective_user_id != user.id:
@@ -323,6 +345,11 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
     from sqlmodel import select
     from core.images import file_exists, normalize_image_name
     from fastapi import HTTPException
+    import logging
+
+    from apps.notifications.services.topic_service import TopicService
+
+    profile_logger = logging.getLogger(__name__)
 
     stmt = select(Profile).where(Profile.user_id == user.id)
     profile = (await db.execute(stmt)).scalar_one_or_none()
@@ -331,14 +358,24 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
         db.add(profile)
         await db.flush()
 
+    topic_fields_changed = TopicService.affects_topics(payload)
+    old_topics: set[str] = set()
+    if topic_fields_changed:
+        old_topics = await TopicService.capture_topics(db, profile)
+
     if payload.firstName is not None:
         profile.first_name = payload.firstName
     if payload.lastName is not None:
         profile.last_name = payload.lastName
+    stream_sync_needed = (
+        payload.firstName is not None
+        or payload.lastName is not None
+        or "profile_photo_key" in payload.model_fields_set
+    )
     if payload.major is not None:
-        profile.major = payload.major
+        profile.major = normalize_major_minor(payload.major)
     if payload.minor is not None:
-        profile.minor = payload.minor
+        profile.minor = normalize_major_minor(payload.minor)
     if payload.bio is not None:
         profile.bio = payload.bio
 
@@ -352,22 +389,7 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
         else:
             profile.university_id = None
 
-    if payload.country_id is not None:
-        if payload.country_id:
-            try:
-                from uuid import UUID as _UUID
-                country_uuid = _UUID(str(payload.country_id))
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid country_id")
-            from apps.profiles.db_models.country_db_model import Country
-            country = (
-                await db.execute(select(Country).where(Country.id == country_uuid))
-            ).scalar_one_or_none()
-            if not country:
-                raise HTTPException(status_code=400, detail="Invalid country_id")
-            profile.country_id = country_uuid
-        else:
-            profile.country_id = None
+    await _apply_country_id_update(profile, payload.country_id, db)
 
     if payload.education_level_id is not None:
         from common.enums import EducationLevel
@@ -403,6 +425,25 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
     db.add(profile)
     await db.commit()
     await db.refresh(profile)
+
+    from apps.recommendations.services.post_keyword_service import (
+        refresh_profile_extracted_keywords_best_effort,
+    )
+    await refresh_profile_extracted_keywords_best_effort(db, user_id=user.id)
+
+    if stream_sync_needed:
+        from apps.chat.service import sync_stream_user_on_auth
+
+        # Best-effort: missing Stream credentials must not fail profile updates.
+        await sync_stream_user_on_auth(user, db)
+
+    if topic_fields_changed:
+        await TopicService.sync_user_topics(
+            db,
+            user.id,
+            old_topics=old_topics,
+            profile=profile,
+        )
 
     # Temporarily disabled: profile updated email
     # try:
@@ -458,6 +499,7 @@ async def update_user_profile_by_admin_service(
     from apps.accounts.db_models import User
     from apps.profiles.db_models.profile_db_model import Profile
     from core.images import file_exists, normalize_image_name
+    from apps.notifications.services.topic_service import TopicService
 
     # 1. Fetch user
     user_uuid = UUID(str(user_id)) if isinstance(user_id, str) else user_id
@@ -477,15 +519,25 @@ async def update_user_profile_by_admin_service(
         db.add(profile)
         await db.flush()
 
+    topic_fields_changed = TopicService.affects_topics(payload)
+    old_topics: set[str] = set()
+    if topic_fields_changed:
+        old_topics = await TopicService.capture_topics(db, profile)
+
     # 3. Apply updates
     if payload.firstName is not None:
         profile.first_name = payload.firstName
     if payload.lastName is not None:
         profile.last_name = payload.lastName
+    stream_sync_needed = (
+        payload.firstName is not None
+        or payload.lastName is not None
+        or payload.profile_photo_key is not None
+    )
     if payload.major is not None:
-        profile.major = payload.major
+        profile.major = normalize_major_minor(payload.major)
     if payload.minor is not None:
-        profile.minor = payload.minor
+        profile.minor = normalize_major_minor(payload.minor)
     if payload.bio is not None:
         profile.bio = payload.bio
 
@@ -501,27 +553,7 @@ async def update_user_profile_by_admin_service(
         else:
             profile.university_id = None
 
-    if payload.country_id is not None:
-        if payload.country_id:
-            try:
-                country_uuid = UUID(str(payload.country_id))
-            except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid country_id",
-                )
-            from apps.profiles.db_models.country_db_model import Country
-            country = (
-                await db.execute(select(Country).where(Country.id == country_uuid))
-            ).scalar_one_or_none()
-            if not country:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid country_id",
-                )
-            profile.country_id = country_uuid
-        else:
-            profile.country_id = None
+    await _apply_country_id_update(profile, payload.country_id, db)
 
     if payload.education_level_id is not None:
         from common.enums import EducationLevel
@@ -566,6 +598,24 @@ async def update_user_profile_by_admin_service(
     db.add(profile)
     await db.commit()
     await db.refresh(profile)
+
+    from apps.recommendations.services.post_keyword_service import (
+        refresh_profile_extracted_keywords_best_effort,
+    )
+    await refresh_profile_extracted_keywords_best_effort(db, user_id=user.id)
+    if stream_sync_needed:
+        from apps.chat.service import sync_stream_user_on_auth
+
+        # Best-effort: missing Stream credentials must not fail profile updates.
+        await sync_stream_user_on_auth(user, db)
+
+    if topic_fields_changed:
+        await TopicService.sync_user_topics(
+            db,
+            user.id,
+            old_topics=old_topics,
+            profile=profile,
+        )
 
     # Temporarily disabled: profile updated email
     # try:

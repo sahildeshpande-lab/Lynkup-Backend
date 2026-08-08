@@ -14,7 +14,7 @@ from apps.feed.db_models import Hashtag, Post, PostAttachment, PostHashtag
 from apps.profiles.db_models import Country, Profile
 from apps.profiles.db_models.academic_interests_db_model import AcademicInterest
 from apps.profiles.db_models.university_db_model import University
-from common.enums import EducationLevel, PostState, ProfileVisibility
+from common.enums import EducationLevel, FEED_VISIBLE_POST_STATES, ProfileVisibility
 from common.user_visibility import visible_user_filters
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -316,6 +316,15 @@ def _academic_interest_match_clause(author_profile, values: list[str]):
     )
 
 
+def _program_field_match_clause(column, value: str | None):
+    """Case-insensitive major/minor match (supports partial phrases)."""
+    term = (value or "").strip()
+    if not term:
+        return None
+    escaped = _escape_like_exact(term)
+    return column.ilike(f"%{escaped}%", escape="\\")
+
+
 def _build_search_filters(
     *,
     current_user_id: UUID,
@@ -332,7 +341,7 @@ def _build_search_filters(
     author_user,
 ):
     filters = [
-        Post.state == PostState.published,
+        Post.state.in_(FEED_VISIBLE_POST_STATES),
         Post.author_user_id != current_user_id,
         *visible_user_filters(author_user),
     ]
@@ -378,15 +387,20 @@ def _build_search_filters(
             " ",
             func.coalesce(author_profile.last_name, ""),
         )
-        filters.append(
-            or_(
-                _word_boundary_match(Post.content["caption"].astext, term),
-                _word_boundary_match(Post.content["content_html"].astext, term),
-                _word_boundary_match(author_profile.first_name, term),
-                _word_boundary_match(author_profile.last_name, term),
-                _word_boundary_match(author_full_name, term),
-            )
-        )
+        query_clauses = [
+            _word_boundary_match(Post.content["caption"].astext, term),
+            _word_boundary_match(Post.content["content_html"].astext, term),
+            _word_boundary_match(author_profile.first_name, term),
+            _word_boundary_match(author_profile.last_name, term),
+            _word_boundary_match(author_full_name, term),
+        ]
+        major_clause = _program_field_match_clause(author_profile.major, term)
+        if major_clause is not None:
+            query_clauses.append(major_clause)
+        minor_clause = _program_field_match_clause(author_profile.minor, term)
+        if minor_clause is not None:
+            query_clauses.append(minor_clause)
+        filters.append(or_(*query_clauses))
 
     hashtag_values = _split_filter_values(hashtag, split_whitespace=True)
     hashtag_clause = _hashtag_match_clause(hashtag_values)
@@ -417,11 +431,13 @@ def _build_search_filters(
     if university_clause is not None:
         filters.append(university_clause)
 
-    if major and major.strip():
-        filters.append(author_profile.major.ilike(f"%{major.strip()}%"))
+    major_clause = _program_field_match_clause(author_profile.major, major)
+    if major_clause is not None:
+        filters.append(major_clause)
 
-    if minor and minor.strip():
-        filters.append(author_profile.minor.ilike(f"%{minor.strip()}%"))
+    minor_clause = _program_field_match_clause(author_profile.minor, minor)
+    if minor_clause is not None:
+        filters.append(minor_clause)
 
     # Author-profile country (OR across selected countries).
     country_clause = _country_match_clause(

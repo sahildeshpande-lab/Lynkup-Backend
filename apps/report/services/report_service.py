@@ -30,6 +30,7 @@ from apps.profiles.services import build_user_base_response
 from apps.report.db_models import Report
 from apps.report.repositories.report_repository import (
     count_reported_entities,
+    count_reported_entities_summary_by_status,
     count_reports as count_report_rows,
     count_reports_by_entity_keys,
     create_report,
@@ -54,6 +55,7 @@ from apps.report.schemas import (
     ReportedEntityItem,
     ReportedEntityListData,
     ReportedEntityListResponse,
+    ReportStatusSummary,
     is_report_reviewed,
 )
 from common.enums import PostState, ReportEntityType, ReportStatus, UserStatus
@@ -565,6 +567,13 @@ async def get_reported_entities(
         status=status,
         moderator_id=moderator_id,
     )
+    summary_counts = await count_reported_entities_summary_by_status(
+        db,
+        entity_type=entity_type,
+        moderator_id=moderator_id,
+    )
+    summary = ReportStatusSummary(**summary_counts)
+    total = summary.under_review + summary.actioned + summary.rejected
 
     entity_ids = [row["entity_id"] for row in rows]
     entities = await _load_entities_for_queue(
@@ -619,6 +628,8 @@ async def get_reported_entities(
         message="Reported entities fetched successfully.",
         data=ReportedEntityListData(
             items=paginated.items,
+            summary=summary,
+            total=total,
             page=paginated.page,
             pageSize=paginated.pageSize,
             totalItems=paginated.totalItems,
@@ -694,12 +705,34 @@ async def _apply_actioned_report_to_entity(
         ).scalar_one_or_none()
         if post is None:
             return "Reported post not found"
+
+        counted_states = (PostState.published, PostState.reinstate)
+        was_counted = post.state in counted_states
+
         post.state = PostState.flagged
         post.moderator_id = moderator_id
         post.is_moderator_reviewed = True
         post.reviewed_at = datetime.now(timezone.utc)
         post.updated_at = datetime.now(timezone.utc)
         db.add(post)
+
+        if was_counted:
+            from apps.profiles.services.profile_stats_service import (
+                decrement_posts_count_for_user,
+            )
+
+            await decrement_posts_count_for_user(db, post.author_user_id)
+
+        from apps.moderation.services import record_moderation_history
+
+        await record_moderation_history(
+            db,
+            entity_type=ReportEntityType.post,
+            entity_id=post.id,
+            action="flagged",
+            moderator_id=moderator_id,
+            comment=None,
+        )
         return None
 
     if report.entity_type == ReportEntityType.comment:
@@ -725,6 +758,17 @@ async def _apply_actioned_report_to_entity(
         user.status = UserStatus.suspended
         user.updated_at = datetime.now(timezone.utc)
         db.add(user)
+
+        from apps.moderation.services import record_moderation_history
+
+        await record_moderation_history(
+            db,
+            entity_type=ReportEntityType.user,
+            entity_id=user.id,
+            action="suspended",
+            moderator_id=moderator_id,
+            comment=None,
+        )
 
         if user.firebase_uid:
             try:

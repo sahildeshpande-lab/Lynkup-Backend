@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from entrypoints.api import app
 from core.database.session import get_session
-from core.security.auth import get_current_app_user, get_current_moderator
+from core.security.auth import get_current_app_user, get_current_moderator, get_current_moderator_or_viewer
 from apps.accounts.db_models import User
 from common.schemas import ApiResponse
 from apps.report.schemas import (
@@ -48,12 +48,14 @@ def setup_module() -> None:
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_app_user] = _mock_current_user
     app.dependency_overrides[get_current_moderator] = _mock_current_moderator
+    app.dependency_overrides[get_current_moderator_or_viewer] = _mock_current_moderator
 
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_app_user, None)
     app.dependency_overrides.pop(get_current_moderator, None)
+    app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
 
 
 def test_post_report_success():
@@ -105,6 +107,12 @@ def test_get_reports_admin_success():
 def test_get_reported_entities_admin_success():
     mock_data = {
         "items": [],
+        "summary": {
+            "under_review": 0,
+            "actioned": 0,
+            "rejected": 0,
+        },
+        "total": 0,
         "page": 1,
         "pageSize": 20,
         "totalItems": 0,
@@ -194,6 +202,7 @@ def test_admin_routes_unauthorized():
         raise ApiError("Insufficient permissions")
 
     app.dependency_overrides[get_current_moderator] = _mock_unauthorized_moderator
+    app.dependency_overrides[get_current_moderator_or_viewer] = _mock_unauthorized_moderator
     try:
         response = client.get(
             "/api/v1/admin/reports",
@@ -206,3 +215,4 @@ def test_admin_routes_unauthorized():
         assert "Insufficient permissions" in response.json()["message"]
     finally:
         app.dependency_overrides[get_current_moderator] = _mock_current_moderator
+        app.dependency_overrides[get_current_moderator_or_viewer] = _mock_current_moderator

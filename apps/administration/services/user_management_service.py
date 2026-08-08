@@ -574,14 +574,21 @@ async def admin_edit_profile(
 async def admin_update_user_status(
     user_id: str,
     new_status: AdminUserStatus,
-    db: AsyncSession
+    db: AsyncSession,
+    *,
+    moderator_id: UUID | None = None,
+    comment: str | None = None,
 ) -> dict:
+    from apps.moderation.services import record_moderation_history
+    from apps.notifications.services import notify_account_status
+    from common.enums import ReportEntityType
     from core.auth.services import (
         disable_firebase_user,
-        enable_firebase_user
+        enable_firebase_user,
     )
 
     user_uuid = _coerce_uuid(user_id)
+    target_status = UserStatus(new_status.value)
 
     user = (
         await db.execute(
@@ -597,32 +604,55 @@ async def admin_update_user_status(
             detail="User not found"
         )
 
-    # Check BEFORE updating
-    already_same_status = user.status == new_status
-
+    already_same_status = user.status == target_status
     if already_same_status:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"User is already {new_status.value}",
         )
 
-    if not already_same_status:
-        user.status = new_status
-        user.updated_at = datetime.now(timezone.utc)
+    user.status = target_status
+    user.updated_at = datetime.now(timezone.utc)
 
-        await db.commit()
-        await db.refresh(user)
+    # 1) Audit trail (note lives on moderation_history.comment — not on users)
+    await record_moderation_history(
+        db,
+        entity_type=ReportEntityType.user,
+        entity_id=user.id,
+        action=new_status.value,
+        moderator_id=moderator_id,
+        comment=comment,
+    )
+    await db.commit()
+    await db.refresh(user)
 
-        firebase_error = None
+    # 2) Notify while the account can still receive push, then lock/unlock auth
+    try:
+        await notify_account_status(
+            db,
+            user_id=user.id,
+            status=new_status.value,
+            reason=comment,
+            sender_user_id=moderator_id,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to notify account status for user_id=%s status=%s",
+            user.id,
+            new_status.value,
+        )
 
-        if user.firebase_uid:
-            try:
-                if new_status == AdminUserStatus.active:
-                    enable_firebase_user(user.firebase_uid)
-                else:
-                    disable_firebase_user(user.firebase_uid)
-            except Exception as e:
-                firebase_error = str(e)
+    # 3) Firebase enable/disable last so push delivery is not cut off early
+    firebase_error = None
+    if user.firebase_uid:
+        try:
+            if new_status == AdminUserStatus.active:
+                enable_firebase_user(user.firebase_uid)
+            else:
+                disable_firebase_user(user.firebase_uid)
+        except Exception as e:
+            firebase_error = str(e)
+
     profile = (
         await db.execute(
             select(Profile)

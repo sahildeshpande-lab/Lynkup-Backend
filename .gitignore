@@ -18,6 +18,8 @@ credentials/
 .env.*
 !.env.example
 
+*.p8
+
 .DS_Store
 Thumbs.db
 

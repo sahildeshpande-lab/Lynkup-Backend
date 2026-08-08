@@ -112,7 +112,7 @@ async def export_users(
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return ApiResponse(message="users exported", data=await services.export_users(page, pageSize, db))
 
@@ -123,7 +123,7 @@ async def list_moderators(
     pageSize: int | None = Query(default=None, ge=1, le=200),
     search: str | None = Query(default=None, description="Search across university, name, or email"),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return ApiResponse(
         message="moderators listed",
@@ -137,7 +137,7 @@ async def list_viewers(
     pageSize: int | None = Query(default=None, ge=1, le=200),
     search: str | None = Query(default=None, description="Search across university, name, or email"),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return ApiResponse(
         message="viewers listed",
@@ -161,7 +161,7 @@ async def create_user_by_admin(
 async def get_user_by_admin(
     userId: UUID,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return ApiResponse(message="user fetched", data=await services.admin_get_user(userId, db))
 
@@ -185,13 +185,14 @@ async def update_user_status_by_admin(
     db: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_moderator),
 ) -> ApiResponse:
-    _ = current_user
     return ApiResponse(
         message=f"user {payload.status.value} by admin",
         data=await services.admin_update_user_status(
             str(userId),
             payload.status,
-            db
+            db,
+            moderator_id=current_user.id,
+            comment=payload.note,
         )
     )
 
@@ -290,9 +291,9 @@ async def list_processing_posts(
 
 @router.get("/admin/posts/reviewed", response_model=ApiResponse)
 async def list_reviewed_posts(
-    status: Literal["published", "flagged", "rejected", "reinstate"] | None = Query(
+    status: Literal["published", "flagged", "rejected", "reinstate", "escalate"] | None = Query(
         default=None,
-        description="Filter reviewed posts by status: published, flagged, rejected, reinstate",
+        description="Filter reviewed posts by status: published, flagged, rejected, reinstate, escalate",
     ),
     moderator_id: str | None = Query(
         default=None,
@@ -301,7 +302,7 @@ async def list_reviewed_posts(
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_moderator),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     from apps.feed.services import list_reviewed_posts_by_state_service
     from common.exceptions import ApiError
@@ -362,23 +363,32 @@ async def admin_publish_or_flag_post(
     current_user=Depends(get_current_moderator),
 ) -> ApiResponse:
     """
-    Moderate a post by setting its state: published, flagged, rejected, or reinstate.
+    Moderate a post by setting its state: published, flagged, rejected (hard delete),
+    reinstate, or escalate.
     """
     from apps.feed.services import admin_publish_post_service, format_post_detail
-    post = await admin_publish_post_service(
+    result = await admin_publish_post_service(
         post_id=payload.post_id,
         status=payload.status,
         admin_user_id=current_user.id,
-        db=db
+        db=db,
+        notes=payload.notes,
     )
     _status_messages = {
         "published": "Post published successfully",
         "flagged": "Post flagged successfully",
-        "rejected": "Post rejected successfully",
+        "rejected": "Post rejected and deleted successfully",
         "reinstate": "Post reinstated successfully",
+        "escalate": "Post escalated to senior admin successfully",
     }
+    if payload.status == "rejected":
+        return ApiResponse(
+            status=True,
+            message=_status_messages["rejected"],
+            data=result,
+        )
     return ApiResponse(
         status=True,
         message=_status_messages.get(payload.status, "Post updated successfully"),
-        data=format_post_detail(post, viewer_user_id=current_user.id),
+        data=format_post_detail(result, viewer_user_id=current_user.id),
     )

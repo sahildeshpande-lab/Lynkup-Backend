@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, Integer, Enum, Boolean
+from sqlalchemy import Column, DateTime, Integer, Enum, Boolean, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel, Relationship
@@ -30,7 +30,6 @@ class Post(SQLModel, table=True):
         default=False,
         sa_column=Column(Boolean, nullable=False, server_default="false"),
     )
-    
     is_moderator_reviewed: bool = Field(
         default=False,
         sa_column=Column(Boolean, nullable=False, server_default="false"),
@@ -45,18 +44,30 @@ class Post(SQLModel, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    moderation_notes: str | None = Field(
+        default=None,
+        sa_column=Column(Text, nullable=True),
+    )
     like_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
     repost_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
     share_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
-    comment_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))    
+    comment_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
+    extracted_keywords: dict | None = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
+    keywords_updated_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
     created_at: datetime = Field(
-        default_factory=utc_now,
-        sa_column=Column(DateTime(timezone=True), nullable=False),
-    )
+            default_factory=utc_now,
+            sa_column=Column(DateTime(timezone=True), nullable=False),
+        )
     updated_at: datetime = Field(
-        default_factory=utc_now,
-        sa_column=Column(DateTime(timezone=True), nullable=False),
-    )
+            default_factory=utc_now,
+            sa_column=Column(DateTime(timezone=True), nullable=False),
+        )
 
     attachments: List["PostAttachment"] = Relationship(
         sa_relationship=relationship("PostAttachment", back_populates="post", cascade="all, delete-orphan", lazy="selectin")

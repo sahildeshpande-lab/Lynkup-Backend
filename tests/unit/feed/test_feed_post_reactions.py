@@ -22,8 +22,10 @@ def _reaction(reaction_type: ReactionType = ReactionType.like):
 
 
 def _profile():
+    user_id = uuid.uuid4()
     return SimpleNamespace(
         id=uuid.uuid4(),
+        user_id=user_id,
         first_name="test012",
         last_name="",
         profile_photo_url=None,
@@ -46,6 +48,7 @@ def test_build_post_reactions_from_rows_groups_latest_by_type():
     assert len(grouped.LIKE) == 1
     assert len(grouped.CELEBRATE) == 1
     assert grouped.LIKE[0].first_name == "test012"
+    assert grouped.LIKE[0].profile_id == profile.user_id
     assert grouped.LIKE[0].reaction_type == "LIKE"
     assert grouped.LIKE[0].reacted_at == datetime(2026, 7, 14, 9, 5, 15, tzinfo=timezone.utc)
 

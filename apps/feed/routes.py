@@ -20,6 +20,7 @@ from apps.feed.services import (
     edit_post_service,
     publish_post_service,
     get_post_service,
+    build_post_detail_response,
     delete_post_service,
     list_draft_posts_service,
     delete_draft_post_service,
@@ -27,6 +28,7 @@ from apps.feed.services import (
     get_profile_visibility_block_message,
     get_feed_service,
     format_post_detail,
+    list_post_revisions_service,
 )
 
 router = APIRouter(tags=["6] Feed / Posts"])
@@ -88,9 +90,30 @@ async def get_post(
         user_id=current_user.id,
         db=db
     )
+    post_data = await build_post_detail_response(
+        db,
+        post,
+        viewer_user_id=current_user.id,
+    )
     return success_response(
         "Post retrieved successfully",
-        format_post_detail(post, viewer_user_id=current_user.id),
+        post_data,
+        response_cls=ApiResponse,
+    )
+
+
+@router.get("/postrevision", response_model=ApiResponse)
+async def list_post_revisions(
+    post_id: UUID = Query(..., description="Post id to fetch content revisions for"),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    db: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """Return every content revision snapshot for a post (newest first)."""
+    _ = current_user
+    data = await list_post_revisions_service(db, post_id)
+    return success_response(
+        "Post revisions fetched successfully",
+        data,
         response_cls=ApiResponse,
     )
 
@@ -132,8 +155,12 @@ async def list_user_posts(
     user_id: UUID | None = Query(default=None, description="Filter posts by user id"),
     state: str = Query(
         default="published",
-        description="Filter posts by state",
-        enum=["published", "processing", "flagged", "draft"],
+        description=(
+            "Default (published): published + reinstate. "
+            "Owner filters: flagged or processing return only that state. "
+            "draft returns drafts only."
+        ),
+        enum=["published", "flagged", "processing", "draft"],
     ),
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),

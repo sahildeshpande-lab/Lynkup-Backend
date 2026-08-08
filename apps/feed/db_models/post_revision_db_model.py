@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, Integer, JSON
+from sqlalchemy import Boolean, Column, DateTime, JSON
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel, Relationship
 
@@ -20,6 +20,10 @@ class PostRevision(SQLModel, table=True):
     editor_user_id: UUID = Field(foreign_key="users.id", nullable=False, index=True)
     content: dict | None = Field(default=None, sa_column=Column(JSON))
     media: list[dict] | None = Field(default=None, sa_column=Column(JSON))
+    triggered_moderation_review: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default="false"),
+    )
     created_at: datetime = Field(
         default_factory=utc_now,
         sa_column=Column(DateTime(timezone=True), nullable=False),

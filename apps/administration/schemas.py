@@ -4,9 +4,9 @@ from datetime import datetime
 from typing import Any, Optional, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
+from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator, model_validator
 
-from common.enums import Role,AdminUserStatus
+from common.enums import Role, AdminUserStatus
 
 
 from common.schemas import ApiResponse
@@ -34,6 +34,26 @@ class AdminDeleteUsersRequest(BaseModel):
 
 class AdminUserStatusRequest(BaseModel):
     status: AdminUserStatus
+    note: str | None = Field(
+        default=None,
+        max_length=5000,
+        description="Required reason when suspending or banning a user.",
+    )
+
+    @field_validator("note")
+    @classmethod
+    def normalize_note(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @model_validator(mode="after")
+    def require_note_for_restrictive_status(self) -> "AdminUserStatusRequest":
+        if self.status in (AdminUserStatus.suspended, AdminUserStatus.banned) and not self.note:
+            raise ValueError("note is required when status is suspended or banned")
+        return self
+
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -140,5 +160,47 @@ class AdminResetPasswordRequest(BaseModel):
 
 class AdminPublishPostRequest(BaseModel):
     post_id: UUID
-    status: Literal["published", "flagged", "rejected", "reinstate"] = "published"
+    status: Literal[
+        "published", "flagged", "rejected", "reinstate", "escalate"
+    ] = "published"
+    notes: str | None = Field(
+        default=None,
+        max_length=5000,
+        description="Optional moderation notes.",
+    )
+
+
+class RecommendationSettingsResponse(BaseModel):
+    is_enabled: bool
+    generation_frequency_days: int
+    max_recommendations: int
+    # GET returns admin full name; PATCH still returns UUID.
+    updated_by: UUID | str | None
+    updated_at: datetime | None
+    created_at: datetime | None = None
+
+
+class RecommendationSettingsChangeItem(BaseModel):
+    field: str
+    previous_value: Any
+    new_value: Any
+
+
+class RecommendationSettingsHistoryItem(BaseModel):
+    id: UUID
+    updated_by: str | None = None
+    updated_at: datetime | None
+    changes: list[RecommendationSettingsChangeItem]
+
+
+class RecommendationSettingsWithHistoryResponse(BaseModel):
+    current_settings: RecommendationSettingsResponse
+    history: list[RecommendationSettingsHistoryItem]
+
+
+class RecommendationSettingsUpdateRequest(BaseModel):
+    # All fields optional; only provided fields are updated.
+    is_enabled: bool | None = None
+    generation_frequency_days: int | None = Field(default=None, ge=1, le=365)
+    max_recommendations: int | None = Field(default=None, ge=1, le=50)
 

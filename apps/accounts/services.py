@@ -755,9 +755,12 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     if needs_otp:
         now = _now()
         otp = _generate_otp()
+        already_active = user.status == UserStatus.active
         user.email_otp = otp
         user.email_otp_created_at = now
-        user.status = UserStatus.pending
+        # Never downgrade an active account back to pending.
+        if not already_active:
+            user.status = UserStatus.pending
         user.updated_at = now
         db.add(user)
 
@@ -996,6 +999,22 @@ async def logout(
     ).scalar_one_or_none()
 
     if installation:
+        fcm_token = (installation.fcm_token or "").strip()
+        if fcm_token:
+            try:
+                from apps.notifications.services.topic_service import TopicService
+
+                await TopicService.unsubscribe_device_from_user_topics(
+                    db,
+                    user.id,
+                    fcm_token=fcm_token,
+                )
+            except Exception:
+                logger.exception(
+                    "Topic unsubscribe failed during logout user_id=%s",
+                    user.id,
+                )
+        installation.fcm_token = None
         installation.is_active = False
         installation.last_active_at = _now()
         db.add(installation)
@@ -1035,8 +1054,7 @@ async def logout_all(current_user: User, db: AsyncSession) -> dict:
     rows = (await db.execute(select(RefreshToken).where(RefreshToken.user_id == current_user.id, RefreshToken.revoked_at == None))).scalars().all()
     for row in rows:
         await _revoke_refresh_token_row(db, row)
-        
-    current_user.status = UserStatus.pending
+
     current_user.updated_at = _now()
     db.add(current_user)
     await db.commit()

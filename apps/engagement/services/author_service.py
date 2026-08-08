@@ -11,7 +11,7 @@ def format_engagement_author(
     university: University | None,
 ) -> EngagementAuthor:
     return EngagementAuthor(
-        profile_id=profile.id if profile else None,
+        profile_id=profile.user_id if profile else None,
         first_name=profile.first_name if profile else None,
         last_name=profile.last_name if profile else None,
         university=university.name if university else None,

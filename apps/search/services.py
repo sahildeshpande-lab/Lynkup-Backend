@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.profiles.db_models import Country, University
-from common.pagination import build_paginated_response
+from apps.profiles.normalization import (
+    collect_normalized_program_names,
+    normalize_named_program_list,
+)
+from common.pagination import build_paginated_response, paginate_items
 
 from .schemas import UniversitySearchParams
 
@@ -56,8 +60,8 @@ async def search_universities(params: UniversitySearchParams, db: AsyncSession) 
             "country": country_name or "Unknown",
             "slug": university.slug,
             "website": university.website,
-            "major": university.major,
-            "minor": university.minor,
+            "major": normalize_named_program_list(university.major),
+            "minor": normalize_named_program_list(university.minor),
             "academic_program": university.academic_program,
         }
         for university, country_name in rows
@@ -213,15 +217,29 @@ async def _get_education_levels_with_interests(
     ]
 
 
-async def _get_allowed_countries(
-    db: AsyncSession,
-    *,
+async def list_countries(
+    query: Optional[str],
     page: int | None,
     page_size: int | None,
+    db: AsyncSession,
 ) -> dict:
-    """Return all countries from the countries table."""
+    """Return countries from the countries table, optionally filtered by name/iso_code."""
+    filters = []
+    if query and query.strip():
+        needle = f"%{query.strip()}%"
+        filters.append(
+            or_(
+                Country.name.ilike(needle),
+                Country.iso_code.ilike(needle),
+            )
+        )
+
     count_stmt = select(func.count()).select_from(Country)
     stmt = select(Country).order_by(Country.name.asc())
+    if filters:
+        count_stmt = count_stmt.where(*filters)
+        stmt = stmt.where(*filters)
+
     total_items = int((await db.execute(count_stmt)).scalar_one())
 
     if page is not None and page_size is not None:
@@ -283,13 +301,98 @@ async def get_academics_info(
     db: AsyncSession,
 ) -> dict:
     education_levels = await _get_education_levels_with_interests(db, query=query)
-    countries_data = await _get_allowed_countries(db, page=page, page_size=page_size)
+    countries_data = await list_countries(query=None, page=None, page_size=None, db=db)
     hashtags_data = await _get_post_hashtags(db, page=page, page_size=page_size)
     return {
         "educationLevels": education_levels,
         "countries": countries_data,
         "hashtags": hashtags_data,
     }
+
+
+async def _list_program_field(
+    *,
+    field: str,
+    query: Optional[str],
+    page: int | None,
+    page_size: int | None,
+    db: AsyncSession,
+) -> dict:
+    """Return title-cased, deduped major or minor names from universities + profiles."""
+    from apps.profiles.db_models.profile_db_model import Profile
+
+    if field == "major":
+        university_column = University.major
+        profile_column = Profile.major
+    elif field == "minor":
+        university_column = University.minor
+        profile_column = Profile.minor
+    else:
+        raise ValueError(f"Unsupported program field: {field}")
+
+    university_rows = list(
+        (await db.execute(select(university_column))).scalars().all()
+    )
+    profile_rows = list(
+        (
+            await db.execute(
+                select(profile_column).where(
+                    profile_column.is_not(None),
+                    profile_column != "",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    names = collect_normalized_program_names(*university_rows, *profile_rows)
+
+    if query and query.strip():
+        needle = query.strip().lower()
+        names = [name for name in names if needle in name.lower()]
+
+    items = [{"name": name} for name in names]
+    if page is not None and page_size is not None:
+        return paginate_items(items, page=page, page_size=page_size).model_dump()
+
+    total_items = len(items)
+    return build_paginated_response(
+        items,
+        page=1,
+        page_size=total_items if total_items > 0 else 1,
+        total_items=total_items,
+    ).model_dump()
+
+
+async def list_majors(
+    query: Optional[str],
+    page: int | None,
+    page_size: int | None,
+    db: AsyncSession,
+) -> dict:
+    return await _list_program_field(
+        field="major",
+        query=query,
+        page=page,
+        page_size=page_size,
+        db=db,
+    )
+
+
+async def list_minors(
+    query: Optional[str],
+    page: int | None,
+    page_size: int | None,
+    db: AsyncSession,
+) -> dict:
+    return await _list_program_field(
+        field="minor",
+        query=query,
+        page=page,
+        page_size=page_size,
+        db=db,
+    )
 
 
 async def search_users(

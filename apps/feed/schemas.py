@@ -112,6 +112,7 @@ class RepostedPostData(BaseModel):
     """
     id: UUID
     author_user_id: UUID
+    author_name: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     profile_photo_url: Optional[str] = None
@@ -145,6 +146,7 @@ class RepostedPostData(BaseModel):
     reviewed_at: Optional[datetime] = None
     moderator_id: Optional[UUID] = None
     moderator_name: Optional[str] = None
+    moderation_notes: Optional[str] = None
     media: List[PostMediaData] = Field(default_factory=list)
     reposted_data: None = None
 
@@ -158,6 +160,7 @@ class PostDetailData(BaseModel):
     """
     id: UUID
     author_user_id: UUID
+    author_name: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     profile_photo_url: Optional[str] = None

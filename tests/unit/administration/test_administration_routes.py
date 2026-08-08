@@ -101,7 +101,15 @@ async def _delete_users(_user_ids: list, _role: str, _db) -> dict:
     }
 
 
-async def _update_status(_user_id: str, status, _db) -> dict:
+async def _update_status(
+    _user_id: str,
+    status,
+    _db,
+    *,
+    moderator_id=None,
+    comment=None,
+) -> dict:
+    _ = (moderator_id, comment)
     return {"userId": str(_user_id), "status": status.value}
 
 
@@ -169,13 +177,39 @@ def test_admin_update_user_status(monkeypatch) -> None:
     monkeypatch.setattr(admin_routes.services, "admin_update_user_status", _update_status)
 
     user_id = "11111111-1111-1111-1111-111111111111"
-    suspend_response = client.patch(f"/api/v1/users/{user_id}/status", json={"status": "suspended"})
-    ban_response = client.patch(f"/api/v1/users/{user_id}/status", json={"status": "banned"})
+    suspend_response = client.patch(
+        f"/api/v1/users/{user_id}/status",
+        json={"status": "suspended", "note": "Spam / harassment"},
+    )
+    ban_response = client.patch(
+        f"/api/v1/users/{user_id}/status",
+        json={"status": "banned", "note": "Repeated abuse"},
+    )
+    active_response = client.patch(
+        f"/api/v1/users/{user_id}/status",
+        json={"status": "active"},
+    )
 
     assert suspend_response.status_code == 200
     assert suspend_response.json()["data"]["status"] == "suspended"
     assert ban_response.status_code == 200
     assert ban_response.json()["data"]["status"] == "banned"
+    assert active_response.status_code == 200
+    assert active_response.json()["data"]["status"] == "active"
+
+
+def test_admin_update_user_status_requires_note_for_suspend(monkeypatch) -> None:
+    monkeypatch.setattr(admin_routes.services, "admin_update_user_status", _update_status)
+
+    user_id = "11111111-1111-1111-1111-111111111111"
+    response = client.patch(
+        f"/api/v1/users/{user_id}/status",
+        json={"status": "suspended"},
+    )
+    body = response.json()
+    assert response.status_code == 200
+    assert body["status"] is False
+    assert "note" in body["message"].lower()
 
 
 def test_admin_export_users(monkeypatch) -> None:
@@ -563,6 +597,41 @@ def test_get_user_route_viewer(monkeypatch) -> None:
         body = response.json()
         assert body["status"] is True
         assert body["data"]["userId"] == user_id
+    finally:
+        app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
+
+
+def test_list_reviewed_posts_route_viewer(monkeypatch) -> None:
+    app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
+
+    async def _mock_list_reviewed_posts(
+        _db, moderator_id=None, status=None, page=None, page_size=None, viewer_user_id=None
+    ):
+        _ = (moderator_id, status, page, page_size, viewer_user_id)
+        return {"items": [], "page": 1, "pageSize": 10, "totalItems": 0, "totalPages": 0}
+
+    import apps.feed.services as feed_services
+    monkeypatch.setattr(feed_services, "list_reviewed_posts_by_state_service", _mock_list_reviewed_posts)
+    try:
+        response = client.get("/api/v1/admin/posts/reviewed", params={"status": "published"})
+        assert response.status_code == 200
+        assert response.json()["status"] is True
+    finally:
+        app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
+
+
+def test_list_moderators_route_viewer(monkeypatch) -> None:
+    app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
+
+    async def _mock_list_moderators(page, page_size, db, search=None):
+        _ = (page, page_size, db, search)
+        return {"items": [], "page": 1, "pageSize": 10, "totalItems": 0, "totalPages": 0}
+
+    monkeypatch.setattr(admin_routes.services, "list_moderators", _mock_list_moderators)
+    try:
+        response = client.get("/api/v1/moderators")
+        assert response.status_code == 200
+        assert response.json()["status"] is True
     finally:
         app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
 

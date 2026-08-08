@@ -22,11 +22,15 @@ def _user(is_deleted=False, deleted_at=None, status=UserStatus.active):
     )
 
 
-def _post(state=PostState.published, moderator_id=None):
+def _post(state=PostState.published, moderator_id=None, author_user_id=None):
     return SimpleNamespace(
         id=uuid.uuid4(),
+        author_user_id=author_user_id or uuid.uuid4(),
         state=state,
         moderator_id=moderator_id,
+        is_moderator_reviewed=False,
+        reviewed_at=None,
+        updated_at=None,
     )
 
 
@@ -279,6 +283,15 @@ async def test_get_reported_entities_success(mock_db):
         "apps.report.services.report_service.count_reported_entities",
         AsyncMock(return_value=1),
     ) as count_rows, patch(
+        "apps.report.services.report_service.count_reported_entities_summary_by_status",
+        AsyncMock(
+            return_value={
+                "under_review": 1,
+                "actioned": 4,
+                "rejected": 2,
+            }
+        ),
+    ) as summary_rows, patch(
         "apps.report.services.report_service._load_entities_for_queue",
         AsyncMock(return_value={entity_id: entity_payload}),
     ), patch(
@@ -297,12 +310,18 @@ async def test_get_reported_entities_success(mock_db):
     assert response.status is True
     assert response.message == "Reported entities fetched successfully."
     assert response.data.totalItems == 1
+    assert response.data.summary.under_review == 1
+    assert response.data.summary.actioned == 4
+    assert response.data.summary.rejected == 2
+    assert response.data.total == 7
     assert response.data.items[0].report_count == 3
     assert response.data.items[0].entity["caption"] == "Hello"
     assert response.data.items[0].status == ReportStatus.under_review
     assert response.data.items[0].moderator_name == "Mod Name"
     assert fetch_rows.await_args.kwargs["status"] == ReportStatus.under_review
     assert count_rows.await_args.kwargs["status"] == ReportStatus.under_review
+    summary_rows.assert_awaited_once()
+    assert summary_rows.await_args.kwargs["entity_type"] == ReportEntityType.post
 
 
 @pytest.mark.asyncio
@@ -377,13 +396,60 @@ async def test_apply_actioned_report_flags_post(mock_db, scalar_result):
     db = mock_db(scalar_result(post))
     moderator_id = uuid.uuid4()
 
-    error = await svc._apply_actioned_report_to_entity(db, report, moderator_id=moderator_id)
+    with patch(
+        "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
+        AsyncMock(),
+    ) as dec:
+        error = await svc._apply_actioned_report_to_entity(db, report, moderator_id=moderator_id)
 
     assert error is None
     assert post.state == PostState.flagged
     assert post.moderator_id == moderator_id
     assert post.is_moderator_reviewed is True
+    dec.assert_awaited_once_with(db, post.author_user_id)
     db.add.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_apply_actioned_report_flags_post_skips_decrement_when_already_flagged(
+    mock_db, scalar_result
+):
+    post = _post(state=PostState.flagged)
+    report = _report()
+    report.entity_type = ReportEntityType.post
+    report.entity_id = post.id
+    db = mock_db(scalar_result(post))
+    moderator_id = uuid.uuid4()
+
+    with patch(
+        "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
+        AsyncMock(),
+    ) as dec:
+        error = await svc._apply_actioned_report_to_entity(db, report, moderator_id=moderator_id)
+
+    assert error is None
+    assert post.state == PostState.flagged
+    dec.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_apply_actioned_report_flags_post_skips_decrement_for_draft(mock_db, scalar_result):
+    post = _post(state=PostState.draft)
+    report = _report()
+    report.entity_type = ReportEntityType.post
+    report.entity_id = post.id
+    db = mock_db(scalar_result(post))
+    moderator_id = uuid.uuid4()
+
+    with patch(
+        "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
+        AsyncMock(),
+    ) as dec:
+        error = await svc._apply_actioned_report_to_entity(db, report, moderator_id=moderator_id)
+
+    assert error is None
+    assert post.state == PostState.flagged
+    dec.assert_not_called()
 
 
 @pytest.mark.asyncio

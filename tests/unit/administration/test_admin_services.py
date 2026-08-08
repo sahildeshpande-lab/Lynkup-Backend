@@ -4,6 +4,7 @@ import pytest
 import uuid
 import jwt
 from datetime import datetime, timezone, timedelta
+from unittest.mock import AsyncMock, call, patch
 from fastapi import HTTPException
 from sqlmodel import select
 from sqlalchemy.orm import selectinload
@@ -36,7 +37,8 @@ from apps.administration.services import (
     PASSWORD_HASHER,
     _generate_admin_tokens,
 )
-from common.enums import AdminUserStatus
+from common.enums import AdminUserStatus, inactive_account_message
+from common.exceptions import ApiError
 from apps.accounts.services import JWT_SECRET, JWT_ALGORITHM, _generate_tokens
 
 
@@ -442,6 +444,10 @@ async def test_admin_actions(monkeypatch) -> None:
         monkeypatch.setattr("core.auth.services.revoke_firebase_tokens", lambda *args: None)
         monkeypatch.setattr("core.auth.services.disable_firebase_user", lambda *args: None)
         monkeypatch.setattr("core.auth.services.enable_firebase_user", lambda *args: None)
+        monkeypatch.setattr(
+            "apps.notifications.services.notify_account_status",
+            AsyncMock(return_value=None),
+        )
         
         async with async_session_factory() as session:
             uid = str(uuid.uuid4())
@@ -468,12 +474,24 @@ async def test_admin_actions(monkeypatch) -> None:
             
         # Test suspend user
         async with async_session_factory() as session:
-            sus_res = await admin_update_user_status(str(user.id), AdminUserStatus.suspended, session)
+            sus_res = await admin_update_user_status(
+                str(user.id),
+                AdminUserStatus.suspended,
+                session,
+                moderator_id=user.id,
+                comment="Spam / harassment",
+            )
             assert sus_res["status"] == "suspended"
             
         # Test ban user
         async with async_session_factory() as session:
-            ban_res = await admin_update_user_status(str(user.id), AdminUserStatus.banned, session)
+            ban_res = await admin_update_user_status(
+                str(user.id),
+                AdminUserStatus.banned,
+                session,
+                moderator_id=user.id,
+                comment="Repeated abuse",
+            )
             assert ban_res["status"] == "banned"
             
     finally:
@@ -538,7 +556,7 @@ async def test_admin_signin_invalid_credentials() -> None:
             payload = AdminLoginRequest(email=email, password="WrongPassword123!")
             res = await admin_signin(payload, session)
             assert res.status is False
-            assert "Invalid credentials" in res.message
+            assert "Incorrect Username or Password." in res.message
     finally:
         await engine.dispose()
 
@@ -567,6 +585,37 @@ async def test_admin_signin_non_superadmin() -> None:
             res = await admin_signin(payload, session)
             assert res.status is False
             assert "Forbidden" in res.message
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["superadmin", "moderator", "viewer"])
+async def test_admin_signin_rejects_deleting_account(role: str) -> None:
+    try:
+        await init_db()
+        email = f"admin_deleting_{role}_{uuid.uuid4()}@example.com"
+        async with async_session_factory() as session:
+            user = User(
+                email=email,
+                password_hash=PASSWORD_HASHER.hash("AdminPassword123!"),
+                status=UserStatus.deleting,
+                is_deleted=True,
+                deleted_at=datetime.now(timezone.utc),
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+
+            from apps.accounts.services import assign_user_role
+            await assign_user_role(session, user, role)
+            await session.commit()
+
+        async with async_session_factory() as session:
+            payload = AdminLoginRequest(email=email, password="AdminPassword123!")
+            with pytest.raises(ApiError) as exc_info:
+                await admin_signin(payload, session)
+            assert exc_info.value.message == inactive_account_message(UserStatus.deleting)
     finally:
         await engine.dispose()
 
@@ -608,3 +657,76 @@ async def test_admin_token_expiration_rules() -> None:
         assert "exp" not in decoded_refresh
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_admin_update_user_status_history_then_notify_then_firebase() -> None:
+    """Status PATCH order: history commit → notify → Firebase disable."""
+    from apps.administration.services import user_management_service as svc
+
+    user_id = uuid.uuid4()
+    moderator_id = uuid.uuid4()
+    user = User(
+        id=user_id,
+        email=f"status_order_{user_id}@example.com",
+        firebase_uid=f"fb-{user_id}",
+        status=UserStatus.active,
+    )
+
+    call_order: list[str] = []
+
+    async def _record(*_args, **_kwargs):
+        call_order.append("history")
+        return object()
+
+    async def _notify(*_args, **_kwargs):
+        call_order.append("notify")
+        return None
+
+    def _disable(_uid: str):
+        call_order.append("firebase")
+
+    db = AsyncMock()
+    db_result = AsyncMock()
+    db_result.scalar_one_or_none = lambda: user
+    db.execute = AsyncMock(return_value=db_result)
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+
+    with (
+        patch.object(svc, "build_user_base_response", AsyncMock(return_value={"userId": str(user_id)})),
+        patch(
+            "apps.moderation.services.record_moderation_history",
+            AsyncMock(side_effect=_record),
+        ) as history,
+        patch(
+            "apps.notifications.services.notify_account_status",
+            AsyncMock(side_effect=_notify),
+        ) as notify,
+        patch(
+            "core.auth.services.disable_firebase_user",
+            side_effect=_disable,
+        ),
+        patch(
+            "core.auth.services.enable_firebase_user",
+            lambda *_a, **_k: None,
+        ),
+    ):
+        result = await svc.admin_update_user_status(
+            str(user_id),
+            AdminUserStatus.suspended,
+            db,
+            moderator_id=moderator_id,
+            comment="Spam / harassment",
+        )
+
+    assert result["status"] == "suspended"
+    assert call_order == ["history", "notify", "firebase"]
+    history.assert_awaited_once()
+    assert history.await_args.kwargs["action"] == "suspended"
+    assert history.await_args.kwargs["comment"] == "Spam / harassment"
+    assert history.await_args.kwargs["moderator_id"] == moderator_id
+    notify.assert_awaited_once()
+    assert notify.await_args.kwargs["reason"] == "Spam / harassment"
+    assert notify.await_args.kwargs["sender_user_id"] == moderator_id
+    assert user.status == UserStatus.suspended

@@ -25,7 +25,7 @@ from common.enums import ReportEntityType, ReportStatus
 from common.pagination import PaginationParams
 from common.schemas import ApiResponse
 from core.database.session import get_session
-from core.security.auth import get_current_app_user, get_current_moderator
+from core.security.auth import get_current_app_user, get_current_moderator, get_current_moderator_or_viewer
 
 router = APIRouter(tags=["8] Reports"])
 
@@ -52,14 +52,14 @@ async def create_report_route(
     summary="List reports for an entity",
     description=(
         "Return individual report records for a specific entity. "
-        "Admin/moderator only."
+        "Admin/moderator/viewer only."
     ),
 )
 async def list_reports_admin_route(
     entity_type: ReportEntityType = Query(...),
     entity_id: UUID = Query(...),
     moderator_id: UUID | None = Query(None),
-    current_user=Depends(get_current_moderator),
+    current_user=Depends(get_current_moderator_or_viewer),
     db: AsyncSession = Depends(get_session),
     pagination: PaginationParams = Depends(),
 ) -> ReportListResponse:
@@ -82,8 +82,10 @@ async def list_reports_admin_route(
     description=(
         "Return one row per reported entity for the moderation dashboard, "
         "including previous moderation comments for each entity. "
-        "Optionally filter by status (under_review, actioned, rejected). "
-        "Admin/moderator only."
+        "Includes summary counts by status (under_review, actioned, rejected), "
+        "total across all statuses, and paginated items. "
+        "Optionally filter items by status (under_review, actioned, rejected). "
+        "Admin/moderator/viewer only."
     ),
 )
 async def get_reported_entities_route(
@@ -94,7 +96,7 @@ async def get_reported_entities_route(
         description="Filter by report status: under_review, actioned, or rejected.",
     ),
     moderator_id: UUID | None = Query(None),
-    current_user=Depends(get_current_moderator),
+    current_user=Depends(get_current_moderator_or_viewer),
     db: AsyncSession = Depends(get_session),
     pagination: PaginationParams = Depends(),
 ) -> ReportedEntityListResponse:
@@ -114,11 +116,11 @@ async def get_reported_entities_route(
     response_model=ReportResponse,
     status_code=status.HTTP_200_OK,
     summary="Get report by ID",
-    description="Retrieve details of a report by its ID, including previous moderation comments for the same entity. Admin/moderator only.",
+    description="Retrieve details of a report by its ID, including previous moderation comments for the same entity. Admin/moderator/viewer only.",
 )
 async def get_report_details_admin_route(
     report_id: UUID,
-    current_user=Depends(get_current_moderator),
+    current_user=Depends(get_current_moderator_or_viewer),
     db: AsyncSession = Depends(get_session),
 ) -> ReportResponse:
     _ = current_user

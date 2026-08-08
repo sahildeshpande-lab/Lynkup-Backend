@@ -113,6 +113,41 @@ async def clean_feed_pytest_data(session):
         """), params)
 
         await session.execute(text("""
+            DELETE FROM notifications
+            WHERE recipient_user_id = ANY(:user_ids)
+        """), params)
+
+        await session.execute(text("""
+            DELETE FROM notification_campaign_audience
+            WHERE user_id = ANY(:user_ids)
+        """), params)
+
+        await session.execute(text("""
+            DELETE FROM notification_preferences
+            WHERE user_id = ANY(:user_ids)
+        """), params)
+
+        await session.execute(text("""
+            DELETE FROM moderation_history
+            WHERE moderator_id = ANY(:user_ids)
+               OR entity_id = ANY(:user_ids)
+        """), params)
+
+        await session.execute(text("""
+            DELETE FROM reports
+            WHERE reported_id = ANY(:user_ids)
+               OR moderator_id = ANY(:user_ids)
+               OR entity_id = ANY(:user_ids)
+        """), params)
+
+        await session.execute(text("""
+            DELETE FROM profile_stats
+            WHERE profile_id IN (
+                SELECT id FROM profiles WHERE user_id = ANY(:user_ids)
+            )
+        """), params)
+
+        await session.execute(text("""
             DELETE FROM profiles
             WHERE user_id = ANY(:user_ids)
         """), params)
@@ -406,8 +441,8 @@ async def test_create_draft_replaces_existing_draft(test_users) -> None:
         assert drafts[0].id == second_id
         assert drafts[0].caption == "Second draft"
 
-        old_draft = (await session.execute(select(Post).where(Post.id == first_id))).scalar_one()
-        assert old_draft.state == PostState.deleted
+        old_draft = (await session.execute(select(Post).where(Post.id == first_id))).scalar_one_or_none()
+        assert old_draft is None
 
 
 @pytest.mark.asyncio
@@ -1027,8 +1062,9 @@ async def test_delete_post_service_success(test_users) -> None:
         await delete_post_service(post_id, user.id, session)
 
     async with async_session_factory() as session:
-        post = await get_post_service(post_id, user.id, session)
-        assert post.state == PostState.deleted
+        with pytest.raises(ApiError) as exc_info:
+            await get_post_service(post_id, user.id, session)
+        assert "not found" in exc_info.value.message.lower()
         profile = (await session.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one()
         assert profile.posts_count == 0
 
@@ -1042,16 +1078,15 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
         p2 = Post(author_user_id=user.id, content={"caption": "Published Post"}, state=PostState.published)
         p3 = Post(author_user_id=user.id, content={"caption": "Flagged Post"}, state=PostState.flagged)
         p4 = Post(author_user_id=user.id, content={"caption": "Deleted Post"}, state=PostState.deleted)
-        session.add(p1)
-        session.add(p2)
-        session.add(p3)
-        session.add(p4)
+        p5 = Post(author_user_id=user.id, content={"caption": "Processing Post"}, state=PostState.processing)
+        p6 = Post(author_user_id=user.id, content={"caption": "Reinstated Post"}, state=PostState.reinstate)
+        session.add_all([p1, p2, p3, p4, p5, p6])
         await session.commit()
     
     async with async_session_factory() as session:
         published_posts, total = await list_user_posts_service(user, session, include_total=True)
-        assert len(published_posts) == 1
-        assert published_posts[0].caption == "Published Post"
+        captions = {post.caption for post in published_posts}
+        assert captions == {"Published Post", "Reinstated Post"}
 
         draft_posts, total = await list_user_posts_service(user, session, state="draft", include_total=True)
         assert len(draft_posts) == 1
@@ -1060,6 +1095,12 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
         flagged_posts, total = await list_user_posts_service(user, session, state="flagged", include_total=True)
         assert len(flagged_posts) == 1
         assert flagged_posts[0].caption == "Flagged Post"
+
+        processing_posts, total = await list_user_posts_service(
+            user, session, state="processing", include_total=True
+        )
+        assert len(processing_posts) == 1
+        assert processing_posts[0].caption == "Processing Post"
         
         superadmin = SimpleNamespace(id=other.id, role="superadmin")
         posts_superadmin, total = await list_user_posts_service(
@@ -1069,8 +1110,8 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
             state="published",
             include_total=True,
         )
-        assert len(posts_superadmin) == 1
-        assert posts_superadmin[0].caption == "Published Post"
+        captions = {post.caption for post in posts_superadmin}
+        assert captions == {"Published Post", "Reinstated Post"}
 
 
 @pytest.mark.asyncio
@@ -1151,11 +1192,9 @@ async def test_posts_route_superadmin_can_filter_any_user_or_all(test_users) -> 
                 "/api/v1/posts",
                 params={"user_id": str(other.id), "state": "processing"},
             )
-            assert user_response.status_code == 200
-            user_data = user_response.json()["data"]
-            user_items = user_data["items"] if isinstance(user_data, dict) else user_data
-            user_captions = {item["content"]["caption"] for item in user_items}
-            assert user_captions == {"Other Processing"}
+            assert user_response.status_code == 403
+            assert user_response.json()["status"] is False
+            assert user_response.json()["message"] == "Unauthorized"
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -1422,10 +1461,12 @@ async def test_routes_post_management_flow(test_users) -> None:
             delete_res = await ac.request("DELETE", "/api/v1/posts", json={"id": post_id})
             assert delete_res.status_code == 200
 
-            # Verify deleted
+            # Verify hard-deleted
             get_deleted = await ac.get(f"/api/v1/posts/{post_id}")
             assert get_deleted.status_code == 200
-            assert get_deleted.json()["data"]["state"] == "deleted"
+            body = get_deleted.json()
+            assert body["status"] is False
+            assert "not found" in body["message"].lower()
     finally:
         app.dependency_overrides.pop(get_current_user, None)
         app.dependency_overrides.pop(get_current_moderator, None)
@@ -1480,8 +1521,9 @@ async def test_delete_draft_post_service_success(test_users) -> None:
         await delete_draft_post_service(draft_id, user.id, session)
 
     async with async_session_factory() as session:
-        post = await get_post_service(draft_id, user.id, session)
-        assert post.state == PostState.deleted
+        with pytest.raises(ApiError) as exc_info:
+            await get_post_service(draft_id, user.id, session)
+        assert "not found" in exc_info.value.message.lower()
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,7 @@ from apps.profiles.services.profile_stats_service import (
     increment_posts_count_for_user,
 )
 from common.responses import success_response
-from common.enums import PostState
+from common.enums import FEED_VISIBLE_POST_STATES
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +38,11 @@ async def toggle_repost(
     if post is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
 
-    # Validate post is in published state
-    if post.state != PostState.published:
+    # Validate post is feed-visible (published or reinstate — status stays as-is)
+    if post.state not in FEED_VISIBLE_POST_STATES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Post is not published",
+            detail="Post is not available for repost",
         )
 
     author_id = getattr(post, "author_user_id", None)
@@ -83,6 +83,17 @@ async def toggle_repost(
             repost_count = await update_post_repost_count(db, post_id, 1)
             await increment_posts_count_for_user(db, user_id)
             await db.commit()
+            from apps.recommendations.services.engagement_keyword_service import (
+                apply_engagement_keyword_update_best_effort,
+            )
+
+            await apply_engagement_keyword_update_best_effort(
+                db,
+                user_id,
+                post_id,
+                "repost",
+                added=True,
+            )
         except IntegrityError:
             await db.rollback()
             logger.warning(
@@ -141,6 +152,17 @@ async def toggle_repost(
             repost_count = await update_post_repost_count(db, post_id, -1)
             await decrement_posts_count_for_user(db, user_id)
             await db.commit()
+            from apps.recommendations.services.engagement_keyword_service import (
+                apply_engagement_keyword_update_best_effort,
+            )
+
+            await apply_engagement_keyword_update_best_effort(
+                db,
+                user_id,
+                post_id,
+                "repost",
+                added=False,
+            )
         except Exception:
             await db.rollback()
             logger.exception(

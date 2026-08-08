@@ -1,5 +1,6 @@
 from .report_repository import (
     count_reported_entities,
+    count_reported_entities_summary_by_status,
     count_reports,
     count_reports_by_entity_ids,
     count_reports_by_entity_keys,
@@ -11,11 +12,13 @@ from .report_repository import (
     get_report_by_id,
     get_reported_entities,
     get_reports,
+    sync_open_report_moderator_for_post,
     update_report,
 )
 
 __all__ = [
     "count_reported_entities",
+    "count_reported_entities_summary_by_status",
     "count_reports",
     "count_reports_by_entity_ids",
     "count_reports_by_entity_keys",
@@ -27,5 +30,6 @@ __all__ = [
     "get_report_by_id",
     "get_reported_entities",
     "get_reports",
+    "sync_open_report_moderator_for_post",
     "update_report",
 ]
