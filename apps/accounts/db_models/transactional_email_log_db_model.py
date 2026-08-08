@@ -24,6 +24,12 @@ class TransactionalEmailLog(SQLModel, table=True):
     purpose: str = Field(sa_column=Column(String(128), nullable=False))
     subject: str = Field(default="", sa_column=Column(String(256), nullable=False, server_default=""))
     is_send: bool = Field(default=False, sa_column=Column("is_sent", Boolean, nullable=False, server_default="false"))
+    # Filesystem path (or other local identifier) for an optional file attachment.
+    # Used by the email cron when delivering queued messages (e.g. data export ZIP).
+    attachment: str | None = Field(
+        default=None,
+        sa_column=Column(String(1024), nullable=True),
+    )
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
     updated_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
     # sent_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
@@ -37,13 +43,4 @@ class TransactionalEmailLog(SQLModel, table=True):
         data.setdefault("to_email", data.pop("to", None))
         data.setdefault("content", data.pop("body", None))
         data.setdefault("is_send", data.pop("is_sent", False))
-        self._attachment_val = data.pop("attachment", None)
         super().__init__(**data)
-
-    @property
-    def attachment(self) -> str | None:
-        return getattr(self, "_attachment_val", None)
-
-    @attachment.setter
-    def attachment(self, value: str | None) -> None:
-        self._attachment_val = value

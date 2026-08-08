@@ -51,8 +51,8 @@ async def _log_transactional_email(
 ) -> None:
     """Create one transactional email log entry.
 
-    ``attachment`` is accepted for backward compatibility but intentionally not
-    persisted; logs store only rendered content and metadata.
+    ``attachment`` is persisted as a local filesystem path (or identifier) so the
+    email cron can attach the file when delivering the message.
     """
     try:
         from apps.accounts.db_models import TransactionalEmailLog
@@ -71,8 +71,6 @@ async def _log_transactional_email(
                 purpose=purpose,
                 subject=subject,
                 is_send=send_status,
-                # sent_at=sent_at,
-                # error_message=error_message,
                 attachment=attachment,
                 updated_at=datetime.now(timezone.utc),
             )
@@ -84,7 +82,48 @@ async def _log_transactional_email(
         logger.exception("Failed to log transactional email: %s", e)
 
 
-async def _deliver_email_via_sendgrid(to_email: str, subject: str, html_body: str, from_email: str) -> tuple[bool, str | None]:
+def _attach_file_from_path(message, attachment_path: str | None) -> None:
+    """Attach a local file to a SendGrid Mail message when the path exists."""
+    if not attachment_path:
+        return
+    path = Path(attachment_path)
+    if not path.is_file():
+        logger.warning("Email attachment missing on disk: %s", attachment_path)
+        return
+    try:
+        import base64
+        import mimetypes
+
+        from sendgrid.helpers.mail import (
+            Attachment,
+            Disposition,
+            FileContent,
+            FileName,
+            FileType,
+        )
+    except Exception:
+        logger.exception("Could not import SendGrid attachment helpers for file")
+        return
+
+    mime_type, _ = mimetypes.guess_type(str(path))
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    attachment = Attachment(
+        FileContent(encoded),
+        FileName(path.name),
+        FileType(mime_type or "application/octet-stream"),
+        Disposition("attachment"),
+    )
+    message.add_attachment(attachment)
+    logger.info("Attached file %s (%d bytes) to email", path.name, path.stat().st_size)
+
+
+async def _deliver_email_via_sendgrid(
+    to_email: str,
+    subject: str,
+    html_body: str,
+    from_email: str,
+    attachment_path: str | None = None,
+) -> tuple[bool, str | None]:
     api_key = email_settings.sendgrid_api_key
     if not api_key or not from_email or _sender_is_placeholder(from_email or ""):
         logger.warning("Email send simulated: SendGrid is not fully configured for %s", to_email)
@@ -107,6 +146,7 @@ async def _deliver_email_via_sendgrid(to_email: str, subject: str, html_body: st
         )
         if f"cid:{_LOGO_CID}" in html_body:
             _attach_inline_logo(message)
+        _attach_file_from_path(message, attachment_path)
         client = SendGridAPIClient(api_key)
         response = client.send(message)
         success = 200 <= response.status_code < 300
@@ -134,8 +174,16 @@ async def _deliver_email_via_sendgrid(to_email: str, subject: str, html_body: st
         return False, message
 
 
-async def _actually_send_email_via_sendgrid(to_email: str, subject: str, html_body: str, from_email: str) -> bool:
-    success, _ = await _deliver_email_via_sendgrid(to_email, subject, html_body, from_email)
+async def _actually_send_email_via_sendgrid(
+    to_email: str,
+    subject: str,
+    html_body: str,
+    from_email: str,
+    attachment_path: str | None = None,
+) -> bool:
+    success, _ = await _deliver_email_via_sendgrid(
+        to_email, subject, html_body, from_email, attachment_path=attachment_path
+    )
     return success
 
 
@@ -146,6 +194,7 @@ async def _send_and_log_email(
     purpose: str,
     from_email: str | None = None,
     log_id: UUID | None = None,
+    attachment: str | None = None,
 ) -> bool:
     """Core function to actually deliver an email and log/update its transaction status.
     
@@ -157,7 +206,13 @@ async def _send_and_log_email(
         logger.info("Email send skipped: is_send flag is false for %s", to_email)
         return False
 
-    success = await _actually_send_email_via_sendgrid(to_email, subject, html_body, from_email)
+    success = await _actually_send_email_via_sendgrid(
+        to_email,
+        subject,
+        html_body,
+        from_email,
+        attachment_path=attachment,
+    )
     error_message = None if success else "Failed to send email"
 
     try:
@@ -190,8 +245,7 @@ async def _send_and_log_email(
                     purpose=purpose,
                     subject=subject,
                     is_send=success,
-                    # sent_at=datetime.now(timezone.utc) if success else None,
-                    # error_message=error_message,
+                    attachment=attachment,
                     updated_at=datetime.now(timezone.utc),
                 )
                 session.add(log_entry)
@@ -309,6 +363,7 @@ async def process_pending_emails(limit: int = 10) -> int:
                 purpose=email_log.purpose,
                 from_email=email_log.from_email or _from_email(),
                 log_id=email_log.id,
+                attachment=email_log.attachment,
             )
             processed += 1
             if success:

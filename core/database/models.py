@@ -16,6 +16,7 @@ from apps.notifications.db_models import (
     NotificationPreference,
     NotificationType,
 )
+from apps.export.models import DataExportRequest
 
 __all__ = [
     "ConsentRecord",
@@ -65,5 +66,6 @@ __all__ = [
     "NotificationCampaign",
     "NotificationCampaignAudience",
     "Notification",
+    "DataExportRequest",
 ]
 
