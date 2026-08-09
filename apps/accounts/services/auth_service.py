@@ -93,7 +93,20 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
         return ApiResponse(status=False, message="Invalid credentials", data=None)
 
     if user.status == UserStatus.deleting or user.deleted_at:
-        return ApiResponse(status=False, message=inactive_account_message(UserStatus.deleting), data=None)
+        from apps.user_deletion.services.account_recovery_service import (
+            restore_deleting_account_if_eligible,
+            run_recovery_side_effects,
+        )
+
+        restored = await restore_deleting_account_if_eligible(user, db)
+        if not restored:
+            return ApiResponse(
+                status=False,
+                message=inactive_account_message(UserStatus.deleting),
+                data=None,
+            )
+        await db.commit()
+        await run_recovery_side_effects(user, db)
 
     if user.status in (UserStatus.suspended, UserStatus.banned):
         return ApiResponse(status=False, message=inactive_account_message(user.status), data=None)

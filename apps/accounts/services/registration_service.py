@@ -33,7 +33,16 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
 
     if user:
         if user.status == UserStatus.deleting or user.deleted_at:
-            raise ApiError(inactive_account_message(UserStatus.deleting))
+            from apps.user_deletion.services.account_recovery_service import (
+                restore_deleting_account_if_eligible,
+                run_recovery_side_effects,
+            )
+
+            restored = await restore_deleting_account_if_eligible(user, db)
+            if not restored:
+                raise ApiError(inactive_account_message(UserStatus.deleting))
+            await db.commit()
+            await run_recovery_side_effects(user, db)
         if user.status in (UserStatus.suspended, UserStatus.banned):
             raise ApiError(inactive_account_message(user.status))
 
@@ -301,10 +310,19 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
 
     if user:
         if user.status == UserStatus.deleting or user.deleted_at:
-            raise HTTPException(
-                status_code=status.HTTP_200_OK,
-                detail=inactive_account_message(UserStatus.deleting)
+            from apps.user_deletion.services.account_recovery_service import (
+                restore_deleting_account_if_eligible,
+                run_recovery_side_effects,
             )
+
+            restored = await restore_deleting_account_if_eligible(user, db)
+            if not restored:
+                raise HTTPException(
+                    status_code=status.HTTP_200_OK,
+                    detail=inactive_account_message(UserStatus.deleting)
+                )
+            await db.flush()
+            await run_recovery_side_effects(user, db)
         if user.status in (UserStatus.suspended, UserStatus.banned):
             raise HTTPException(
                 status_code=status.HTTP_200_OK,

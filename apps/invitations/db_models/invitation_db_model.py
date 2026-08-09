@@ -20,7 +20,7 @@ class Invitation(SQLModel, table=True):
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
 
-    inviter_user_id: UUID = Field(foreign_key="users.id", nullable=False)
+    inviter_user_id: UUID | None = Field(default=None, foreign_key="users.id", nullable=True)
     code: str = Field(
         sa_column=Column(String(7), nullable=False),
     )

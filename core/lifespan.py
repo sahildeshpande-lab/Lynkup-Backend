@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
     #     await init_db()
     #     try:
     #         logger.info("Start DB Migrations")
-    #         # await run_db_migrations_programmatically()
+    #         await run_db_migrations_programmatically()
     #         logger.info("Migrations completed successfully")
     #     except Exception as e:
     #         logger.exception(f"Migration startup failed: {e}")
@@ -90,8 +90,10 @@ async def lifespan(app: FastAPI):
         )
 
     from core.email_service import cron_send_emails
+    from apps.user_deletion.cron import cron_purge_deleted_accounts
 
     email_cron_task = asyncio.create_task(cron_send_emails())
+    account_deletion_cron_task = asyncio.create_task(cron_purge_deleted_accounts())
 
     logger.info(
         "[%s] Application Started Successfully (Total startup: %.2f sec).",
@@ -101,8 +103,13 @@ async def lifespan(app: FastAPI):
     yield
 
     email_cron_task.cancel()
+    account_deletion_cron_task.cancel()
     try:
         await email_cron_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await account_deletion_cron_task
     except asyncio.CancelledError:
         pass
 

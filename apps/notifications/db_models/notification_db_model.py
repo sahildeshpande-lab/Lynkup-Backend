@@ -115,7 +115,7 @@ class NotificationCampaign(SQLModel, table=True):
         default=None,
         sa_column=Column(JSONB, nullable=True),
     )
-    created_by_admin_id: UUID = Field(foreign_key="users.id", nullable=False)
+    created_by_admin_id: UUID | None = Field(default=None, foreign_key="users.id", nullable=True)
     scheduled_at: datetime | None = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),

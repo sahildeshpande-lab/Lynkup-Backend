@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from uuid import UUID
 from fastapi import HTTPException, status, BackgroundTasks
 from pwdlib import PasswordHash
@@ -407,25 +407,18 @@ def _soft_delete_user_record(
     now: datetime,
 ) -> None:
     """Apply the standard scheduled-deletion fields shared by all role types."""
-    user.status = UserStatus.deleting
-    user.is_deleted = True
-    user.deleted_at = now
-    user.purge_after = now + timedelta(days=1)
+    from apps.user_deletion.services.account_recovery_service import (
+        apply_scheduled_deletion_fields,
+    )
+
+    apply_scheduled_deletion_fields(user, now=now)
 
 
 async def _build_deleted_user_payload(
     user: User,
     db: AsyncSession,
 ) -> dict:
-    from core.auth.services import revoke_firebase_tokens
-
     db.add(user)
-
-    if user.firebase_uid and not user.firebase_uid.startswith("admin-"):
-        try:
-            revoke_firebase_tokens(user.firebase_uid)
-        except Exception:
-            pass
 
     profile = (
         await db.execute(select(Profile).where(Profile.user_id == user.id))
@@ -442,6 +435,7 @@ async def _build_deleted_user_payload(
 
 async def admin_delete_users(user_ids: list[str], role: str, db: AsyncSession) -> dict:
     deleted_users = []
+    deleted_user_objects: list[User] = []
     now = datetime.now(timezone.utc)
 
     superadmin: User | None = None
@@ -485,8 +479,17 @@ async def admin_delete_users(user_ids: list[str], role: str, db: AsyncSession) -
         await adjust_counts_for_deleting_user(db, user.id)
         _soft_delete_user_record(user, now=now)
         deleted_users.append(await _build_deleted_user_payload(user, db))
+        deleted_user_objects.append(user)
 
     await db.commit()
+
+    from apps.user_deletion.services.account_recovery_service import (
+        run_deletion_request_side_effects,
+    )
+
+    for user in deleted_user_objects:
+        await run_deletion_request_side_effects(user, db)
+
     return {"deleted_users": deleted_users}
 
 
@@ -574,21 +577,14 @@ async def admin_edit_profile(
 async def admin_update_user_status(
     user_id: str,
     new_status: AdminUserStatus,
-    db: AsyncSession,
-    *,
-    moderator_id: UUID | None = None,
-    comment: str | None = None,
+    db: AsyncSession
 ) -> dict:
-    from apps.moderation.services import record_moderation_history
-    from apps.notifications.services import notify_account_status
-    from common.enums import ReportEntityType
     from core.auth.services import (
         disable_firebase_user,
-        enable_firebase_user,
+        enable_firebase_user
     )
 
     user_uuid = _coerce_uuid(user_id)
-    target_status = UserStatus(new_status.value)
 
     user = (
         await db.execute(
@@ -604,55 +600,32 @@ async def admin_update_user_status(
             detail="User not found"
         )
 
-    already_same_status = user.status == target_status
+    # Check BEFORE updating
+    already_same_status = user.status == new_status
+
     if already_same_status:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"User is already {new_status.value}",
         )
 
-    user.status = target_status
-    user.updated_at = datetime.now(timezone.utc)
+    if not already_same_status:
+        user.status = new_status
+        user.updated_at = datetime.now(timezone.utc)
 
-    # 1) Audit trail (note lives on moderation_history.comment — not on users)
-    await record_moderation_history(
-        db,
-        entity_type=ReportEntityType.user,
-        entity_id=user.id,
-        action=new_status.value,
-        moderator_id=moderator_id,
-        comment=comment,
-    )
-    await db.commit()
-    await db.refresh(user)
+        await db.commit()
+        await db.refresh(user)
 
-    # 2) Notify while the account can still receive push, then lock/unlock auth
-    try:
-        await notify_account_status(
-            db,
-            user_id=user.id,
-            status=new_status.value,
-            reason=comment,
-            sender_user_id=moderator_id,
-        )
-    except Exception:
-        logger.exception(
-            "Failed to notify account status for user_id=%s status=%s",
-            user.id,
-            new_status.value,
-        )
+        firebase_error = None
 
-    # 3) Firebase enable/disable last so push delivery is not cut off early
-    firebase_error = None
-    if user.firebase_uid:
-        try:
-            if new_status == AdminUserStatus.active:
-                enable_firebase_user(user.firebase_uid)
-            else:
-                disable_firebase_user(user.firebase_uid)
-        except Exception as e:
-            firebase_error = str(e)
-
+        if user.firebase_uid:
+            try:
+                if new_status == AdminUserStatus.active:
+                    enable_firebase_user(user.firebase_uid)
+                else:
+                    disable_firebase_user(user.firebase_uid)
+            except Exception as e:
+                firebase_error = str(e)
     profile = (
         await db.execute(
             select(Profile)

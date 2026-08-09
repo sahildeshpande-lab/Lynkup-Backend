@@ -63,7 +63,7 @@ async def get_profile_me(user: User, db: AsyncSession) -> dict:
         db.add(profile)
         await db.commit()
         await db.refresh(profile)
-    user_data = await build_user_base_response(user, profile, db, viewer_user_id=user.id)
+    user_data = await build_user_base_response(user, profile, db)
     return {"user": user_data}
 
 async def update_profile_me(
@@ -176,8 +176,7 @@ async def update_profile_me(
     user_data = await build_user_base_response(
         current_user,
         profile,
-        db,
-        viewer_user_id=current_user.id,
+        db
     )
 
     return {
@@ -185,20 +184,19 @@ async def update_profile_me(
     }
 
 async def delete_user_me(user: User, db: AsyncSession) -> dict:
-    import logging
-    from datetime import timedelta
-    from core.auth.services import disable_firebase_user, revoke_firebase_tokens
     from apps.profiles.db_models.profile_db_model import Profile
+    from apps.user_deletion.services.account_recovery_service import (
+        apply_scheduled_deletion_fields,
+        run_deletion_request_side_effects,
+    )
     from sqlmodel import select
-
-    logger = logging.getLogger(__name__)
 
     # Idempotent: already scheduled for deletion
     if user.is_deleted or user.status == UserStatus.deleting or user.deleted_at is not None:
         profile = (
             await db.execute(select(Profile).where(Profile.user_id == user.id))
         ).scalar_one_or_none()
-        user_data = await build_user_base_response(user, profile, db, viewer_user_id=user.id)
+        user_data = await build_user_base_response(user, profile, db)
         return {
             "deleted": True,
             "status": user.status.value if hasattr(user.status, "value") else str(user.status),
@@ -207,11 +205,7 @@ async def delete_user_me(user: User, db: AsyncSession) -> dict:
             "user": user_data,
         }
 
-    user.status = UserStatus.deleting
-    user.is_deleted = True
-    now = _now()
-    user.deleted_at = now
-    user.purge_after = now + timedelta(days=1)
+    apply_scheduled_deletion_fields(user)
     db.add(user)
 
     from apps.profiles.services.profile_stats_service import (
@@ -222,26 +216,12 @@ async def delete_user_me(user: User, db: AsyncSession) -> dict:
     await db.commit()
     await db.refresh(user)
 
-    if user.firebase_uid and not str(user.firebase_uid).startswith("admin-"):
-        try:
-            disable_firebase_user(user.firebase_uid)
-        except Exception:
-            logger.exception(
-                "Failed to disable Firebase user during self-deletion uid=%s",
-                user.firebase_uid,
-            )
-            try:
-                revoke_firebase_tokens(user.firebase_uid)
-            except Exception:
-                logger.exception(
-                    "Failed to revoke Firebase tokens during self-deletion uid=%s",
-                    user.firebase_uid,
-                )
+    await run_deletion_request_side_effects(user, db)
 
     profile = (
         await db.execute(select(Profile).where(Profile.user_id == user.id))
     ).scalar_one_or_none()
-    user_data = await build_user_base_response(user, profile, db, viewer_user_id=user.id)
+    user_data = await build_user_base_response(user, profile, db)
     return {
         "deleted": True,
         "status": user.status.value if hasattr(user.status, "value") else str(user.status),
@@ -316,9 +296,7 @@ async def get_my_profile_service(
         await db.commit()
         await db.refresh(profile)
 
-    user_data = await build_user_base_response(
-        target_user, profile, db, viewer_user_id=user.id
-    )
+    user_data = await build_user_base_response(target_user, profile, db)
 
     # Inject relationship flags when viewing another user's profile
     if effective_user_id != user.id:

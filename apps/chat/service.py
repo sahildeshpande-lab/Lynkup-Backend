@@ -122,3 +122,73 @@ async def revoke_stream_user_tokens_best_effort(user: User) -> None:
         logger.warning("Stream token revoke skipped for user_id=%s: %s", user.id, exc)
     except Exception:
         logger.exception("Stream token revoke failed for user_id=%s", user.id)
+
+
+async def deactivate_stream_user(user: User) -> None:
+    """Deactivate Stream user during account deletion grace period."""
+    _ensure_stream_configured()
+    user_id = str(user.id)
+    try:
+        get_stream_client().deactivate_user(user_id)
+        logger.info("Stream user deactivated for user_id=%s", user_id)
+    except StreamChatError:
+        raise
+    except Exception as exc:
+        logger.exception("Stream user deactivate failed for user_id=%s", user_id)
+        raise StreamChatError("Failed to deactivate Stream user") from exc
+    await revoke_stream_user_tokens_best_effort(user)
+
+
+async def deactivate_stream_user_best_effort(user: User) -> None:
+    try:
+        await deactivate_stream_user(user)
+    except StreamChatError as exc:
+        logger.warning("Stream user deactivate skipped for user_id=%s: %s", user.id, exc)
+    except Exception:
+        logger.exception("Stream user deactivate failed for user_id=%s", user.id)
+
+
+async def reactivate_stream_user(user: User, db: AsyncSession) -> None:
+    """Reactivate Stream user after grace-period account recovery."""
+    _ensure_stream_configured()
+    user_id = str(user.id)
+    try:
+        get_stream_client().reactivate_user(user_id)
+        logger.info("Stream user reactivated for user_id=%s", user_id)
+    except StreamChatError:
+        raise
+    except Exception as exc:
+        logger.exception("Stream user reactivate failed for user_id=%s", user_id)
+        raise StreamChatError("Failed to reactivate Stream user") from exc
+    await upsert_stream_user(user, db)
+
+
+async def reactivate_stream_user_best_effort(user: User, db: AsyncSession) -> None:
+    try:
+        await reactivate_stream_user(user, db)
+    except StreamChatError as exc:
+        logger.warning("Stream user reactivate skipped for user_id=%s: %s", user.id, exc)
+    except Exception:
+        logger.exception("Stream user reactivate failed for user_id=%s", user.id)
+
+
+async def delete_stream_user(user_id: str) -> None:
+    """Permanently delete a Stream user after the purge deadline."""
+    _ensure_stream_configured()
+    try:
+        get_stream_client().delete_user(user_id)
+        logger.info("Stream user deleted for user_id=%s", user_id)
+    except StreamChatError:
+        raise
+    except Exception as exc:
+        logger.exception("Stream user delete failed for user_id=%s", user_id)
+        raise StreamChatError("Failed to delete Stream user") from exc
+
+
+async def delete_stream_user_best_effort(user_id: str) -> None:
+    try:
+        await delete_stream_user(user_id)
+    except StreamChatError as exc:
+        logger.warning("Stream user delete skipped for user_id=%s: %s", user_id, exc)
+    except Exception:
+        logger.exception("Stream user delete failed for user_id=%s", user_id)
