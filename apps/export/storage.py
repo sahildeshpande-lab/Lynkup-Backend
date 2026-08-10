@@ -7,7 +7,6 @@ from pathlib import Path
 
 from botocore.exceptions import ClientError
 
-from apps.export.config import settings as export_settings
 from core.images import config as image_config
 
 logger = logging.getLogger(__name__)
@@ -25,8 +24,12 @@ class ExportStorage(ABC):
         ...
 
     @abstractmethod
-    def generate_download_url(self, storage_key: str, expires_in: int | None = None) -> str:
-        """Return a short-lived signed download URL (never persist this)."""
+    def generate_download_url(self, storage_key: str, expires_in: int) -> str:
+        """Return a presigned download URL valid for ``expires_in`` seconds.
+
+        ``expires_in`` is required — callers must pass the desired TTL
+        explicitly (e.g. 604800 for 7 days). The URL must never be persisted.
+        """
 
     @abstractmethod
     def delete(self, storage_key: str) -> None:
@@ -93,10 +96,14 @@ class DigitalOceanSpacesExportStorage(ExportStorage):
     def generate_download_url(
         self,
         storage_key: str,
-        expires_in: int | None = None,
+        expires_in: int,
     ) -> str:
+        """Generate a presigned S3-compatible download URL.
+
+        ``expires_in`` is the TTL in seconds (e.g. 604800 = 7 days).
+        The URL is private and time-limited; never persist it in the database.
+        """
         key = _normalize_key(storage_key)
-        ttl = expires_in or export_settings.export_signed_url_expires_seconds
         try:
             return self._client.generate_presigned_url(
                 "get_object",
@@ -105,7 +112,7 @@ class DigitalOceanSpacesExportStorage(ExportStorage):
                     "Key": key,
                     "ResponseContentDisposition": f'attachment; filename="{Path(key).name}"',
                 },
-                ExpiresIn=ttl,
+                ExpiresIn=expires_in,
             )
         except ClientError as exc:
             logger.exception("Failed generating signed URL for export key=%s", key)

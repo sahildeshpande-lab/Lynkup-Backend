@@ -13,19 +13,10 @@ class ExportSettings(BaseSettings):
         extra="ignore",
     )
 
-    base_url_export: str = Field(
-        alias="BASE_URL_EXPORT",
-    )
     export_retention_days: int = Field(
         default=7,
         ge=1,
         alias="EXPORT_RETENTION_DAYS",
-    )
-    export_signed_url_expires_seconds: int = Field(
-        default=900,
-        ge=60,
-        le=3600,
-        alias="EXPORT_SIGNED_URL_EXPIRES_SECONDS",
     )
 
 

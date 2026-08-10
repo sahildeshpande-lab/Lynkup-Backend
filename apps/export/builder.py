@@ -4,7 +4,7 @@ import io
 import json
 import logging
 import mimetypes
-import zipfile
+import pyzipper
 from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -59,7 +59,14 @@ class DataExportBuilder:
         self.export_id = export_id
         self._media_entries: list[tuple[str, bytes]] = []
 
-    async def build_zip_bytes(self) -> bytes:
+    async def build_encrypted_zip_bytes(self, password: str) -> bytes:
+        """Build a password-protected AES-256 ZIP archive.
+
+        ``password`` must be exactly 6 uppercase alphanumeric characters as
+        produced by :func:`apps.export.password.generate_export_password`.
+        The password is used only for ZIP encryption; it is never stored or
+        logged here.
+        """
         files: dict[str, str | bytes] = {}
 
         profile_payload = await self.build_profile()
@@ -105,11 +112,18 @@ class DataExportBuilder:
             "This archive contains a copy of the personal data available for export\n"
             "from your KampuLynk account.\n"
             "\n"
-            "The archive contains JSON files and uploaded media where available.\n"
+            "The archive is password-protected. Use the password provided in the\n"
+            "export email to extract the contents.\n"
         )
 
         buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        with pyzipper.AESZipFile(
+            buffer,
+            mode="w",
+            compression=pyzipper.ZIP_DEFLATED,
+            encryption=pyzipper.WZ_AES,
+        ) as zf:
+            zf.setpassword(password.encode("utf-8"))
             for name, content in files.items():
                 data = content.encode("utf-8") if isinstance(content, str) else content
                 zf.writestr(name, data)

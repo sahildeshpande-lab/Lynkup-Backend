@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from html import escape
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,11 +13,14 @@ from apps.export.builder import DataExportBuilder
 from apps.export.config import settings as export_settings
 from apps.export.enums import DataExportStatus
 from apps.export.models import DataExportRequest
+from apps.export.password import generate_export_password
 from apps.export.schemas import ExportRequestAcceptedData, ExportStatusData
 from apps.export.storage import ExportStorage, get_export_storage, write_temp_zip
+from apps.profiles.db_models import Profile
+from apps.profiles.db_models.university_db_model import University
 from common.exceptions import ApiError
 from core.database.session import async_session_factory
-from core.email_service import _queue_email, _render_email_layout
+from core.email_service import BRAND_COLORS, _queue_email, _render_email_layout
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,116 @@ def _ensure_aware(dt: datetime | None) -> datetime | None:
 
 def build_export_storage_key(*, user_id: UUID, export_id: UUID) -> str:
     return f"exports/{user_id}/{export_id}.zip"
+
+
+def _format_export_expiry_date(expires: datetime | None) -> str:
+    """Return a human-readable expiry date such as ``15 August 2026``."""
+    if expires is None:
+        return "7 days from generation"
+    aware = _ensure_aware(expires)
+    assert aware is not None
+    return f"{aware.day} {aware.strftime('%B %Y')}"
+
+
+def _build_export_ready_email_body(
+    *,
+    download_url: str,
+    zip_password: str,
+    zip_filename: str,
+    download_expires_at: datetime | None,
+) -> str:
+    """Build the export-ready email body for the shared KampuLynk layout.
+
+    ``download_url`` is used only as the CTA button href — it is never shown
+    as visible link text. ``zip_password`` is displayed but never logged.
+    """
+    text_primary = BRAND_COLORS.get("text_primary", "#071A35")
+    text_secondary = BRAND_COLORS.get("text_secondary", "#64748B")
+    brand_blue = BRAND_COLORS.get("brand_blue", "#0B5FA5")
+    brand_green = BRAND_COLORS.get("brand_green", "#46B12F")
+    expiry_text = escape(_format_export_expiry_date(download_expires_at))
+    safe_password = escape(zip_password)
+    safe_filename = escape(zip_filename)
+    # Presigned URLs contain query ampersands; keep them intact in href.
+    safe_href = download_url.replace('"', "%22")
+
+    return (
+        f'<h1 style="margin:0 0 16px 0;font-size:22px;font-weight:700;color:{text_primary};'
+        "letter-spacing:-0.5px;line-height:1.3;text-align:center;"
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\">"
+        "Your data export is ready"
+        "</h1>"
+        f'<p style="margin:0 0 12px 0;font-size:15px;line-height:1.6;color:{text_secondary};'
+        "text-align:center;"
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\">"
+        "Your KampuLynk data export has been generated successfully."
+        "</p>"
+        f'<p style="margin:0 0 28px 0;font-size:15px;line-height:1.6;color:{text_secondary};'
+        "text-align:center;"
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\">"
+        "Your encrypted ZIP archive is ready to download."
+        "</p>"
+        # Primary CTA — visible label only; raw URL lives solely in href.
+        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" '
+        'style="margin:0 auto 32px;width:auto;">'
+        "<tr>"
+        f'<td align="center" bgcolor="{brand_green}" '
+        f'style="border-radius:8px;background-color:{brand_green};">'
+        f'<a href="{safe_href}" target="_blank" '
+        'style="font-size:15px;'
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
+        "font-weight:600;color:#ffffff;text-decoration:none;display:inline-block;"
+        f'padding:14px 32px;border-radius:8px;border:1px solid {brand_green};">'
+        "Download Your Data"
+        "</a>"
+        "</td>"
+        "</tr>"
+        "</table>"
+        # ZIP password credential box
+        f'<p style="margin:0 0 10px 0;font-size:13px;font-weight:600;color:{brand_blue};'
+        "letter-spacing:1.5px;text-transform:uppercase;text-align:center;"
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\">"
+        "ZIP Password"
+        "</p>"
+        '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" '
+        'style="margin:0 0 16px;">'
+        "<tr>"
+        '<td align="center" style="padding:18px 16px;background-color:#F8FAFC;'
+        f'border:2px dashed {brand_blue};border-radius:12px;">'
+        f'<span style="font-size:22px;font-weight:700;color:{text_primary};'
+        "font-family:'Courier New',Courier,monospace;letter-spacing:4px;\">"
+        f"{safe_password}"
+        "</span>"
+        "</td>"
+        "</tr>"
+        "</table>"
+        f'<p style="margin:0 0 24px 0;font-size:14px;line-height:1.6;color:{text_secondary};'
+        "text-align:center;"
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\">"
+        "Your ZIP archive is password protected. Use the password above to open the archive."
+        "</p>"
+        f'<p style="margin:0 0 8px 0;font-size:13px;line-height:1.5;color:{text_secondary};'
+        "text-align:center;"
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\">"
+        f"File: {safe_filename}"
+        "</p>"
+        f'<p style="margin:0 0 4px 0;font-size:14px;line-height:1.6;color:{text_secondary};'
+        "text-align:center;"
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\">"
+        "Download link expires on:"
+        "</p>"
+        f'<p style="margin:0 0 28px 0;font-size:15px;font-weight:600;line-height:1.5;color:{text_primary};'
+        "text-align:center;"
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\">"
+        f"{expiry_text}"
+        "</p>"
+        f'<p style="margin:0;font-size:13px;line-height:1.6;color:{text_secondary};'
+        "text-align:center;"
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\">"
+        "For your security, this email was sent automatically. "
+        "If you did not request this export, you can safely ignore this email."
+        "</p>"
+    )
 
 
 class DataExportService:
@@ -96,43 +210,19 @@ class DataExportService:
             file_size_bytes=export_request.file_size_bytes,
         )
 
-    async def get_download_redirect_url(
-        self,
-        *,
-        user: User,
-        export_id: UUID,
-        db: AsyncSession,
-    ) -> str:
-        """Validate ownership/status/expiry and return a short-lived signed Spaces URL.
-
-        The object is NOT deleted here. Presigned URLs do not reliably signal
-        download completion; retention cleanup deletes objects after expiry.
-        """
-        export_request = await self._get_owned_export(user=user, export_id=export_id, db=db)
-
-        if export_request.status == DataExportStatus.expired:
-            raise ApiError("This export has expired.")
-        if export_request.status != DataExportStatus.completed:
-            raise ApiError("Export is not ready for download.")
-
-        expires_at = _ensure_aware(export_request.download_expires_at)
-        if expires_at is None or expires_at <= utc_now():
-            raise ApiError("This export has expired.")
-
-        if not export_request.storage_key:
-            raise ApiError("Export file is no longer available.")
-
-        if not self.storage.exists(export_request.storage_key):
-            raise ApiError("Export file is no longer available.")
-
-        try:
-            return self.storage.generate_download_url(export_request.storage_key)
-        except Exception as exc:
-            logger.exception("Failed generating signed URL for export %s", export_id)
-            raise ApiError("Export file is no longer available.") from exc
-
     async def process_export(self, export_id: UUID) -> None:
-        """Background worker entrypoint. Uses its own DB session."""
+        """Background worker entrypoint. Uses its own DB session.
+
+        Steps:
+        1. Mark export as processing.
+        2. Fetch user Profile + University for password derivation.
+        3. Generate deterministic 6-character ZIP password (never logged or stored).
+        4. Build AES-256 password-protected ZIP via DataExportBuilder.
+        5. Write temporary local ZIP, upload to Spaces, delete temporary file.
+        6. Generate 7-day presigned Spaces URL (never stored in DB).
+        7. Persist completed status and metadata to DB.
+        8. Send email containing presigned URL and ZIP password to user.
+        """
         async with async_session_factory() as db:
             export_request = (
                 await db.execute(
@@ -166,16 +256,51 @@ class DataExportService:
             user_id = export_request.user_id
             temp_path = None
             try:
-                builder = DataExportBuilder(db=db, user_id=user_id, export_id=export_id)
-                zip_bytes = await builder.build_zip_bytes()
+                # Fetch profile and university for password derivation.
+                profile = (
+                    await db.execute(
+                        select(Profile).where(Profile.user_id == user_id)
+                    )
+                ).scalar_one_or_none()
 
-                # Temporary local ZIP only for generation/upload; not final storage.
+                university_name: str | None = None
+                if profile and profile.university_id:
+                    university = (
+                        await db.execute(
+                            select(University).where(University.id == profile.university_id)
+                        )
+                    ).scalar_one_or_none()
+                    if university:
+                        university_name = university.name
+
+                # Generate deterministic 6-character ZIP password.
+                # SECURITY: never log, store, or return this value via API.
+                zip_password = generate_export_password(
+                    first_name=profile.first_name if profile else None,
+                    last_name=profile.last_name if profile else None,
+                    university=university_name,
+                    major=profile.major if profile else None,
+                    minor=profile.minor if profile else None,
+                )
+
+                builder = DataExportBuilder(db=db, user_id=user_id, export_id=export_id)
+                zip_bytes = await builder.build_encrypted_zip_bytes(zip_password)
+
+                # Temporary local ZIP — uploaded then deleted immediately.
                 temp_path = write_temp_zip(zip_bytes)
                 storage_key = build_export_storage_key(
                     user_id=user_id,
                     export_id=export_id,
                 )
                 self.storage.upload(storage_key, zip_bytes)
+
+                # Generate 7-day presigned Spaces URL.
+                # SECURITY: never log or store this URL; pass only to email.
+                _PRESIGNED_URL_TTL_SECONDS = 604800  # 7 days
+                presigned_url = self.storage.generate_download_url(
+                    storage_key,
+                    expires_in=_PRESIGNED_URL_TTL_SECONDS,
+                )
 
                 completed_at = utc_now()
                 export_request.status = DataExportStatus.completed
@@ -191,7 +316,12 @@ class DataExportService:
                 await db.commit()
                 await db.refresh(export_request)
 
-                await self._queue_ready_email(db=db, export_request=export_request)
+                await self._queue_ready_email(
+                    db=db,
+                    export_request=export_request,
+                    presigned_url=presigned_url,
+                    zip_password=zip_password,
+                )
             except Exception as exc:
                 logger.exception("Failed processing export %s", export_id)
                 failed_at = utc_now()
@@ -260,8 +390,17 @@ class DataExportService:
         *,
         db: AsyncSession,
         export_request: DataExportRequest,
+        presigned_url: str,
+        zip_password: str,
     ) -> None:
-        """Queue export-ready email (download link only) for cron delivery."""
+        """Queue the export-ready email containing the presigned Spaces URL and ZIP password.
+
+        Security:
+        - ``presigned_url`` and ``zip_password`` are used only to build the email
+          body; they are never logged, stored in the database, or returned via API.
+        - The email is the only place these values are sent.
+        - The presigned URL appears only as the Download CTA href, never as visible text.
+        """
         user = (
             await db.execute(select(User).where(User.id == export_request.user_id))
         ).scalar_one_or_none()
@@ -272,31 +411,16 @@ class DataExportService:
             )
             return
 
-        base_url = (export_settings.base_url_export or "").rstrip("/")
-        if not base_url:
-            logger.warning(
-                "BASE_URL_EXPORT is not configured; cannot queue export email for %s",
-                export_request.id,
-            )
-            return
-        download_url = f"{base_url}/api/v1/me/export/{export_request.id}/download"
-        expires = _ensure_aware(export_request.download_expires_at)
-        expiry_text = expires.isoformat() if expires else "the retention period ends"
         completed = export_request.completed_at or utc_now()
         zip_filename = f"kampulynk_data_export_{completed.strftime('%Y-%m-%d')}.zip"
 
-        body_html = (
-            '<div style="font-size:16px;font-weight:700;margin-bottom:16px;">'
-            "Your KampuLynk data export is ready.</div>"
-            '<p style="margin:0 0 14px;">Your data export has been generated successfully.</p>'
-            f'<p style="margin:0 0 14px;">The ZIP archive <strong>{zip_filename}</strong> '
-            "is ready for download.</p>"
-            '<p style="margin:0 0 14px;">Download your export:</p>'
-            f'<p style="margin:0 0 14px;"><a href="{download_url}">{download_url}</a></p>'
-            f'<p style="margin:0 0 14px;">Export reference: {export_request.id}</p>'
-            f'<p style="margin:0;">This export is retained until {expiry_text}.</p>'
+        body_html = _build_export_ready_email_body(
+            download_url=presigned_url,
+            zip_password=zip_password,
+            zip_filename=zip_filename,
+            download_expires_at=export_request.download_expires_at,
         )
-        subject = "Your KampuLynk data export is ready"
+        subject = "Your KampuLynk Data Export Is Ready"
         html_content = _render_email_layout(subject, body_html)
         await _queue_email(
             user.email,
@@ -305,8 +429,7 @@ class DataExportService:
             purpose="Data Export Ready",
         )
         logger.info(
-            "Queued data-export email for %s (export_id=%s)",
-            user.email,
+            "Queued data-export email for export_id=%s",
             export_request.id,
         )
 
