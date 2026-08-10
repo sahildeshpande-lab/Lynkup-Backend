@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     #         raise
     #     logger.info(f"Initialized database at {db_settings.db_host}")
 
-    # from core.email.config import settings as email_settings
+    from core.email.config import settings as email_settings
 
     # logger.info("[%s] Importing recommendation model registry...", _timestamp())
     # from apps.recommendations.services import algorithm as recommendation_algorithm
