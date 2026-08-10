@@ -295,7 +295,7 @@ async def list_reviewed_posts(
         default=None,
         description=(
             "Filter reviewed posts by status: published, flagged, rejected, reinstate, escalate. "
-            "flagged includes processing posts awaiting re-review."
+            "published includes reinstate. flagged includes processing posts awaiting re-review."
         ),
     ),
     moderator_id: str | None = Query(

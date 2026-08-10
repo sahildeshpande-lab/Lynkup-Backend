@@ -23,14 +23,14 @@ def _post_state_filter(state: PostState | Collection[PostState]):
 
 
 # Public-facing status values accepted by the reviewed-posts endpoint.
-# Most statuses map 1:1 to Post.state. ``flagged`` is the exception: the
-# flagged dashboard tab also includes ``processing`` (re-opened for review).
+# ``published`` includes reinstate (public-visible set). ``flagged`` includes
+# ``processing`` (re-opened for review). Other statuses map 1:1 to Post.state.
 ReviewedPostStatus = Literal[
     "published", "flagged", "rejected", "reinstate", "escalate", "processing"
 ]
 
 _REVIEWED_STATUS_TO_STATES: dict[str, tuple[PostState, ...]] = {
-    "published": (PostState.published,),
+    "published": (PostState.published, PostState.reinstate),
     "flagged": (PostState.flagged, PostState.processing),
     "rejected": (PostState.rejected,),
     "reinstate": (PostState.reinstate,),
@@ -43,16 +43,18 @@ _REVIEWED_STATUS_TO_STATE: dict[str, PostState] = {
     status: states[0] for status, states in _REVIEWED_STATUS_TO_STATES.items()
 }
 
-# Default state when no status filter is supplied.
-_DEFAULT_REVIEWED_STATE = PostState.published
+# Default status when no filter is supplied → same as status=published.
+_DEFAULT_REVIEWED_STATUS = "published"
 
 
 def _reviewed_states_for_status(
     status: Union[ReviewedPostStatus, None],
 ) -> tuple[PostState, ...]:
     if status is None:
-        return (_DEFAULT_REVIEWED_STATE,)
-    return _REVIEWED_STATUS_TO_STATES.get(status, (_DEFAULT_REVIEWED_STATE,))
+        return _REVIEWED_STATUS_TO_STATES[_DEFAULT_REVIEWED_STATUS]
+    return _REVIEWED_STATUS_TO_STATES.get(
+        status, _REVIEWED_STATUS_TO_STATES[_DEFAULT_REVIEWED_STATUS]
+    )
 
 
 def _build_reviewed_posts_filter(
@@ -93,13 +95,14 @@ async def count_reviewed_posts_summary_by_state(
 ) -> dict[str, int]:
     from common.user_visibility import visible_user_filters
 
-    # processing rolls into the flagged tab count (same as the list filter).
-    state_to_status = {
+    # processing → flagged tab; reinstate → published tab (matches list filters).
+    # reinstate is also kept as its own summary key for the reinstate tab.
+    rollup_to_status = {
         PostState.published: "published",
+        PostState.reinstate: "published",
         PostState.flagged: "flagged",
         PostState.processing: "flagged",
         PostState.rejected: "rejected",
-        PostState.reinstate: "reinstate",
         PostState.escalate: "escalate",
     }
     summary_keys = ("published", "flagged", "rejected", "reinstate", "escalate")
@@ -108,7 +111,7 @@ async def count_reviewed_posts_summary_by_state(
         .select_from(Post)
         .join(User, User.id == Post.author_user_id)
         .where(
-            Post.state.in_(list(state_to_status.keys())),
+            Post.state.in_(list(rollup_to_status.keys())),
             *visible_user_filters(User),
         )
     )
@@ -119,9 +122,11 @@ async def count_reviewed_posts_summary_by_state(
     result = await db.execute(stmt)
     counts = {key: 0 for key in summary_keys}
     for state, count in result.all():
-        status_key = state_to_status.get(state)
+        status_key = rollup_to_status.get(state)
         if status_key is not None:
             counts[status_key] += count
+        if state == PostState.reinstate:
+            counts["reinstate"] += count
     return counts
 
 

@@ -129,9 +129,14 @@ async def edit_post(
         payload=payload,
         db=db
     )
+    post_data = await build_post_detail_response(
+        db,
+        post,
+        viewer_user_id=current_user.id,
+    )
     return success_response(
         "Post updated successfully",
-        format_post_detail(post, viewer_user_id=current_user.id),
+        post_data,
         response_cls=ApiResponse,
     )
 

@@ -1976,9 +1976,9 @@ async def list_reviewed_posts_by_state_service(
 ) -> dict:
     """List reviewed posts filtered by ``Post.state``.
 
-    ``Post.state`` drives moderator dashboard tabs. Most ``status`` values map
-    1:1 to a post state; ``flagged`` also includes ``processing`` (re-opened
-    for review). When omitted, ``status`` defaults to ``published``.
+    ``Post.state`` drives moderator dashboard tabs. ``published`` includes
+    ``reinstate``; ``flagged`` includes ``processing`` (re-opened for review).
+    Other statuses map 1:1. When omitted, ``status`` defaults to ``published``.
     An optional ``moderator_id`` additionally scopes results to a single moderator.
     """
     from common.pagination import build_paginated_response
