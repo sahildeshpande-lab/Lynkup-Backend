@@ -6,7 +6,13 @@ from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import EmailStr
 from core.database.session import get_session
-from core.security.auth import get_current_superadmin, get_current_admin, get_current_moderator, get_current_moderator_or_viewer
+from core.security.auth import (
+    get_current_superadmin,
+    get_current_admin,
+    get_current_app_user,
+    get_current_moderator,
+    get_current_moderator_or_viewer,
+)
 from apps.accounts.db_models import User
 
 from . import services
@@ -23,6 +29,8 @@ from .schemas import (
     AdminForgotPasswordRequest,
     AdminResetPasswordRequest,
     AdminPublishPostRequest,
+    FeatureFlagCreateRequest,
+    FeatureFlagUpdateRequest,
 )
 from apps.accounts.schemas import EmailSignupRequest, RefreshTokenRequest, AdminAuthResponse
 from apps.profiles.schemas import CompletenessWeightsUpdateRequest, UpdateProfileRequest
@@ -356,6 +364,61 @@ async def admin_soft_delete_invitation(
         db,
         code=payload.code,
         admin_user_id=current_user.id,
+    )
+
+
+@router.get("/feature-flags", response_model=ApiResponse)
+async def list_public_feature_flags(
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_app_user),
+) -> ApiResponse:
+    """Return all platform feature flags for authenticated app users."""
+    _ = current_user
+    return ApiResponse(
+        message="Feature flags fetched successfully",
+        data=await services.list_feature_flags(db),
+    )
+
+
+@router.get("/admin/feature-flags", response_model=ApiResponse)
+async def list_admin_feature_flags(
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+) -> ApiResponse:
+    _ = current_user
+    return ApiResponse(
+        message="Feature flags fetched successfully",
+        data=await services.list_feature_flags(db),
+    )
+
+
+@router.patch("/admin/feature-flags", response_model=ApiResponse)
+async def patch_admin_feature_flag(
+    payload: FeatureFlagUpdateRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+) -> ApiResponse:
+    _ = current_user
+    return ApiResponse(
+        message="Feature flag updated successfully",
+        data=await services.update_feature_flag(payload, db),
+    )
+
+
+@router.post(
+    "/admin/feature-flags",
+    response_model=ApiResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_admin_feature_flag(
+    payload: FeatureFlagCreateRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+) -> ApiResponse:
+    _ = current_user
+    return ApiResponse(
+        message="Feature flag created successfully",
+        data=await services.create_feature_flag(payload, db),
     )
 
 

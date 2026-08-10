@@ -27,7 +27,21 @@ from .user_management_service import (
 from . import password_service as _service_module_2
 from .password_service import admin_forgot_password, admin_reset_password, change_password
 
-_SERVICE_MODULES = (_service_module_0, _service_module_1, _service_module_2,)
+from . import feature_flag_service as _service_module_3
+from .feature_flag_service import (
+    create_feature_flag,
+    ensure_default_feature_flags,
+    is_feature_enabled,
+    list_feature_flags,
+    update_feature_flag,
+)
+
+_SERVICE_MODULES = (
+    _service_module_0,
+    _service_module_1,
+    _service_module_2,
+    _service_module_3,
+)
 
 
 class _ServicesModule(ModuleType):
@@ -61,4 +75,9 @@ __all__ = [
     "admin_reset_password",
     "change_password",
     "PASSWORD_HASHER",
+    "list_feature_flags",
+    "create_feature_flag",
+    "update_feature_flag",
+    "ensure_default_feature_flags",
+    "is_feature_enabled",
 ]

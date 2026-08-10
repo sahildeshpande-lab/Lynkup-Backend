@@ -8,6 +8,7 @@ from apps.engagement.db_models import PostReaction, Repost, Bookmark, ShareEvent
 from apps.moderation.db_models import ModerationWordsConfig, ModerationAssignmentState, ModerationHistory
 from apps.invitations.db_models import Invitation
 from apps.report.db_models import Report
+from apps.administration.db_models import AdminConfiguration
 from apps.notifications.db_models import (
     Notification,
     NotificationCampaign,
@@ -19,6 +20,7 @@ from apps.notifications.db_models import (
 from apps.export.models import DataExportRequest
 
 __all__ = [
+    "AdminConfiguration",
     "ConsentRecord",
     "Country",
     "Profile",

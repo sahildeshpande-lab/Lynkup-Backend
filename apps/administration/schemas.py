@@ -4,7 +4,15 @@ from datetime import datetime
 from typing import Any, Optional, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    EmailStr,
+    Field,
+    ConfigDict,
+    field_validator,
+    model_validator,
+)
 
 from common.enums import Role, AdminUserStatus
 
@@ -203,4 +211,77 @@ class RecommendationSettingsUpdateRequest(BaseModel):
     is_enabled: bool | None = None
     generation_frequency_days: int | None = Field(default=None, ge=1, le=365)
     max_recommendations: int | None = Field(default=None, ge=1, le=50)
+
+
+class FeatureFlagItem(BaseModel):
+    id: UUID
+    key: str
+    name: str
+    description: str | None = None
+    is_enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class FeatureFlagListData(BaseModel):
+    items: list[FeatureFlagItem]
+
+
+class FeatureFlagCreateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    key: str = Field(
+        min_length=1,
+        max_length=100,
+        validation_alias=AliasChoices("key", "feature_key"),
+    )
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    is_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("is_enabled", "enabled"),
+    )
+
+    @field_validator("key")
+    @classmethod
+    def normalize_key(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not normalized:
+            raise ValueError("key cannot be blank")
+        return normalized
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("name cannot be blank")
+        return normalized
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
+class FeatureFlagUpdateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    key: str = Field(
+        min_length=1,
+        max_length=100,
+        validation_alias=AliasChoices("key", "feature_key"),
+    )
+    is_enabled: bool = Field(validation_alias=AliasChoices("is_enabled", "enabled"))
+
+    @field_validator("key")
+    @classmethod
+    def normalize_key(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not normalized:
+            raise ValueError("key cannot be blank")
+        return normalized
 
