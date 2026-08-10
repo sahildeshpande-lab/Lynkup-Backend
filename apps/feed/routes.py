@@ -282,4 +282,3 @@ async def get_feed(
         paginated,
         response_cls=ApiResponse,
     )
-s
