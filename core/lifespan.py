@@ -118,3 +118,4 @@ async def lifespan(app: FastAPI):
     cleanup_apns_resources()
 
     logger.info("Application Shutdown Completed")
+    
