@@ -41,4 +41,36 @@ async def init_db() -> None:
                 """
             )
         )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS posts
+                ADD COLUMN IF NOT EXISTS auto_moderation_scanned_at TIMESTAMPTZ
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS posts
+                ADD COLUMN IF NOT EXISTS moderation_words_found JSONB
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS comments
+                ADD COLUMN IF NOT EXISTS auto_moderation_scanned_at TIMESTAMPTZ
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS comments
+                ADD COLUMN IF NOT EXISTS moderation_words_found JSONB
+                """
+            )
+        )
     _db_initialized = True

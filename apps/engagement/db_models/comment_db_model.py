@@ -5,6 +5,7 @@ from typing import List
 from uuid import UUID, uuid4
 
 from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Index, Integer, SmallInteger, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel, Relationship
 
@@ -41,6 +42,14 @@ class Comment(SQLModel, table=True):
         sa_column=Column(Integer, nullable=False, server_default="0"),
     )
     comment_text: str = Field(sa_column=Column(Text, nullable=False))
+    auto_moderation_scanned_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    moderation_words_found: list[str] | None = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
     created_at: datetime = Field(
         default_factory=utc_now,
         sa_column=Column(DateTime(timezone=True), nullable=False),

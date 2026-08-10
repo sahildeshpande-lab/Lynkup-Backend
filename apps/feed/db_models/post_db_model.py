@@ -48,6 +48,14 @@ class Post(SQLModel, table=True):
         default=None,
         sa_column=Column(Text, nullable=True),
     )
+    auto_moderation_scanned_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    moderation_words_found: list[str] | None = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
     like_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
     repost_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
     share_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
