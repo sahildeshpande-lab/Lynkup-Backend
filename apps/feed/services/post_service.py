@@ -252,6 +252,7 @@ def format_post_detail(
     reactions=None,
     reposted_data: dict | None = None,
     viewer_user_id: UUID | None = None,
+    triggered_moderation_review: bool = False,
 ) -> dict:
     """
     Format a Post model and its attachments into a dictionary matching PostDetailData schema.
@@ -285,6 +286,7 @@ def format_post_detail(
         "created_at": post.created_at,
         "updated_at": post.updated_at,
         "is_edited": bool(getattr(post, "is_edited", False)),
+        "triggered_moderation_review": bool(triggered_moderation_review),
         "like_count": post.like_count,
         "repost_count": post.repost_count,
         "share_count": getattr(post, "share_count", 0),
@@ -354,6 +356,7 @@ def format_repost_item(
     moderator_user=None,
     moderator_profile=None,
     viewer_user_id: UUID | None = None,
+    triggered_moderation_review: bool = False,
 ) -> dict:
     """
     Format a repost as a common post object for the reposter, with the original
@@ -378,6 +381,7 @@ def format_repost_item(
         reactions=reactions,
         reposted_data=None,
         viewer_user_id=viewer_user_id,
+        triggered_moderation_review=triggered_moderation_review,
     )
     # Original author visibility lives only under reposted_data.
     nested["profile_visibility"] = _normalize_profile_visibility(original_author_profile)
@@ -419,6 +423,7 @@ def format_repost_item(
         "created_at": reposted_at,
         "updated_at": reposted_at,
         "is_edited": False,
+        "triggered_moderation_review": False,
         "like_count": original_post.like_count,
         "repost_count": original_post.repost_count,
         "share_count": getattr(original_post, "share_count", 0),
@@ -1304,6 +1309,9 @@ async def build_post_detail_response(
     from sqlalchemy.orm import aliased
 
     from apps.accounts.db_models import User
+    from apps.feed.repositories.post_revision_repository import (
+        posts_with_triggered_moderation_review,
+    )
     from apps.profiles.db_models import Profile
 
     author_profile = (
@@ -1327,6 +1335,7 @@ async def build_post_detail_response(
         if row:
             moderator_user, moderator_profile = row
 
+    triggered_ids = await posts_with_triggered_moderation_review(db, [post.id])
     return format_post_detail(
         post,
         author_profile=author_profile,
@@ -1334,6 +1343,7 @@ async def build_post_detail_response(
         moderator_user=moderator_user,
         moderator_profile=moderator_profile,
         viewer_user_id=viewer_user_id,
+        triggered_moderation_review=post.id in triggered_ids,
     )
 
 
@@ -1430,6 +1440,17 @@ _LIST_POST_STATES: dict[str, PostState] = {
 }
 
 _OWNER_ONLY_LIST_STATES = frozenset({PostState.flagged, PostState.processing})
+_STAFF_LIST_ROLES = frozenset({"moderator", "viewer", "superadmin"})
+
+
+def _user_role_name(user: User) -> str:
+    role = getattr(user, "role", None)
+    return role.value if hasattr(role, "value") else str(role or "")
+
+
+def _is_staff_list_role(user: User) -> bool:
+    """Moderator / viewer / superadmin may inspect another user's moderation states."""
+    return _user_role_name(user) in _STAFF_LIST_ROLES
 
 
 def _reject_other_user_private_post_states(
@@ -1438,8 +1459,10 @@ def _reject_other_user_private_post_states(
     target_user_id: UUID | None,
     requested_state: PostState,
 ) -> None:
-    """Block viewing another user's flagged/processing posts via GET /posts."""
+    """Block non-staff from viewing another user's flagged/processing posts via GET /posts."""
     if target_user_id is None or target_user_id == current_user.id:
+        return
+    if _is_staff_list_role(current_user):
         return
     if requested_state in _OWNER_ONLY_LIST_STATES:
         raise HTTPException(
@@ -1457,9 +1480,10 @@ def _query_states_for_list(
     Resolve which post states to load for GET /posts.
 
     - Default / ``published``: published + reinstate (public-visible set).
-    - ``flagged`` / ``processing``: that state only (owner or superadmin).
-    - ``draft``: drafts only.
-    Visitors are forced to ``published`` upstream so they never see flagged/processing.
+    - ``flagged``: flagged + processing (moderation tab).
+    - ``processing`` / ``draft``: that state only.
+    Regular visitors are forced to ``published`` upstream so they never see
+    flagged/processing. Staff may request those states for another ``user_id``.
     Each post keeps its real ``state`` / ``status`` (not remapped).
     """
     del is_owner  # kept for call-site compatibility; visitor gating is upstream
@@ -1467,6 +1491,8 @@ def _query_states_for_list(
         return PostState.draft
     if requested_state == PostState.published:
         return FEED_VISIBLE_POST_STATES
+    if requested_state == PostState.flagged:
+        return (PostState.flagged, PostState.processing)
     return requested_state
 
 
@@ -1479,8 +1505,7 @@ async def get_profile_visibility_block_message(
     if target_user_id is None or target_user_id == current_user.id:
         return None
 
-    role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
-    if role == "superadmin":
+    if _is_staff_list_role(current_user):
         return None
 
     from apps.connections.services.connection_service import are_connected
@@ -1532,7 +1557,8 @@ async def list_user_posts_service(
             detail="Invalid state. Allowed values: published, processing, flagged, draft",
         )
 
-    role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    role = _user_role_name(current_user)
+    is_staff = role in _STAFF_LIST_ROLES
     is_superadmin = role == "superadmin"
     is_viewing_other = target_user_id is not None and target_user_id != current_user.id
 
@@ -1543,7 +1569,7 @@ async def list_user_posts_service(
     )
 
     # Regular users viewing another user's posts are restricted to published posts only.
-    if is_viewing_other and not is_superadmin:
+    if is_viewing_other and not is_staff:
         requested_state = PostState.published
 
     if is_superadmin:
@@ -1593,6 +1619,9 @@ async def list_user_posts_items_service(
         fetch_posts_by_state_with_details,
         user_exists,
     )
+    from apps.feed.repositories.post_revision_repository import (
+        posts_with_triggered_moderation_review,
+    )
 
     requested_state = _LIST_POST_STATES.get(state)
     if requested_state is None:
@@ -1601,7 +1630,8 @@ async def list_user_posts_items_service(
             detail="Invalid state. Allowed values: published, processing, flagged, draft",
         )
 
-    role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    role = _user_role_name(current_user)
+    is_staff = role in _STAFF_LIST_ROLES
     is_superadmin = role == "superadmin"
     is_viewing_other = target_user_id is not None and target_user_id != current_user.id
 
@@ -1611,7 +1641,7 @@ async def list_user_posts_items_service(
         requested_state=requested_state,
     )
 
-    if is_viewing_other and not is_superadmin:
+    if is_viewing_other and not is_staff:
         requested_state = PostState.published
 
     if is_superadmin:
@@ -1691,6 +1721,7 @@ async def list_user_posts_items_service(
         all_post_ids,
     )
     latest_reactions = await load_latest_post_reactions(db, all_post_ids, per_type_limit=3)
+    triggered_ids = await posts_with_triggered_moderation_review(db, all_post_ids)
 
     from apps.connections.services.recommendation_service import get_user_connections
     from apps.feed.services.profile_enrichment import (
@@ -1736,6 +1767,7 @@ async def list_user_posts_items_service(
                 reactions=latest_reactions.get(post.id),
                 reposted_data=None,
                 viewer_user_id=current_user.id,
+                triggered_moderation_review=post.id in triggered_ids,
             )
         )
 
@@ -1770,6 +1802,7 @@ async def list_user_posts_items_service(
                 user_reaction=format_user_reaction(engagement_flags.user_reaction_for(post.id)),
                 reactions=latest_reactions.get(post.id),
                 viewer_user_id=current_user.id,
+                triggered_moderation_review=post.id in triggered_ids,
             )
         )
 

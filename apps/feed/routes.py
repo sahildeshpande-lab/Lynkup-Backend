@@ -157,8 +157,10 @@ async def list_user_posts(
         default="published",
         description=(
             "Default (published): published + reinstate. "
-            "Owner filters: flagged or processing return only that state. "
-            "draft returns drafts only."
+            "flagged: flagged + processing. "
+            "processing/draft: that state only. "
+            "Owner or staff (moderator/viewer/superadmin) may request flagged/processing "
+            "for a user_id; regular visitors are limited to published."
         ),
         enum=["published", "flagged", "processing", "draft"],
     ),
@@ -280,3 +282,4 @@ async def get_feed(
         paginated,
         response_cls=ApiResponse,
     )
+s
