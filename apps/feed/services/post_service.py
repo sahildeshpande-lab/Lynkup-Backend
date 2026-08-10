@@ -518,13 +518,10 @@ async def _repair_unassigned_moderators_for_state(
     limit: int = 500,
 ) -> None:
     """Assign moderators to posts in a review state that are still unassigned."""
-    from apps.feed.repositories.post_repository import (
-        _DEFAULT_REVIEWED_STATE,
-        _REVIEWED_STATUS_TO_STATE,
-    )
+    from apps.feed.repositories.post_repository import _reviewed_states_for_status
 
-    target_state = _REVIEWED_STATUS_TO_STATE.get(status, _DEFAULT_REVIEWED_STATE)
-    await _repair_unassigned_moderators(db, target_state=target_state, limit=limit)
+    for target_state in _reviewed_states_for_status(status):
+        await _repair_unassigned_moderators(db, target_state=target_state, limit=limit)
 
 
 async def _repair_unassigned_moderators(
@@ -1814,6 +1811,7 @@ def _format_reviewed_post_item(
     reactions=None,
     report_count: int = 0,
     viewer_user_id: UUID | None = None,
+    triggered_moderation_review: bool = False,
 ) -> dict:
     content = post.content or {}
     is_repostable = (
@@ -1833,6 +1831,7 @@ def _format_reviewed_post_item(
         "created_at": post.created_at,
         "updated_at": post.updated_at,
         "is_edited": bool(getattr(post, "is_edited", False)),
+        "triggered_moderation_review": bool(triggered_moderation_review),
         "revision_number": post.revision_number,
         "like_count": getattr(post, "like_count", 0) or 0,
         "repost_count": getattr(post, "repost_count", 0) or 0,
@@ -1944,9 +1943,9 @@ async def list_reviewed_posts_by_state_service(
 ) -> dict:
     """List reviewed posts filtered by ``Post.state``.
 
-    ``Post.state`` is the single source of truth for the moderator dashboard
-    tabs. ``status`` maps 1:1 to a post state (published / flagged / rejected /
-    reinstate / escalate / processing); when omitted it defaults to ``published``.
+    ``Post.state`` drives moderator dashboard tabs. Most ``status`` values map
+    1:1 to a post state; ``flagged`` also includes ``processing`` (re-opened
+    for review). When omitted, ``status`` defaults to ``published``.
     An optional ``moderator_id`` additionally scopes results to a single moderator.
     """
     from common.pagination import build_paginated_response
@@ -1954,6 +1953,9 @@ async def list_reviewed_posts_by_state_service(
         count_reviewed_posts_for_moderator,
         fetch_reviewed_posts_for_moderator,
         count_reviewed_posts_summary_by_state,
+    )
+    from apps.feed.repositories.post_revision_repository import (
+        posts_with_triggered_moderation_review,
     )
 
     await _repair_unassigned_moderators_for_state(db, status=status)
@@ -1989,6 +1991,7 @@ async def list_reviewed_posts_by_state_service(
         ReportEntityType.post,
         post_ids,
     )
+    triggered_ids = await posts_with_triggered_moderation_review(db, post_ids)
     formatted = [
         _format_reviewed_post_item(
             post,
@@ -1998,6 +2001,7 @@ async def list_reviewed_posts_by_state_service(
             reactions=latest_reactions.get(post.id),
             report_count=report_counts.get(post.id, 0),
             viewer_user_id=viewer_user_id,
+            triggered_moderation_review=post.id in triggered_ids,
         )
         for post, profile, mod_user, mod_profile in posts
     ]

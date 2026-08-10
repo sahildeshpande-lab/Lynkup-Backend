@@ -293,7 +293,10 @@ async def list_processing_posts(
 async def list_reviewed_posts(
     status: Literal["published", "flagged", "rejected", "reinstate", "escalate"] | None = Query(
         default=None,
-        description="Filter reviewed posts by status: published, flagged, rejected, reinstate, escalate",
+        description=(
+            "Filter reviewed posts by status: published, flagged, rejected, reinstate, escalate. "
+            "flagged includes processing posts awaiting re-review."
+        ),
     ),
     moderator_id: str | None = Query(
         default=None,

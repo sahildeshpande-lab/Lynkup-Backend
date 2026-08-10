@@ -23,20 +23,36 @@ def _post_state_filter(state: PostState | Collection[PostState]):
 
 
 # Public-facing status values accepted by the reviewed-posts endpoint.
-# Each status maps 1:1 to a Post.state value — Post.state is the single source
-# of truth for reviewed-post filtering (dashboard tabs are driven from it).
-ReviewedPostStatus = Literal["published", "flagged", "rejected", "reinstate", "escalate"]
+# Most statuses map 1:1 to Post.state. ``flagged`` is the exception: the
+# flagged dashboard tab also includes ``processing`` (re-opened for review).
+ReviewedPostStatus = Literal[
+    "published", "flagged", "rejected", "reinstate", "escalate", "processing"
+]
 
+_REVIEWED_STATUS_TO_STATES: dict[str, tuple[PostState, ...]] = {
+    "published": (PostState.published,),
+    "flagged": (PostState.flagged, PostState.processing),
+    "rejected": (PostState.rejected,),
+    "reinstate": (PostState.reinstate,),
+    "escalate": (PostState.escalate,),
+    "processing": (PostState.processing,),
+}
+
+# Backward-compatible alias used by repair helpers (single primary state).
 _REVIEWED_STATUS_TO_STATE: dict[str, PostState] = {
-    "published": PostState.published,
-    "flagged": PostState.flagged,
-    "rejected": PostState.rejected,
-    "reinstate": PostState.reinstate,
-    "escalate": PostState.escalate,
+    status: states[0] for status, states in _REVIEWED_STATUS_TO_STATES.items()
 }
 
 # Default state when no status filter is supplied.
 _DEFAULT_REVIEWED_STATE = PostState.published
+
+
+def _reviewed_states_for_status(
+    status: Union[ReviewedPostStatus, None],
+) -> tuple[PostState, ...]:
+    if status is None:
+        return (_DEFAULT_REVIEWED_STATE,)
+    return _REVIEWED_STATUS_TO_STATES.get(status, (_DEFAULT_REVIEWED_STATE,))
 
 
 def _build_reviewed_posts_filter(
@@ -45,12 +61,12 @@ def _build_reviewed_posts_filter(
 ):
     from common.user_visibility import visible_user_filters
 
-    target_state = _REVIEWED_STATUS_TO_STATE.get(status, _DEFAULT_REVIEWED_STATE)
+    target_states = _reviewed_states_for_status(status)
     # Filter by state only. User-published posts (state=published,
     # is_moderator_reviewed=False) must appear so the moderator can act on them.
     # is_moderator_reviewed is informational metadata, not a visibility gate.
     # Hide posts from suspended / banned / deleting authors.
-    filters = [Post.state == target_state, *visible_user_filters(User)]
+    filters = [_post_state_filter(target_states), *visible_user_filters(User)]
     if moderator_id is not None:
         filters.append(Post.moderator_id == moderator_id)
     return filters
@@ -77,13 +93,16 @@ async def count_reviewed_posts_summary_by_state(
 ) -> dict[str, int]:
     from common.user_visibility import visible_user_filters
 
+    # processing rolls into the flagged tab count (same as the list filter).
     state_to_status = {
         PostState.published: "published",
         PostState.flagged: "flagged",
+        PostState.processing: "flagged",
         PostState.rejected: "rejected",
         PostState.reinstate: "reinstate",
         PostState.escalate: "escalate",
     }
+    summary_keys = ("published", "flagged", "rejected", "reinstate", "escalate")
     stmt = (
         select(Post.state, func.count(Post.id))
         .select_from(Post)
@@ -98,10 +117,11 @@ async def count_reviewed_posts_summary_by_state(
     stmt = stmt.group_by(Post.state)
 
     result = await db.execute(stmt)
-    counts = {status: 0 for status in state_to_status.values()}
+    counts = {key: 0 for key in summary_keys}
     for state, count in result.all():
-        if state in state_to_status:
-            counts[state_to_status[state]] = count
+        status_key = state_to_status.get(state)
+        if status_key is not None:
+            counts[status_key] += count
     return counts
 
 
@@ -124,8 +144,8 @@ async def fetch_reviewed_posts_for_moderator(
     ModeratorUser = aliased(User, name="moderator_user")
     ModeratorProfile = aliased(Profile, name="moderator_profile")
 
-    target_state = _REVIEWED_STATUS_TO_STATE.get(status, _DEFAULT_REVIEWED_STATE)
-    filters = [Post.state == target_state, *visible_user_filters(AuthorUser)]
+    target_states = _reviewed_states_for_status(status)
+    filters = [_post_state_filter(target_states), *visible_user_filters(AuthorUser)]
     if moderator_id is not None:
         filters.append(Post.moderator_id == moderator_id)
 
