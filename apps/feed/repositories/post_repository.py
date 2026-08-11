@@ -130,6 +130,54 @@ async def count_reviewed_posts_summary_by_state(
     return counts
 
 
+async def count_user_posts_summary_by_state(
+    db: AsyncSession,
+    *,
+    user_id: UUID | None,
+) -> dict[str, int]:
+    """
+    Count a user's posts for list-tab summary chips.
+
+    Rollups match GET /posts filters:
+    - published includes reinstate
+    - flagged includes processing
+    - reinstate is also returned as its own key
+    """
+    from common.user_visibility import visible_user_filters
+
+    rollup_to_status = {
+        PostState.published: "published",
+        PostState.reinstate: "published",
+        PostState.flagged: "flagged",
+        PostState.processing: "flagged",
+        PostState.rejected: "rejected",
+    }
+    summary_keys = ("published", "flagged", "rejected", "reinstate")
+    filters = [
+        Post.state.in_(list(rollup_to_status.keys())),
+        *visible_user_filters(User),
+    ]
+    if user_id is not None:
+        filters.append(Post.author_user_id == user_id)
+
+    stmt = (
+        select(Post.state, func.count(Post.id))
+        .select_from(Post)
+        .join(User, User.id == Post.author_user_id)
+        .where(*filters)
+        .group_by(Post.state)
+    )
+    result = await db.execute(stmt)
+    counts = {key: 0 for key in summary_keys}
+    for state, count in result.all():
+        status_key = rollup_to_status.get(state)
+        if status_key is not None:
+            counts[status_key] += count
+        if state == PostState.reinstate:
+            counts["reinstate"] += count
+    return counts
+
+
 async def fetch_reviewed_posts_for_moderator(
     db: AsyncSession,
     moderator_id: UUID | None,

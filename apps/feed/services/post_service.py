@@ -1605,6 +1605,16 @@ async def list_user_posts_service(
     return posts
 
 
+def _public_user_posts_summary(summary: dict[str, int]) -> dict[str, int]:
+    """Visitors must not learn flagged/rejected counts for another user."""
+    return {
+        "published": int(summary.get("published", 0)),
+        "flagged": 0,
+        "rejected": 0,
+        "reinstate": int(summary.get("reinstate", 0)),
+    }
+
+
 async def list_user_posts_items_service(
     current_user: User,
     db: AsyncSession,
@@ -1612,10 +1622,11 @@ async def list_user_posts_items_service(
     state: str = "published",
     page: int | None = None,
     page_size: int | None = None,
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict], int, dict[str, int]]:
     """List user posts formatted for the API, including moderator assignment fields."""
     from apps.feed.repositories.post_repository import (
         count_posts_by_state,
+        count_user_posts_summary_by_state,
         fetch_posts_by_state_with_details,
         user_exists,
     )
@@ -1655,6 +1666,9 @@ async def list_user_posts_items_service(
     is_owner = effective_user_id == current_user.id
     query_states = _query_states_for_list(requested_state, is_owner=is_owner)
     total_items = await count_posts_by_state(db, state=query_states, user_id=effective_user_id)
+    summary = await count_user_posts_summary_by_state(db, user_id=effective_user_id)
+    if is_viewing_other and not is_staff:
+        summary = _public_user_posts_summary(summary)
 
     if page is None and page_size is None:
         offset = 0
@@ -1815,7 +1829,7 @@ async def list_user_posts_items_service(
     )
 
     total_items = total_items + len([ri for ri in repost_items if ri[1].id not in post_ids])
-    return items, total_items
+    return items, total_items, summary
 
 
 def _format_reviewed_post_media(post: Post) -> list[dict]:

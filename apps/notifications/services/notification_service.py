@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -9,7 +10,7 @@ from sqlmodel import select
 
 from apps.notifications.db_models import Notification
 from apps.notifications.repositories.campaign_audience_repository import (
-    get_active_fcm_tokens_for_users,
+    get_active_push_targets_for_users,
     get_campaign_audience_for_user,
     mark_all_campaign_audience_read,
     mark_campaign_audience_read,
@@ -43,7 +44,7 @@ from apps.notifications.services.notification_payload_builder import (
 )
 from common.pagination import build_paginated_response
 from common.responses import error_response, success_response
-from core.auth.services import send_push_notifications
+from core.push import send_push_to_devices
 
 logger = logging.getLogger(__name__)
 
@@ -143,11 +144,62 @@ async def _user_topic_set(db: AsyncSession, user_id: UUID) -> set[str]:
     return await TopicService.build_topics(db, profile)
 
 
+def _as_aware_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+async def _user_registered_at(db: AsyncSession, user_id: UUID) -> datetime | None:
+    """Return the user's account creation time (UTC), if known."""
+    from apps.accounts.db_models import User
+
+    created_at = (
+        await db.execute(select(User.created_at).where(User.id == user_id))
+    ).scalar_one_or_none()
+    return _as_aware_utc(created_at)
+
+
+def _broadcast_sent_at(notification: Notification) -> datetime | None:
+    """Effective send time for a broadcast (campaign.sent_at when present)."""
+    campaign = getattr(notification, "campaign", None)
+    sent_at = getattr(campaign, "sent_at", None) if campaign is not None else None
+    return _as_aware_utc(sent_at) or _as_aware_utc(
+        getattr(notification, "created_at", None)
+    )
+
+
+def _is_broadcast_after_registration(
+    notification: Notification,
+    *,
+    user_registered_at: datetime | None,
+) -> bool:
+    """
+    New users must not see globals dispatched before their account existed.
+
+    When registration time is unknown, keep prior visibility behavior.
+    """
+    if user_registered_at is None:
+        return True
+    sent_at = _broadcast_sent_at(notification)
+    if sent_at is None:
+        return True
+    return sent_at >= user_registered_at
+
+
 def _is_broadcast_visible_to_user(
     notification: Notification,
     *,
     user_topics: set[str],
+    user_registered_at: datetime | None = None,
 ) -> bool:
+    if not _is_broadcast_after_registration(
+        notification,
+        user_registered_at=user_registered_at,
+    ):
+        return False
     type_name = None
     if getattr(notification, "notification_type", None) is not None:
         type_name = notification.notification_type.name
@@ -187,6 +239,7 @@ async def _list_unified_notifications_for_user(
     ]
 
     broadcasts = await list_broadcast_notifications(db)
+    user_registered_at = await _user_registered_at(db, user_id)
 
     user_topics: set[str] | None = None
     visible_broadcasts: list[Notification] = []
@@ -198,12 +251,18 @@ async def _list_unified_notifications_for_user(
         )
         if type_name and not enabled_categories.get(type_name, True):
             continue
+        if not _is_broadcast_after_registration(
+            notification,
+            user_registered_at=user_registered_at,
+        ):
+            continue
         if type_name == "TOPIC":
             if user_topics is None:
                 user_topics = await _user_topic_set(db, user_id)
             if not _is_broadcast_visible_to_user(
                 notification,
                 user_topics=user_topics,
+                user_registered_at=user_registered_at,
             ):
                 continue
         elif type_name != "ANNOUNCEMENT":
@@ -422,8 +481,13 @@ async def mark_as_read(
             response_cls=MarkNotificationReadResponse,
         )
 
+    user_registered_at = await _user_registered_at(db, user_id)
     user_topics = await _user_topic_set(db, user_id)
-    if not _is_broadcast_visible_to_user(broadcast, user_topics=user_topics):
+    if not _is_broadcast_visible_to_user(
+        broadcast,
+        user_topics=user_topics,
+        user_registered_at=user_registered_at,
+    ):
         return error_response(
             "Notification not found.",
             response_cls=MarkNotificationReadResponse,
@@ -553,16 +617,16 @@ async def create_notification(
 
     if preference.push_enabled and category_enabled:
         try:
-            tokens = await get_active_fcm_tokens_for_users(db, [recipient_user_id])
+            targets = await get_active_push_targets_for_users(db, [recipient_user_id])
             logger.info(
-                "Push notification token lookup type=%s recipient_user_id=%s token_count=%s",
+                "Push notification token lookup type=%s recipient_user_id=%s target_count=%s",
                 type_name,
                 recipient_user_id,
-                len(tokens),
+                len(targets),
             )
-            if tokens:
-                result = send_push_notifications(
-                    tokens,
+            if targets:
+                result = await send_push_to_devices(
+                    targets,
                     title,
                     body,
                     NotificationPayloadBuilder.for_fcm(data_payload),
@@ -576,7 +640,7 @@ async def create_notification(
                 )
             else:
                 logger.warning(
-                    "Push notification skipped type=%s recipient_user_id=%s reason=no_active_fcm_tokens",
+                    "Push notification skipped type=%s recipient_user_id=%s reason=no_active_push_targets",
                     type_name,
                     recipient_user_id,
                 )
@@ -658,7 +722,7 @@ async def notify_post_author(
     """
     Notify a post author about a moderation (or other post) event.
 
-    Reuses ``create_notification`` for in-app + FCM token push. Never raises —
+    Reuses ``create_notification`` for in-app + platform-aware push. Never raises —
     callers must treat moderation as successful even when this returns None.
     """
     type_name = (notification_type or "").strip().upper()

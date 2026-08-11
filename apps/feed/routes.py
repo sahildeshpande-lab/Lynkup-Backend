@@ -182,11 +182,19 @@ async def list_user_posts(
     if block_message:
         return success_response(
             "Account is private",
-            [],
+            {
+                "items": [],
+                "summary": {
+                    "published": 0,
+                    "flagged": 0,
+                    "rejected": 0,
+                    "reinstate": 0,
+                },
+            },
             response_cls=ApiResponse,
         )
 
-    posts, total_items = await list_user_posts_items_service(
+    posts, total_items, summary = await list_user_posts_items_service(
         current_user=current_user,
         target_user_id=user_id,
         state=state,
@@ -194,22 +202,22 @@ async def list_user_posts(
         page_size=pageSize,
         db=db,
     )
-    formatted_posts = posts
     if page is None and pageSize is None:
         return success_response(
             "User posts retrieved successfully",
-            formatted_posts,
+            {"items": posts, "summary": summary},
             response_cls=ApiResponse,
         )
     from common.pagination import build_paginated_response
     p = page or 1
     ps = pageSize if pageSize is not None else (total_items if total_items > 0 else 1)
     paginated = build_paginated_response(
-        formatted_posts,
+        posts,
         p,
         ps,
-        total_items
-    )
+        total_items,
+    ).model_dump()
+    paginated["summary"] = summary
     return success_response(
         "User posts retrieved successfully",
         paginated,
