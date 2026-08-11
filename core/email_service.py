@@ -86,17 +86,16 @@ async def _log_transactional_email(
         logger.exception("Failed to log transactional email: %s", e)
 
 
-def _attach_file_from_path(message, attachment_path: str | None) -> None:
-    """Attach a local file to a SendGrid Mail message when the path exists."""
-    if not attachment_path:
-        return
-    path = Path(attachment_path)
-    if not path.is_file():
-        logger.warning("Email attachment missing on disk: %s", attachment_path)
-        return
+def _attach_bytes_to_message(
+    message,
+    *,
+    content: bytes,
+    file_name: str,
+    content_type: str | None = None,
+) -> None:
+    """Attach raw bytes to a SendGrid Mail message."""
     try:
         import base64
-        import mimetypes
 
         from sendgrid.helpers.mail import (
             Attachment,
@@ -106,19 +105,60 @@ def _attach_file_from_path(message, attachment_path: str | None) -> None:
             FileType,
         )
     except Exception:
-        logger.exception("Could not import SendGrid attachment helpers for file")
+        logger.exception("Could not import SendGrid attachment helpers for bytes")
         return
 
-    mime_type, _ = mimetypes.guess_type(str(path))
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    encoded = base64.b64encode(content).decode("ascii")
     attachment = Attachment(
         FileContent(encoded),
-        FileName(path.name),
-        FileType(mime_type or "application/octet-stream"),
+        FileName(file_name),
+        FileType(content_type or "application/octet-stream"),
         Disposition("attachment"),
     )
     message.add_attachment(attachment)
-    logger.info("Attached file %s (%d bytes) to email", path.name, path.stat().st_size)
+    logger.info("Attached file %s (%d bytes) to email", file_name, len(content))
+
+
+def _attach_file_from_path(message, attachment_path: str | None) -> None:
+    """Attach a local file to a SendGrid Mail message when the path exists."""
+    if not attachment_path:
+        return
+    path = Path(attachment_path)
+    if not path.is_file():
+        logger.warning("Email attachment missing on disk: %s", attachment_path)
+        return
+    import mimetypes
+
+    mime_type, _ = mimetypes.guess_type(str(path))
+    _attach_bytes_to_message(
+        message,
+        content=path.read_bytes(),
+        file_name=path.name,
+        content_type=mime_type or "application/octet-stream",
+    )
+
+
+def _attach_bytes_payloads(message, attachments: list[dict] | None) -> None:
+    for item in attachments or []:
+        content = item.get("content")
+        if not isinstance(content, (bytes, bytearray)):
+            continue
+        _attach_bytes_to_message(
+            message,
+            content=bytes(content),
+            file_name=str(item.get("file_name") or "attachment.bin"),
+            content_type=str(item.get("content_type") or "application/octet-stream"),
+        )
+
+
+def _extract_sendgrid_message_id(response) -> str | None:
+    headers = getattr(response, "headers", None) or {}
+    if hasattr(headers, "get"):
+        return headers.get("X-Message-Id") or headers.get("X-Message-ID")
+    try:
+        return headers["X-Message-Id"]  # type: ignore[index]
+    except Exception:
+        return None
 
 
 async def _deliver_email_via_sendgrid(
@@ -127,11 +167,18 @@ async def _deliver_email_via_sendgrid(
     html_body: str,
     from_email: str,
     attachment_path: str | None = None,
-) -> tuple[bool, str | None]:
+    *,
+    plain_text: str | None = None,
+    attachments: list[dict] | None = None,
+) -> tuple[bool, str | None, str | None]:
+    """Deliver via SendGrid.
+
+    Returns ``(success, error_message, sendgrid_message_id)``.
+    """
     api_key = email_settings.sendgrid_api_key
     if not api_key or not from_email or _sender_is_placeholder(from_email or ""):
         logger.warning("Email send simulated: SendGrid is not fully configured for %s", to_email)
-        return True, None
+        return True, None, None
 
     try:
         from sendgrid import SendGridAPIClient
@@ -139,26 +186,30 @@ async def _deliver_email_via_sendgrid(
     except Exception:
         message = "SendGrid client could not be imported"
         logger.exception("Email send skipped: %s", message)
-        return False, message
+        return False, message, None
 
     try:
-        message = Mail(
-            from_email=Email(from_email, _from_name()),
-            to_emails=to_email,
-            subject=subject,
-            html_content=html_body,
-        )
-        if f"cid:{_LOGO_CID}" in html_body:
+        mail_kwargs = {
+            "from_email": Email(from_email, _from_name()),
+            "to_emails": to_email,
+            "subject": subject,
+            "html_content": html_body,
+        }
+        if plain_text:
+            mail_kwargs["plain_text_content"] = plain_text
+        message = Mail(**mail_kwargs)
+        if f"cid:{_LOGO_CID}" in (html_body or ""):
             _attach_inline_logo(message)
         _attach_file_from_path(message, attachment_path)
+        _attach_bytes_payloads(message, attachments)
         client = SendGridAPIClient(api_key)
         response = client.send(message)
         success = 200 <= response.status_code < 300
         if not success:
             message = f"SendGrid rejected email with status {getattr(response, 'status_code', None)}"
             logger.error("%s for %s", message, to_email)
-            return False, message
-        return True, None
+            return False, message, None
+        return True, None, _extract_sendgrid_message_id(response)
     except Exception as exc:
         message = str(exc)
         exc_name = type(exc).__name__
@@ -173,9 +224,9 @@ async def _deliver_email_via_sendgrid(
                 subject,
                 html_body,
             )
-            return True, None
+            return True, None, None
         logger.exception("Email send failed while delivering to %s", to_email)
-        return False, message
+        return False, message, None
 
 
 async def _actually_send_email_via_sendgrid(
@@ -185,10 +236,37 @@ async def _actually_send_email_via_sendgrid(
     from_email: str,
     attachment_path: str | None = None,
 ) -> bool:
-    success, _ = await _deliver_email_via_sendgrid(
+    success, _, _ = await _deliver_email_via_sendgrid(
         to_email, subject, html_body, from_email, attachment_path=attachment_path
     )
     return success
+
+
+async def send_bulk_campaign_email(
+    *,
+    to_email: str,
+    subject: str,
+    html_body: str,
+    plain_text: str | None = None,
+    attachments: list[dict] | None = None,
+):
+    """Send one bulk-campaign email. Does not touch transactional_email_log."""
+    from apps.bulk_send.schemas import DeliveryResult
+
+    success, error_message, message_id = await _deliver_email_via_sendgrid(
+        to_email,
+        subject,
+        html_body,
+        _from_email(),
+        plain_text=plain_text,
+        attachments=attachments,
+    )
+    return DeliveryResult(
+        success=success,
+        sendgrid_message_id=message_id,
+        failure_reason=None if success else (error_message or "Failed to send email"),
+        retryable=not success,
+    )
 
 
 async def _send_and_log_email(
@@ -348,7 +426,7 @@ async def process_pending_emails(limit: int = 10) -> int:
         email_ids = [email.id for email in pending_emails]
 
     if not pending_emails:
-        logger.info("Cron finished: no pending emails to process.")
+        logger.info("Cron finished: no pending transactional emails to process.")
         return 0
 
     logger.info("Cron processing %d emails: %s", len(email_ids), email_ids)
@@ -398,14 +476,22 @@ async def process_pending_emails(limit: int = 10) -> int:
     return processed
 
 
+async def process_pending_bulk_emails(limit: int = 10) -> int:
+    """Process pending bulk campaign deliveries via the shared email cron."""
+    from apps.bulk_send.delivery_service import process_pending_bulk_deliveries
+
+    return await process_pending_bulk_deliveries(limit=limit)
+
+
 async def cron_send_emails() -> None:
-    """Cron task to process unsent transactional emails once per minute."""
+    """Cron task to process unsent transactional and bulk emails once per minute."""
     import asyncio
 
     logger.info("Starting email cron task...")
     try:
         while True:
             await process_pending_emails(limit=10)
+            await process_pending_bulk_emails(limit=10)
             await asyncio.sleep(60)
     except asyncio.CancelledError:
         logger.info("Email cron task cancelled.")

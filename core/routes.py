@@ -17,6 +17,7 @@ from apps.notifications.routes import router as notifications_router
 from apps.recommendations.routes import router as recommendation_router
 from apps.export.router import router as export_router
 from apps.threshold_configuration.routes import router as threshold_configuration_router
+from apps.bulk_send.router import router as bulk_send_router
 
 
 
@@ -39,4 +40,5 @@ def build_router() -> APIRouter:
     router.include_router(notifications_router)
     # router.include_router(recommendation_router)
     router.include_router(export_router)
+    router.include_router(bulk_send_router)
     return router

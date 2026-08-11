@@ -18,6 +18,7 @@ from apps.notifications.db_models import (
     NotificationType,
 )
 from apps.export.models import DataExportRequest
+from apps.bulk_send.models import EmailCampaign, EmailDelivery
 
 __all__ = [
     "AdminConfiguration",
@@ -68,5 +69,7 @@ __all__ = [
     "NotificationCampaignAudience",
     "Notification",
     "DataExportRequest",
+    "EmailCampaign",
+    "EmailDelivery",
 ]
 
