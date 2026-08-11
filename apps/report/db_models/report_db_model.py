@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 from uuid import UUID, uuid4
 
 from sqlalchemy import Column, DateTime, Enum as SqlEnum, Index, Text, text
@@ -12,6 +12,7 @@ from common.enums import ReportEntityType, ReportStatus
 
 if TYPE_CHECKING:
     from apps.accounts.db_models import User
+    from apps.feed.db_models import PostRevision
 
 
 def utc_now() -> datetime:
@@ -31,6 +32,13 @@ class Report(SQLModel, table=True):
         )
     )
     entity_id: UUID = Field(nullable=False, index=True)
+    # Set for entity_type=post (latest PostRevision at report time); NULL for comment/user.
+    post_revision_id: Optional[UUID] = Field(
+        default=None,
+        foreign_key="post_revisions.id",
+        nullable=True,
+        index=True,
+    )
     reason: str = Field(sa_column=Column(Text, nullable=False))
     status: ReportStatus = Field(
         default=ReportStatus.under_review,
@@ -64,6 +72,9 @@ class Report(SQLModel, table=True):
     )
     moderator: "User | None" = Relationship(
         sa_relationship=relationship("User", foreign_keys="Report.moderator_id")
+    )
+    post_revision: Optional["PostRevision"] = Relationship(
+        sa_relationship=relationship("PostRevision", foreign_keys="Report.post_revision_id")
     )
 
     __table_args__ = (

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -19,6 +21,7 @@ from apps.engagement.repositories.comment_repository import (
 )
 from apps.engagement.services.comment_service import _format_author, _format_comment
 from apps.feed.db_models import Post
+from apps.feed.repositories.post_revision_repository import get_latest_post_revision
 from apps.feed.services.post_service import _resolve_moderator_name, format_post_detail
 from apps.moderation.services.moderator_assignment_service import (
     _fetch_active_moderator_ids,
@@ -33,6 +36,7 @@ from apps.report.repositories.report_repository import (
     count_reported_entities_summary_by_status,
     count_reports as count_report_rows,
     count_reports_by_entity_keys,
+    count_reports_for_entity,
     create_report,
     get_duplicate_report,
     get_previous_report_comments,
@@ -58,6 +62,7 @@ from apps.report.schemas import (
     ReportStatusSummary,
     is_report_reviewed,
 )
+from apps.threshold_configuration.services import get_enabled_moderation_threshold
 from common.enums import PostState, ReportEntityType, ReportStatus, UserStatus
 from common.exceptions import ApiError
 from common.pagination import build_paginated_response
@@ -72,6 +77,18 @@ _VALID_ENTITY_TYPES = (
     ReportEntityType.comment,
     ReportEntityType.user,
 )
+
+# States that may transition to flagged via report-threshold automation.
+_AUTO_FLAGGABLE_STATES = frozenset(
+    {
+        PostState.published,
+        PostState.reinstate,
+        PostState.processing,
+        PostState.escalate,
+        PostState.hidden,
+    }
+)
+_COUNTED_POST_STATES = (PostState.published, PostState.reinstate)
 
 
 def _validate_entity_type(entity_type: ReportEntityType) -> None:
@@ -260,6 +277,117 @@ async def _resolve_report_moderator_id(
     return None
 
 
+async def _apply_post_report_threshold(
+    db: AsyncSession,
+    post: Post,
+) -> bool:
+    """
+    Flag the post when its current-revision report count hits threshold.
+
+    Does not assign or change moderator_id. Returns True when this call
+    newly transitioned the post to flagged (caller should notify after commit).
+    """
+    threshold = await get_enabled_moderation_threshold(db, entity="post")
+    if threshold is None:
+        return False
+
+    revision = await get_latest_post_revision(db, post.id)
+    if revision is None:
+        return False
+
+    count = await count_reports_for_entity(
+        db,
+        ReportEntityType.post,
+        post.id,
+        post_revision_id=revision.id,
+    )
+    if count < threshold:
+        return False
+    if post.state not in _AUTO_FLAGGABLE_STATES:
+        return False
+
+    was_counted = post.state in _COUNTED_POST_STATES
+    post.state = PostState.flagged
+    post.updated_at = datetime.now(timezone.utc)
+    # Keep moderator_id / is_moderator_reviewed / reviewed_at unchanged.
+    db.add(post)
+
+    if was_counted:
+        from apps.profiles.services.profile_stats_service import (
+            decrement_posts_count_for_user,
+        )
+
+        await decrement_posts_count_for_user(db, post.author_user_id)
+    return True
+
+
+async def _apply_comment_report_threshold(
+    db: AsyncSession,
+    comment: Comment,
+) -> bool:
+    threshold = await get_enabled_moderation_threshold(db, entity="comment")
+    if threshold is None:
+        return False
+    count = await count_reports_for_entity(
+        db,
+        ReportEntityType.comment,
+        comment.id,
+    )
+    if count < threshold:
+        return False
+    if comment.is_deleted:
+        return False
+    if comment.parent_comment_id is None:
+        await update_post_comment_count(db, comment.post_id, -1)
+    await mark_comment_deleted(db, comment)
+    return True
+
+
+async def _apply_user_report_threshold(
+    db: AsyncSession,
+    user: User,
+) -> bool:
+    """
+    Suspend the user using the same side effects as manual/report actioning.
+
+    Returns True when this call newly suspended the user (notify after commit).
+    """
+    threshold = await get_enabled_moderation_threshold(db, entity="user")
+    if threshold is None:
+        return False
+    count = await count_reports_for_entity(
+        db,
+        ReportEntityType.user,
+        user.id,
+    )
+    if count < threshold:
+        return False
+    if (
+        user.status == UserStatus.suspended
+        or user.status == UserStatus.banned
+        or user.is_deleted
+        or user.deleted_at is not None
+        or user.status == UserStatus.deleting
+    ):
+        return False
+
+    user.status = UserStatus.suspended
+    user.updated_at = datetime.now(timezone.utc)
+    db.add(user)
+
+    from apps.moderation.services import record_moderation_history
+
+    await record_moderation_history(
+        db,
+        entity_type=ReportEntityType.user,
+        entity_id=user.id,
+        action="suspended",
+        moderator_id=None,
+        comment="Auto-suspended after report threshold",
+    )
+    return True
+
+
 async def create_report_service(
     db: AsyncSession,
     user_id: UUID,
@@ -269,53 +397,93 @@ async def create_report_service(
         return error_response("You cannot report yourself", response_cls=ApiResponse)
 
     post: Post | None = None
-
-    if payload.entity_type == ReportEntityType.user:
-        user = (
-            await db.execute(select(User).where(User.id == payload.entity_id))
-        ).scalar_one_or_none()
-        if user is None:
-            return error_response("User does not exist", response_cls=ApiResponse)
-        if user.is_deleted or user.deleted_at is not None or user.status == UserStatus.deleting:
-            return error_response("Cannot report a soft-deleted user", response_cls=ApiResponse)
-
-    elif payload.entity_type == ReportEntityType.post:
-        post = (
-            await db.execute(select(Post).where(Post.id == payload.entity_id))
-        ).scalar_one_or_none()
-        if post is None:
-            return error_response("Post does not exist", response_cls=ApiResponse)
-        if post.state == PostState.deleted:
-            return error_response("Cannot report a soft-deleted post", response_cls=ApiResponse)
-
-    elif payload.entity_type == ReportEntityType.comment:
-        comment = (
-            await db.execute(select(Comment).where(Comment.id == payload.entity_id))
-        ).scalar_one_or_none()
-        if comment is None:
-            return error_response("Comment does not exist", response_cls=ApiResponse)
-        if comment.is_deleted:
-            return error_response("Cannot report a soft-deleted comment", response_cls=ApiResponse)
-        post = (
-            await db.execute(select(Post).where(Post.id == comment.post_id))
-        ).scalar_one_or_none()
-
-    existing = await get_duplicate_report(
-        db, user_id, payload.entity_type, payload.entity_id
-    )
-    if existing is not None:
-        return error_response(
-            "You have already reported this entity",
-            response_cls=ApiResponse,
-        )
-
-    moderator_id = await _resolve_report_moderator_id(
-        db,
-        entity_type=payload.entity_type,
-        post=post,
-    )
+    comment: Comment | None = None
+    target_user: User | None = None
+    post_revision_id: UUID | None = None
+    notify_post_flagged = False
+    notify_user_suspended: User | None = None
 
     try:
+        if payload.entity_type == ReportEntityType.user:
+            target_user = (
+                await db.execute(
+                    select(User).where(User.id == payload.entity_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if target_user is None:
+                return error_response("User does not exist", response_cls=ApiResponse)
+            if (
+                target_user.is_deleted
+                or target_user.deleted_at is not None
+                or target_user.status == UserStatus.deleting
+            ):
+                return error_response(
+                    "Cannot report a soft-deleted user",
+                    response_cls=ApiResponse,
+                )
+
+        elif payload.entity_type == ReportEntityType.post:
+            post = (
+                await db.execute(
+                    select(Post).where(Post.id == payload.entity_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if post is None:
+                return error_response("Post does not exist", response_cls=ApiResponse)
+            if post.state == PostState.deleted:
+                return error_response(
+                    "Cannot report a soft-deleted post",
+                    response_cls=ApiResponse,
+                )
+            revision = await get_latest_post_revision(db, post.id)
+            if revision is None:
+                return error_response(
+                    "Post revision not found",
+                    response_cls=ApiResponse,
+                )
+            post_revision_id = revision.id
+
+        elif payload.entity_type == ReportEntityType.comment:
+            comment = (
+                await db.execute(
+                    select(Comment)
+                    .where(Comment.id == payload.entity_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if comment is None:
+                return error_response("Comment does not exist", response_cls=ApiResponse)
+            if comment.is_deleted:
+                return error_response(
+                    "Cannot report a soft-deleted comment",
+                    response_cls=ApiResponse,
+                )
+            post = (
+                await db.execute(select(Post).where(Post.id == comment.post_id))
+            ).scalar_one_or_none()
+
+        else:
+            return error_response("Invalid entity_type", response_cls=ApiResponse)
+
+        existing = await get_duplicate_report(
+            db,
+            user_id,
+            payload.entity_type,
+            payload.entity_id,
+            post_revision_id=post_revision_id,
+        )
+        if existing is not None:
+            return error_response(
+                "You have already reported this entity",
+                response_cls=ApiResponse,
+            )
+
+        moderator_id = await _resolve_report_moderator_id(
+            db,
+            entity_type=payload.entity_type,
+            post=post,
+        )
+
         report = await create_report(
             db,
             reported_id=user_id,
@@ -323,9 +491,26 @@ async def create_report_service(
             entity_id=payload.entity_id,
             reason=payload.reason,
             moderator_id=moderator_id,
+            post_revision_id=post_revision_id,
         )
+        await db.flush()
+
+        if payload.entity_type == ReportEntityType.post and post is not None:
+            notify_post_flagged = await _apply_post_report_threshold(db, post)
+        elif payload.entity_type == ReportEntityType.comment and comment is not None:
+            await _apply_comment_report_threshold(db, comment)
+        elif payload.entity_type == ReportEntityType.user and target_user is not None:
+            if await _apply_user_report_threshold(db, target_user):
+                notify_user_suspended = target_user
+
         await db.commit()
         await db.refresh(report)
+    except IntegrityError:
+        await db.rollback()
+        return error_response(
+            "You have already reported this entity",
+            response_cls=ApiResponse,
+        )
     except Exception:
         await db.rollback()
         logger.exception(
@@ -335,6 +520,48 @@ async def create_report_service(
             payload.entity_id,
         )
         return error_response("Failed to submit report", response_cls=ApiResponse)
+
+    # Notifications after successful commit (create_notification commits itself).
+    if notify_post_flagged and post is not None:
+        try:
+            from apps.notifications.services import POST_FLAGGED, notify_post_author
+
+            await notify_post_author(
+                db,
+                post_id=post.id,
+                author_user_id=post.author_user_id,
+                notification_type=POST_FLAGGED,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to notify post author after report threshold post_id=%s",
+                post.id,
+            )
+
+    if notify_user_suspended is not None:
+        try:
+            from apps.notifications.services import notify_account_status
+            from core.auth.services import disable_firebase_user
+
+            await notify_account_status(
+                db,
+                user_id=notify_user_suspended.id,
+                status=UserStatus.suspended.value,
+                reason="Your account was suspended after reaching the report threshold.",
+            )
+            if notify_user_suspended.firebase_uid:
+                try:
+                    disable_firebase_user(notify_user_suspended.firebase_uid)
+                except Exception:
+                    logger.exception(
+                        "Failed to disable Firebase user after report threshold user_id=%s",
+                        notify_user_suspended.id,
+                    )
+        except Exception:
+            logger.exception(
+                "Failed post-threshold user suspension side effects user_id=%s",
+                notify_user_suspended.id,
+            )
 
     reviewed = is_report_reviewed(report.status)
     moderator_name = None

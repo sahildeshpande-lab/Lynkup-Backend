@@ -80,6 +80,26 @@ async def get_moderation_thresholds(db: AsyncSession) -> ModerationThresholdsDat
     return ModerationThresholdsData(**values)
 
 
+async def get_enabled_moderation_threshold(
+    db: AsyncSession,
+    *,
+    entity: str,
+) -> int | None:
+    """
+    Return the configured threshold for ``entity`` (post|comment|user)
+    when the config row exists and is enabled; otherwise None.
+    """
+    if entity not in THRESHOLD_KEYS:
+        return None
+    await ensure_default_thresholds(db)
+    key = THRESHOLD_KEYS[entity]
+    row = await get_threshold_row_by_key(db, key)
+    if row is None or not bool(getattr(row, "is_enabled", False)):
+        return None
+    fallback = int(THRESHOLD_META[entity]["default"])
+    return _threshold_from_value(row.value, fallback=fallback)
+
+
 async def update_moderation_thresholds(
     payload: UpdateModerationThresholdsRequest,
     db: AsyncSession,

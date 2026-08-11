@@ -20,6 +20,7 @@ async def create_report(
     entity_id: UUID,
     reason: str,
     moderator_id: UUID | None = None,
+    post_revision_id: UUID | None = None,
 ) -> Report:
     report = Report(
         reported_id=reported_id,
@@ -28,6 +29,7 @@ async def create_report(
         reason=reason,
         status=ReportStatus.under_review,
         moderator_id=moderator_id,
+        post_revision_id=post_revision_id,
     )
     db.add(report)
     return report
@@ -59,12 +61,17 @@ async def get_duplicate_report(
     reported_id: UUID,
     entity_type: ReportEntityType,
     entity_id: UUID,
+    *,
+    post_revision_id: UUID | None = None,
 ) -> Report | None:
-    stmt = select(Report).where(
+    filters = [
         Report.reported_id == reported_id,
         Report.entity_type == entity_type,
         Report.entity_id == entity_id,
-    )
+    ]
+    if entity_type == ReportEntityType.post:
+        filters.append(Report.post_revision_id == post_revision_id)
+    stmt = select(Report).where(*filters)
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
@@ -259,11 +266,16 @@ async def count_reports_for_entity(
     db: AsyncSession,
     entity_type: ReportEntityType,
     entity_id: UUID,
+    *,
+    post_revision_id: UUID | None = None,
 ) -> int:
-    stmt = select(func.count(Report.id)).where(
+    filters = [
         Report.entity_type == entity_type,
         Report.entity_id == entity_id,
-    )
+    ]
+    if entity_type == ReportEntityType.post:
+        filters.append(Report.post_revision_id == post_revision_id)
+    stmt = select(func.count(Report.id)).where(*filters)
     return int((await db.execute(stmt)).scalar_one())
 
 
