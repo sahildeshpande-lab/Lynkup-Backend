@@ -12,7 +12,7 @@ from pwdlib.hashers.bcrypt import BcryptHasher
 from apps.accounts.db_models import Role, UserRole
 from apps.accounts.db_models import RefreshToken, SecurityEvent, SecurityEventType, TransactionalEmailLog, User
 from apps.profiles.db_models import Profile
-from common.enums import RegistrationType
+from common.enums import RegistrationType, UserStatus
 from core.auth.config import settings as auth_settings
 from ..schemas import AuthUserResponse
 JWT_SECRET = auth_settings.jwt_secret
@@ -22,6 +22,34 @@ PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def is_soft_deleted_user(user: User) -> bool:
+    """Return True when the account is soft-deleted / in deletion grace period."""
+    return bool(
+        getattr(user, "is_deleted", False)
+        or user.deleted_at is not None
+        or user.status == UserStatus.deleting
+    )
+
+
+def reactivate_soft_deleted_user(
+    user: User,
+    *,
+    now: datetime,
+    firebase_uid: str | None = None,
+) -> None:
+    """Clear soft-delete fields and optionally re-link a new Firebase UID.
+
+    Does not commit — caller owns the transaction.
+    """
+    user.status = UserStatus.active
+    user.is_deleted = False
+    user.deleted_at = None
+    user.purge_after = None
+    user.updated_at = now
+    if firebase_uid:
+        user.firebase_uid = firebase_uid
 
 
 async def _fetch_user_profile(db: AsyncSession, user: User) -> Profile | None:
