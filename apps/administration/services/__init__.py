@@ -30,6 +30,7 @@ from .password_service import admin_forgot_password, admin_reset_password, chang
 from . import feature_flag_service as _service_module_3
 from .feature_flag_service import (
     create_feature_flag,
+    delete_feature_flag,
     ensure_default_feature_flags,
     is_feature_enabled,
     list_feature_flags,
@@ -78,6 +79,7 @@ __all__ = [
     "list_feature_flags",
     "create_feature_flag",
     "update_feature_flag",
+    "delete_feature_flag",
     "ensure_default_feature_flags",
     "is_feature_enabled",
 ]
