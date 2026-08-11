@@ -20,6 +20,10 @@ class EmailSettings(BaseSettings):
         default=_PLACEHOLDER_FROM_EMAIL,
         alias="SENDGRID_FROM_EMAIL",
     )
+    sendgrid_from_name: str = Field(
+        default="KampuLynk",
+        alias="SENDGRID_FROM_NAME",
+    )
     base_url: str = Field(default="http://localhost:8000", alias="BASE_URL")
     logo_url: str = Field(default="https://kampulynk-dev-spaces.sfo3.digitaloceanspaces.com/logo/logo.png",alias="LOGO_URL")
     otp_expire_minutes: int = Field(default=10, alias="OTP_EXPIRE_MINUTES")
