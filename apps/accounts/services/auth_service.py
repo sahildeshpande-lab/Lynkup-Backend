@@ -17,7 +17,13 @@ from ..schemas import ApiResponse, LoginRequest, ResendOtpRequest, OtpVerifyRequ
 logger = logging.getLogger(__name__)
 PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 
-from .common_service import _fetch_user_profile, _generate_otp, _now
+from .common_service import (
+    _fetch_user_profile,
+    _generate_otp,
+    _now,
+    is_soft_deleted_user,
+    reactivate_soft_deleted_user,
+)
 from .device_otp_service import (
     attach_otp_flags,
     begin_otp_challenge,
@@ -55,14 +61,23 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     if not firebase_uid:
         return ApiResponse(status=False, message="User not registed yet", data=None)
 
-    stmt = select(User).options(selectinload(User.roles)).where(User.firebase_uid == firebase_uid)
-    user = (await db.execute(stmt)).scalar_one_or_none()
-    if not user:
-        return ApiResponse(status=False, message=" Please complete signup", data=None)
-
-    # Email/password login must match the account email on the Firebase token and DB.
     login_email = payload.email.lower().strip()
     firebase_email = (firebase_user.get("email") or "").lower().strip()
+
+    stmt = select(User).options(selectinload(User.roles)).where(User.firebase_uid == firebase_uid)
+    user = (await db.execute(stmt)).scalar_one_or_none()
+
+    # After Firebase user deletion, soft-deleted rows keep a stale firebase_uid.
+    # Re-link by email when the new Firebase account signs in again.
+    if not user:
+        stmt_email = select(User).options(selectinload(User.roles)).where(User.email == login_email)
+        candidate = (await db.execute(stmt_email)).scalar_one_or_none()
+        if candidate is not None and is_soft_deleted_user(candidate):
+            user = candidate
+        else:
+            return ApiResponse(status=False, message=" Please complete signup", data=None)
+
+    # Email/password login must match the account email on the Firebase token and DB.
     if user.email.lower() != login_email:
         return ApiResponse(status=False, message="Invalid credentials", data=None)
     if firebase_email and firebase_email != login_email:
@@ -92,24 +107,17 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     if not PASSWORD_HASHER.verify(payload.password, user.password_hash):
         return ApiResponse(status=False, message="Invalid credentials", data=None)
 
-    if user.status == UserStatus.deleting or user.deleted_at:
-        from apps.user_deletion.services.account_recovery_service import (
-            restore_deleting_account_if_eligible,
-            run_recovery_side_effects,
-        )
-
-        restored = await restore_deleting_account_if_eligible(user, db)
-        if not restored:
-            return ApiResponse(
-                status=False,
-                message=inactive_account_message(UserStatus.deleting),
-                data=None,
-            )
-        await db.commit()
-        await run_recovery_side_effects(user, db)
-
     if user.status in (UserStatus.suspended, UserStatus.banned):
         return ApiResponse(status=False, message=inactive_account_message(user.status), data=None)
+
+    if is_soft_deleted_user(user):
+        reactivate_soft_deleted_user(
+            user,
+            now=_now(),
+            firebase_uid=firebase_uid,
+        )
+        db.add(user)
+        await db.flush()
 
     device_id = (payload.device_id or "").strip() or None
 
@@ -346,7 +354,13 @@ async def resend_otp(payload: ResendOtpRequest, firebase_user: dict, db: AsyncSe
     user.updated_at = now
     db.add(user)
     await db.commit()
-    await send_otp_email(user.email, otp, "email_verification")
+    profile = await _fetch_user_profile(db, user)
+    full_name = (
+        f"{(profile.first_name or '').strip()} {(profile.last_name or '').strip()}".strip()
+        if profile
+        else None
+    ) or None
+    await send_otp_email(user.email, otp, "email_verification", full_name=full_name)
     return ApiResponse(status=True, message="OTP sent successfully", data=None)
 
 def _build_user_base(refresh_token: str) -> UserBaseResponse:

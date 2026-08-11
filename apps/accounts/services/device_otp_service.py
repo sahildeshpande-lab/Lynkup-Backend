@@ -8,12 +8,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from apps.accounts.db_models import User, UserInstallation
-from apps.accounts.services.common_service import _generate_otp, _now
+from apps.accounts.services.common_service import _fetch_user_profile, _generate_otp, _now
+from apps.profiles.db_models import Profile
 from common.enums import UserStatus
 from core.auth.config import settings as auth_settings
 from core.email_service import send_otp_email
 
 logger = logging.getLogger(__name__)
+
+
+def _profile_full_name(profile: Profile | None) -> str | None:
+    if profile is None:
+        return None
+    full_name = f"{(profile.first_name or '').strip()} {(profile.last_name or '').strip()}".strip()
+    return full_name or None
 
 
 def clear_session_email_verification(user: User) -> None:
@@ -426,7 +434,13 @@ async def begin_otp_challenge(
     db.add(user)
 
     await db.commit()
-    await send_otp_email(user.email, otp, "email_verification")
+    profile = await _fetch_user_profile(db, user)
+    await send_otp_email(
+        user.email,
+        otp,
+        "email_verification",
+        full_name=_profile_full_name(profile),
+    )
     return True
 
 
@@ -468,7 +482,13 @@ async def send_otp_challenge(
     )
 
     await db.commit()
-    await send_otp_email(user.email, otp, "email_verification")
+    profile = await _fetch_user_profile(db, user)
+    await send_otp_email(
+        user.email,
+        otp,
+        "email_verification",
+        full_name=_profile_full_name(profile),
+    )
     return otp
 
 

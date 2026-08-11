@@ -626,7 +626,8 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
                 existing_user_email.email_otp_created_at = now
                 db.add(existing_user_email)
                 await db.commit()
-                await send_otp_email(email, otp, "email_verification")
+                full_name = f"{(payload.firstName or '').strip()} {(payload.lastName or '').strip()}".strip() or None
+                await send_otp_email(email, otp, "email_verification", full_name=full_name)
             else:
                 await db.commit()
 
@@ -710,7 +711,8 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     user.updated_at = now
     db.add(user)
     await db.commit()
-    await send_otp_email(email, otp, "email_verification")
+    full_name = f"{(payload.firstName or '').strip()} {(payload.lastName or '').strip()}".strip() or None
+    await send_otp_email(email, otp, "email_verification", full_name=full_name)
     await db.refresh(user)
     await db.refresh(profile)
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
@@ -781,7 +783,13 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
             db.add(installation)
 
         await db.commit()
-        await send_otp_email(user.email, otp, "email_verification")
+        profile = await _fetch_user_profile(db, user)
+        full_name = (
+            f"{(profile.first_name or '').strip()} {(profile.last_name or '').strip()}".strip()
+            if profile
+            else None
+        ) or None
+        await send_otp_email(user.email, otp, "email_verification", full_name=full_name)
 
         # Load roles eagerly to avoid MissingGreenlet when accessing user.role
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
@@ -893,7 +901,13 @@ async def resend_otp(payload: ResendOtpRequest, firebase_user: dict, db: AsyncSe
     user.updated_at = _now()
     db.add(user)
     await db.commit()
-    await send_otp_email(user.email, otp, "email_verification")
+    profile = await _fetch_user_profile(db, user)
+    full_name = (
+        f"{(profile.first_name or '').strip()} {(profile.last_name or '').strip()}".strip()
+        if profile
+        else None
+    ) or None
+    await send_otp_email(user.email, otp, "email_verification", full_name=full_name)
     return ApiResponse(status=True, message="OTP sent successfully", data=None)
 
 
