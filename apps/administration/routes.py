@@ -9,7 +9,7 @@ from core.database.session import get_session
 from core.security.auth import (
     get_current_superadmin,
     get_current_admin,
-    get_current_app_user,
+    get_current_user_or_superadmin,
     get_current_moderator,
     get_current_moderator_or_viewer,
 )
@@ -368,23 +368,11 @@ async def admin_soft_delete_invitation(
 
 
 @router.get("/feature-flags", response_model=ApiResponse)
-async def list_public_feature_flags(
+async def list_feature_flags(
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_app_user),
+    current_user: User = Depends(get_current_user_or_superadmin),
 ) -> ApiResponse:
-    """Return all platform feature flags for authenticated app users."""
-    _ = current_user
-    return ApiResponse(
-        message="Feature flags fetched successfully",
-        data=await services.list_feature_flags(db),
-    )
-
-
-@router.get("/admin/feature-flags", response_model=ApiResponse)
-async def list_admin_feature_flags(
-    db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
-) -> ApiResponse:
+    """Return all platform feature flags for authenticated app users and superadmins."""
     _ = current_user
     return ApiResponse(
         message="Feature flags fetched successfully",
@@ -419,6 +407,20 @@ async def create_admin_feature_flag(
     return ApiResponse(
         message="Feature flag created successfully",
         data=await services.create_feature_flag(payload, db),
+    )
+
+
+@router.delete("/admin/feature-flags/{flag_id}", response_model=ApiResponse)
+async def delete_admin_feature_flag(
+    flag_id: UUID,
+    db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
+) -> ApiResponse:
+    """Hard-delete a feature flag by id."""
+    _ = current_user
+    return ApiResponse(
+        message="Feature flag deleted successfully",
+        data=await services.delete_feature_flag(flag_id, db),
     )
 
 

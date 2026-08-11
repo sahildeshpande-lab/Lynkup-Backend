@@ -171,6 +171,11 @@ class ReportStatus(str, Enum):
     actioned = "actioned"
 
 
+class AdminConfigurationType(str, Enum):
+    FEATURE_FLAG = "feature_flag"
+    THRESHOLD = "threshold"
+
+
 from typing import Literal
 
 Role = Literal["user", "moderator", "viewer", "superadmin"]

@@ -16,6 +16,8 @@ from apps.chat.router import router as chat_router
 from apps.notifications.routes import router as notifications_router
 from apps.recommendations.routes import router as recommendation_router
 from apps.export.router import router as export_router
+from apps.threshold_configuration.routes import router as threshold_configuration_router
+
 
 
 def build_router() -> APIRouter:
@@ -29,6 +31,7 @@ def build_router() -> APIRouter:
     router.include_router(uploads_router)
     router.include_router(connections_router)
     router.include_router(engagement_router)
+    router.include_router(threshold_configuration_router)
     router.include_router(report_router)
     router.include_router(feed_router)
     router.include_router(invitations_router)
