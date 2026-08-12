@@ -22,7 +22,15 @@ class CreateBulkCampaignRequest(BaseModel):
     body_html: str = Field(..., min_length=1)
     body_text: str | None = None
     user_ids: list[UUID] = Field(..., min_length=1)
-    attachments: list[AttachmentMeta] = Field(default_factory=list)
+    attachments: list[AttachmentMeta] = Field(
+        default_factory=list,
+        description="Optional attachment metadata from prior upload; omit or null when none.",
+    )
+
+    @field_validator("attachments", mode="before")
+    @classmethod
+    def attachments_optional(cls, value: Any) -> Any:
+        return [] if value is None else value
 
     @field_validator("user_ids")
     @classmethod
