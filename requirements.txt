@@ -1,18 +1,21 @@
 fastapi
 uvicorn[standard]
 sqlmodel
-ddtrace
+# Pin is below (ddtrace==4.14.0); avoid installing twice.
+# ddtrace
 rapidfuzz
 sqlalchemy
 asyncpg
-spacy
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
-sentence-transformers
-transformers
-# CPU-only PyTorch
---extra-index-url https://download.pytorch.org/whl/cpu
-torch
-keybert
+# Heavy ML stack — commented for lean Render deploys (admin RSA auth testing).
+# Re-enable when recommendations keyword extraction is needed on a larger instance.
+# spacy
+# https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+# sentence-transformers
+# transformers
+# # CPU-only PyTorch
+# --extra-index-url https://download.pytorch.org/whl/cpu
+# torch
+# keybert
 stream-chat
 aiosqlite
 psycopg2-binary
@@ -35,8 +38,9 @@ pytest
 pytest-cov
 pytest-asyncio
 httpx
-playwright
-pytest-playwright
+# Playwright pulls a large Node driver — skip for lean Render auth testing.
+# playwright
+# pytest-playwright
 sendgrid
 python-dotenv
 firebase-admin
@@ -52,6 +56,7 @@ alembic
 bleach
 pandas
 openpyxl
-pysonar
-lingua-language-detector>=2.0.0
+# Large / unused on admin-auth-only deploys
+# pysonar
+# lingua-language-detector>=2.0.0
 ddtrace==4.14.0
