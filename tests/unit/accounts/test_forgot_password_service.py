@@ -11,11 +11,16 @@ from apps.accounts.schemas import ForgotPasswordRequest
 from apps.accounts.services import password_service as svc
 
 
-def _user(email: str = "user@example.com"):
-    return SimpleNamespace(
-        id=uuid.uuid4(),
-        email=email,
-    )
+def _user(email: str = "user@example.com", **overrides):
+    data = {
+        "id": uuid.uuid4(),
+        "email": email,
+        "status": "active",
+        "is_deleted": False,
+        "deleted_at": None,
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
 
 
 @pytest.mark.asyncio
@@ -26,6 +31,41 @@ async def test_build_password_reset_link_uses_base_url_fallback(monkeypatch):
     link = svc._build_password_reset_link("token-123")
 
     assert link == "https://app.example.test/reset-password?token=token-123"
+
+
+@pytest.mark.asyncio
+async def test_forgot_password_returns_false_when_account_missing(mock_db, scalar_result):
+    db = mock_db(scalar_result(None))
+
+    response = await svc.forgot_password(
+        ForgotPasswordRequest(email="missing@example.com"),
+        db,
+    )
+
+    assert response.status is False
+    assert response.message == "Account doesn't exist"
+    assert response.data is None
+    db.add.assert_not_called()
+    db.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_forgot_password_returns_false_when_account_deleting(mock_db, scalar_result):
+    from common.enums import UserStatus
+
+    user = _user(status=UserStatus.deleting, is_deleted=True)
+    db = mock_db(scalar_result(user))
+
+    response = await svc.forgot_password(
+        ForgotPasswordRequest(email=user.email),
+        db,
+    )
+
+    assert response.status is False
+    assert response.message == "Account doesn't exist"
+    assert response.data is None
+    db.add.assert_not_called()
+    db.commit.assert_not_called()
 
 
 @pytest.mark.asyncio

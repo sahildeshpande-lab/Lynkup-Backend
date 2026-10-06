@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlmodel import select
 
 from apps.accounts.db_models import User
@@ -49,12 +50,25 @@ class AccountDeletionService:
         )
 
     @classmethod
-    async def run_purge_batch(cls) -> PurgeBatchStats:
-        return await cls()._run_purge_batch()
+    async def run_purge_batch(cls, *, engine: AsyncEngine | None = None) -> PurgeBatchStats:
+        return await cls()._run_purge_batch(engine=engine)
 
-    async def _run_purge_batch(self) -> PurgeBatchStats:
+    @asynccontextmanager
+    async def _pinned_session(self, *, engine: AsyncEngine | None = None):
+        """Hold one physical DB connection for the advisory-lock-protected batch."""
+        resolved = engine
+        if resolved is None:
+            from core.database.session import engine as default_engine
+
+            resolved = default_engine
+        async with resolved.connect() as connection:
+            async with AsyncSession(bind=connection, expire_on_commit=False) as session:
+                session.info["pinned_connection"] = connection
+                yield session
+
+    async def _run_purge_batch(self, *, engine: AsyncEngine | None = None) -> PurgeBatchStats:
         stats = PurgeBatchStats()
-        async with async_session_factory() as lock_session:
+        async with self._pinned_session(engine=engine) as lock_session:
             acquired = await self._try_advisory_lock(lock_session)
             if not acquired:
                 stats.skipped_lock = True
@@ -74,7 +88,7 @@ class AccountDeletionService:
 
                 for user_id in user_ids:
                     try:
-                        await self.purge_user(user_id)
+                        await self.purge_user(user_id, session=lock_session)
                         stats.purged += 1
                     except Exception:
                         stats.failed += 1
@@ -159,54 +173,79 @@ class AccountDeletionService:
         targets.spaces_keys = unique_keys
         return targets
 
-    async def purge_user(self, user_id: UUID) -> None:
-        """Collect external IDs → CALL purge_user_data → external cleanup."""
-        async with async_session_factory() as session:
-            targets = await self.collect_external_targets(session, user_id)
-            if targets is None:
-                logger.info(
-                    "[account-deletion] User already gone user_id=%s",
-                    user_id,
-                )
-                return
+    def _is_currently_purge_eligible(self, user: User | None, *, now: datetime) -> bool:
+        if user is None:
+            return False
+        if user.status != UserStatus.deleting or user.purge_after is None:
+            return False
+        purge_after = user.purge_after
+        if purge_after.tzinfo is None:
+            purge_after = purge_after.replace(tzinfo=timezone.utc)
+        return purge_after <= now
 
-            # Re-check eligibility inside this session before hard delete.
-            user = (
-                await session.execute(select(User).where(User.id == user_id))
-            ).scalar_one()
-            now = datetime.now(timezone.utc)
-            if user.status != UserStatus.deleting or user.purge_after is None:
-                logger.info(
-                    "[account-deletion] Skip non-eligible user_id=%s status=%s",
-                    user_id,
-                    user.status,
-                )
-                return
-            purge_after = user.purge_after
-            if purge_after.tzinfo is None:
-                purge_after = purge_after.replace(tzinfo=timezone.utc)
-            if purge_after > now:
-                logger.info(
-                    "[account-deletion] Skip; still in grace period user_id=%s",
-                    user_id,
-                )
-                return
+    async def _purge_user_on_session(self, session: AsyncSession, user_id: UUID) -> None:
+        """Collect external IDs, recheck eligibility, CALL purge_user_data, then cleanup."""
+        targets = await self.collect_external_targets(session, user_id)
+        if targets is None:
+            logger.info(
+                "[account-deletion] User already gone user_id=%s",
+                user_id,
+            )
+            return
 
-            try:
-                await session.execute(
-                    text("CALL purge_user_data(:user_id)"),
-                    {"user_id": str(user_id)},
-                )
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                logger.exception(
-                    "[account-deletion] DB purge rolled back user_id=%s",
-                    user_id,
-                )
-                raise
+        # Recheck eligibility on this same connection immediately before hard delete.
+        user = (
+            await session.execute(select(User).where(User.id == user_id))
+        ).scalar_one_or_none()
+        now = datetime.now(timezone.utc)
+        if user is None:
+            logger.info(
+                "[account-deletion] User already gone user_id=%s",
+                user_id,
+            )
+            return
+        if user.status != UserStatus.deleting or user.purge_after is None:
+            logger.info(
+                "[account-deletion] Skip non-eligible user_id=%s status=%s",
+                user_id,
+                user.status,
+            )
+            return
+        if not self._is_currently_purge_eligible(user, now=now):
+            logger.info(
+                "[account-deletion] Skip; still in grace period user_id=%s",
+                user_id,
+            )
+            return
+
+        try:
+            await session.execute(
+                text("CALL purge_user_data(:user_id)"),
+                {"user_id": str(user_id)},
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception(
+                "[account-deletion] DB purge rolled back user_id=%s",
+                user_id,
+            )
+            raise
 
         await self._cleanup_external(targets)
+
+    async def purge_user(
+        self,
+        user_id: UUID,
+        *,
+        session: AsyncSession | None = None,
+    ) -> None:
+        """Collect external IDs → CALL purge_user_data → external cleanup."""
+        if session is not None:
+            await self._purge_user_on_session(session, user_id)
+            return
+        async with async_session_factory() as owned_session:
+            await self._purge_user_on_session(owned_session, user_id)
 
     async def _cleanup_external(self, targets: ExternalCleanupTargets) -> None:
         await self._cleanup_firebase(targets)
@@ -260,8 +299,14 @@ class AccountDeletionService:
                 )
 
     def _is_postgres(self, session: AsyncSession) -> bool:
-        bind = session.get_bind()
-        return bool(bind is not None and bind.dialect.name == "postgresql")
+        bind = getattr(session, "bind", None) or session.info.get("pinned_connection")
+        if bind is None:
+            try:
+                bind = session.get_bind()
+            except Exception:
+                bind = None
+        dialect = getattr(bind, "dialect", None)
+        return bool(dialect is not None and dialect.name == "postgresql")
 
     async def _try_advisory_lock(self, session: AsyncSession) -> bool:
         if not self._is_postgres(session):

@@ -16,13 +16,20 @@ from entrypoints.api import app
 from core.database.session import async_session_factory
 from datetime import datetime, timezone, timedelta
 from core.database.init import init_db
-from core.security.auth import get_current_app_user, get_current_user, get_current_moderator, get_current_moderator_or_viewer
+from core.security.auth import (
+    get_current_app_user,
+    get_current_user,
+    get_current_moderator,
+    get_current_moderator_or_viewer,
+    get_current_user_moderator_or_superadmin,
+)
+from apps.administration.dependencies import require_signed_moderator, require_signed_moderator_or_viewer
 from apps.accounts.db_models import TransactionalEmailLog, User
 from apps.accounts.services import assign_user_role
 from apps.feed.db_models import Post, MediaAsset, PostAttachment
 from apps.connections.db_models import Connection
 from apps.profiles.db_models import Profile
-from common.enums import MediaType, MediaAssetState, PostState
+from common.enums import MediaType, MediaAssetState, PostState, ProfileVisibility
 from apps.feed.schemas import SavePostRequest, EditPostRequest, MediaItem, PostContentPayload, EditPostContentPayload, DeletePostRequest
 from apps.feed.services import (
     get_media_type,
@@ -141,13 +148,6 @@ async def clean_feed_pytest_data(session):
         """), params)
 
         await session.execute(text("""
-            DELETE FROM profile_stats
-            WHERE profile_id IN (
-                SELECT id FROM profiles WHERE user_id = ANY(:user_ids)
-            )
-        """), params)
-
-        await session.execute(text("""
             DELETE FROM profiles
             WHERE user_id = ANY(:user_ids)
         """), params)
@@ -160,6 +160,11 @@ async def clean_feed_pytest_data(session):
 
         await session.execute(text("""
             DELETE FROM security_events
+            WHERE user_id = ANY(:user_ids)
+        """), params)
+
+        await session.execute(text("""
+            DELETE FROM user_activity_logs
             WHERE user_id = ANY(:user_ids)
         """), params)
         
@@ -256,6 +261,43 @@ async def test_upload_post_media_service_success(test_users) -> None:
         assert db_media.mime_type == "image/png"
         assert db_media.file_size == len(file_content)
         assert db_media.state == MediaAssetState.published
+
+
+@pytest.mark.asyncio
+async def test_postupload_document_returns_decoded_original_filename(test_users) -> None:
+    user, _ = test_users
+
+    async def _override_get_current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            files = [
+                ("files", ("Java notes.pdf", io.BytesIO(b"%PDF-1.4 fake"), "application/pdf")),
+            ]
+            response = await ac.post("/api/v1/postupload", files=files)
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] is True
+            item = body["data"][0]
+            assert item["original_filename"] == "Java notes.pdf"
+            assert item["type"] == "document"
+            assert item["key"].startswith("posts/")
+            assert item["key"].endswith(".pdf")
+            assert "Java notes.pdf" not in item["key"]
+
+            async with async_session_factory() as session:
+                db_media = (
+                    await session.execute(
+                        select(MediaAsset).where(MediaAsset.id == item["id"])
+                    )
+                ).scalar_one()
+                assert db_media.original_filename == "Java notes.pdf"
+                assert db_media.key == item["key"]
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
 
 
 @pytest.mark.asyncio
@@ -688,11 +730,14 @@ async def test_publish_post_service_success(test_users) -> None:
 
         post = await save_post_service(user.id, payload, session)
         post_id = post.id
+        # Round-robin may assign a moderator on create; publish must preserve it.
+        assigned_moderator_id = post.moderator_id
 
     async with async_session_factory() as session:
         post = await admin_publish_post_service(post_id, "published", user.id, session)
         assert post.state == PostState.published
-        assert post.moderator_id == user.id
+        expected_moderator_id = assigned_moderator_id if assigned_moderator_id is not None else user.id
+        assert post.moderator_id == expected_moderator_id
         assert post.is_moderator_reviewed is True
         profile = (await session.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one()
         assert profile.posts_count == 1
@@ -711,11 +756,14 @@ async def test_flag_post_service_success(test_users) -> None:
 
         post = await save_post_service(user.id, payload, session)
         post_id = post.id
+        # Round-robin may assign a moderator on create; flag must preserve it.
+        assigned_moderator_id = post.moderator_id
 
     async with async_session_factory() as session:
         post = await admin_publish_post_service(post_id, "flagged", user.id, session)
         assert post.state == PostState.flagged
-        assert post.moderator_id == user.id
+        expected_moderator_id = assigned_moderator_id if assigned_moderator_id is not None else user.id
+        assert post.moderator_id == expected_moderator_id
         profile = (await session.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one()
         assert profile.posts_count == 0
 
@@ -828,7 +876,8 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
     async def _override_get_current_moderator():
         return moderator
 
-    app.dependency_overrides[get_current_moderator] = _override_get_current_moderator
+    app.dependency_overrides[get_current_moderator_or_viewer] = _override_get_current_moderator
+    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_get_current_moderator
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -850,7 +899,8 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
             assert "Other moderator reviewed" in filtered_captions
             assert "Reviewed via route" not in filtered_captions
     finally:
-        app.dependency_overrides.pop(get_current_moderator, None)
+        app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
+        app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
 
 
 @pytest.mark.asyncio
@@ -897,7 +947,8 @@ async def test_reviewed_posts_status_filter_without_moderator_id_returns_all(tes
     async def _override_get_current_moderator():
         return SimpleNamespace(id=moderator_a.id, role="moderator")
 
-    app.dependency_overrides[get_current_moderator] = _override_get_current_moderator
+    app.dependency_overrides[get_current_moderator_or_viewer] = _override_get_current_moderator
+    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_get_current_moderator
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -909,7 +960,8 @@ async def test_reviewed_posts_status_filter_without_moderator_id_returns_all(tes
             captions = {item["caption"] for item in body["data"]["items"]}
             assert {"Published by A", "Published by B"}.issubset(captions)
     finally:
-        app.dependency_overrides.pop(get_current_moderator, None)
+        app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
+        app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
 
 
 @pytest.mark.asyncio
@@ -993,6 +1045,9 @@ async def test_processing_posts_route_filters_for_moderator_and_allows_superadmi
     app.dependency_overrides[get_current_moderator_or_viewer] = (
         lambda: SimpleNamespace(id=moderator_a.id, role="moderator")
     )
+    app.dependency_overrides[require_signed_moderator_or_viewer] = (
+        lambda: SimpleNamespace(id=moderator_a.id, role="moderator")
+    )
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -1004,11 +1059,18 @@ async def test_processing_posts_route_filters_for_moderator_and_allows_superadmi
             assert moderator_body["data"]["items"][0]["moderator_name"] == moderator_a.email
     finally:
         app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
+        app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
 
     app.dependency_overrides[get_current_moderator_or_viewer] = (
         lambda: SimpleNamespace(id=superadmin_id, role="superadmin")
     )
+    app.dependency_overrides[require_signed_moderator_or_viewer] = (
+        lambda: SimpleNamespace(id=superadmin_id, role="superadmin")
+    )
     app.dependency_overrides[get_current_moderator] = (
+        lambda: SimpleNamespace(id=superadmin_id, role="superadmin")
+    )
+    app.dependency_overrides[require_signed_moderator] = (
         lambda: SimpleNamespace(id=superadmin_id, role="superadmin")
     )
     try:
@@ -1021,7 +1083,9 @@ async def test_processing_posts_route_filters_for_moderator_and_allows_superadmi
             assert {"Route assigned to A", "Route assigned to B"}.issubset(captions)
     finally:
         app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
+        app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
         app.dependency_overrides.pop(get_current_moderator, None)
+        app.dependency_overrides.pop(require_signed_moderator, None)
 
 
 @pytest.mark.asyncio
@@ -1045,6 +1109,80 @@ async def test_get_post_service_visibility(test_users) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_post_service_allows_detail_visible_states_for_other_users(test_users) -> None:
+    user, other = test_users
+    async with async_session_factory() as session:
+        flagged = Post(
+            author_user_id=user.id,
+            content={"caption": "Flagged", "visibility": "public"},
+            state=PostState.flagged,
+        )
+        processing = Post(
+            author_user_id=user.id,
+            content={"caption": "Processing", "visibility": "public"},
+            state=PostState.processing,
+        )
+        reinstated = Post(
+            author_user_id=user.id,
+            content={"caption": "Reinstated", "visibility": "public"},
+            state=PostState.reinstate,
+        )
+        published = Post(
+            author_user_id=user.id,
+            content={"caption": "Published", "visibility": "public"},
+            state=PostState.published,
+        )
+        draft = Post(
+            author_user_id=user.id,
+            content={"caption": "Draft", "visibility": "public"},
+            state=PostState.draft,
+        )
+        session.add_all([flagged, processing, reinstated, published, draft])
+        await session.commit()
+        ids = {
+            "flagged": flagged.id,
+            "processing": processing.id,
+            "reinstated": reinstated.id,
+            "published": published.id,
+            "draft": draft.id,
+        }
+
+    async with async_session_factory() as session:
+        for key in ("reinstated", "published"):
+            post = await get_post_service(ids[key], other.id, session)
+            assert post.id == ids[key]
+        for key in ("flagged", "processing", "draft"):
+            with pytest.raises(ApiError) as exc_info:
+                await get_post_service(ids[key], other.id, session)
+            assert "not accessible" in exc_info.value.message
+        for key in ("flagged", "processing"):
+            post = await get_post_service(ids[key], user.id, session)
+            assert post.id == ids[key]
+
+
+@pytest.mark.asyncio
+async def test_get_post_service_staff_roles_can_view_private_flagged_post(test_users) -> None:
+    user, other = test_users
+    async with async_session_factory() as session:
+        private_flagged = Post(
+            author_user_id=user.id,
+            content={"caption": "Private flagged", "visibility": "private"},
+            state=PostState.flagged,
+        )
+        session.add(private_flagged)
+        await session.commit()
+        post_id = private_flagged.id
+
+    async with async_session_factory() as session:
+        with pytest.raises(ApiError) as exc_info:
+            await get_post_service(post_id, other.id, session)
+        assert "not accessible" in exc_info.value.message
+        for role in ("moderator", "viewer", "superadmin"):
+            post = await get_post_service(post_id, other.id, session, viewer_role=role)
+            assert post.id == post_id
+
+
+@pytest.mark.asyncio
 async def test_delete_post_service_success(test_users) -> None:
     user, _ = test_users
     payload = SavePostRequest(
@@ -1062,6 +1200,9 @@ async def test_delete_post_service_success(test_users) -> None:
         await delete_post_service(post_id, user.id, session)
 
     async with async_session_factory() as session:
+        deleted_post = (await session.execute(select(Post).where(Post.id == post_id))).scalar_one_or_none()
+        assert deleted_post is not None
+        assert deleted_post.state == PostState.deleted
         with pytest.raises(ApiError) as exc_info:
             await get_post_service(post_id, user.id, session)
         assert "not found" in exc_info.value.message.lower()
@@ -1080,11 +1221,24 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
         p4 = Post(author_user_id=user.id, content={"caption": "Deleted Post"}, state=PostState.deleted)
         p5 = Post(author_user_id=user.id, content={"caption": "Processing Post"}, state=PostState.processing)
         p6 = Post(author_user_id=user.id, content={"caption": "Reinstated Post"}, state=PostState.reinstate)
-        session.add_all([p1, p2, p3, p4, p5, p6])
+        p7 = Post(author_user_id=user.id, content={"caption": "Rejected Post"}, state=PostState.rejected)
+        session.add_all([p1, p2, p3, p4, p5, p6, p7])
         await session.commit()
     
     async with async_session_factory() as session:
-        published_posts, total = await list_user_posts_service(user, session, include_total=True)
+        # Default (all): owner sees published + reinstate + flagged + processing
+        all_posts, total = await list_user_posts_service(user, session, include_total=True)
+        captions = {post.caption for post in all_posts}
+        assert captions == {
+            "Published Post",
+            "Reinstated Post",
+            "Flagged Post",
+            "Processing Post",
+        }
+
+        published_posts, total = await list_user_posts_service(
+            user, session, state="published", include_total=True
+        )
         captions = {post.caption for post in published_posts}
         assert captions == {"Published Post", "Reinstated Post"}
 
@@ -1093,8 +1247,8 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
         assert draft_posts[0].caption == "Draft Post"
 
         flagged_posts, total = await list_user_posts_service(user, session, state="flagged", include_total=True)
-        assert len(flagged_posts) == 1
-        assert flagged_posts[0].caption == "Flagged Post"
+        assert len(flagged_posts) == 2
+        assert {post.caption for post in flagged_posts} == {"Flagged Post", "Processing Post"}
 
         processing_posts, total = await list_user_posts_service(
             user, session, state="processing", include_total=True
@@ -1112,6 +1266,20 @@ async def test_list_user_posts_service_privacy(test_users) -> None:
         )
         captions = {post.caption for post in posts_superadmin}
         assert captions == {"Published Post", "Reinstated Post"}
+
+        with pytest.raises(HTTPException) as exc:
+            await list_user_posts_service(user, session, state="rejected", include_total=True)
+        assert exc.value.status_code == 403
+
+        rejected_posts, total = await list_user_posts_service(
+            superadmin,
+            session,
+            target_user_id=user.id,
+            state="rejected",
+            include_total=True,
+        )
+        assert {post.caption for post in rejected_posts} == {"Rejected Post"}
+        assert total == 1
 
 
 @pytest.mark.asyncio
@@ -1139,6 +1307,9 @@ async def test_posts_route_filters_state_for_current_user(test_users) -> None:
             items = body["data"]["items"] if isinstance(body["data"], dict) else body["data"]
             captions = {item["content"]["caption"] for item in items}
             assert captions == {"Route Draft"}
+
+            rejected_forbidden = await ac.get("/api/v1/posts", params={"state": "rejected"})
+            assert rejected_forbidden.status_code == 403
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -1171,6 +1342,7 @@ async def test_posts_route_superadmin_can_filter_any_user_or_all(test_users) -> 
             Post(author_user_id=user.id, content={"caption": "User Published"}, state=PostState.published),
             Post(author_user_id=other.id, content={"caption": "Other Published"}, state=PostState.published),
             Post(author_user_id=other.id, content={"caption": "Other Processing"}, state=PostState.processing),
+            Post(author_user_id=other.id, content={"caption": "Other Rejected"}, state=PostState.rejected),
         ])
         await session.commit()
 
@@ -1192,9 +1364,33 @@ async def test_posts_route_superadmin_can_filter_any_user_or_all(test_users) -> 
                 "/api/v1/posts",
                 params={"user_id": str(other.id), "state": "processing"},
             )
-            assert user_response.status_code == 403
-            assert user_response.json()["status"] is False
-            assert user_response.json()["message"] == "Unauthorized"
+            assert user_response.status_code == 200
+            user_data = user_response.json()["data"]
+            user_items = user_data["items"] if isinstance(user_data, dict) else user_data
+            assert {item["content"]["caption"] for item in user_items} == {"Other Processing"}
+            assert all(item["status"] == "processing" for item in user_items)
+
+            flagged_response = await ac.get(
+                "/api/v1/posts",
+                params={"user_id": str(other.id), "state": "flagged"},
+            )
+            assert flagged_response.status_code == 200
+            flagged_data = flagged_response.json()["data"]
+            flagged_items = flagged_data["items"] if isinstance(flagged_data, dict) else flagged_data
+            # flagged tab includes processing posts for the target user
+            assert {item["content"]["caption"] for item in flagged_items} == {"Other Processing"}
+
+            rejected_response = await ac.get(
+                "/api/v1/posts",
+                params={"user_id": str(other.id), "state": "rejected"},
+            )
+            assert rejected_response.status_code == 200
+            rejected_data = rejected_response.json()["data"]
+            rejected_items = (
+                rejected_data["items"] if isinstance(rejected_data, dict) else rejected_data
+            )
+            assert {item["content"]["caption"] for item in rejected_items} == {"Other Rejected"}
+            assert all(item["status"] == "rejected" for item in rejected_items)
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -1239,12 +1435,14 @@ async def test_get_feed_service_success(test_users) -> None:
             first_name="Feed",
             last_name="User",
             profile_photo_url="profiles/feed-user.jpg",
+            profile_visibility=ProfileVisibility.public,
         )
         other_profile = Profile(
             user_id=other.id,
             first_name="Other",
             last_name="User",
             profile_photo_url="profiles/other-user.jpg",
+            profile_visibility=ProfileVisibility.public,
         )
         p1 = Post(author_user_id=user.id, content={"caption": "Draft Post"}, state=PostState.draft)
         p2 = Post(author_user_id=user.id, content={"caption": "Published Post 1"}, state=PostState.published)
@@ -1277,6 +1475,7 @@ async def test_feed_route_accessible_to_superadmin_and_includes_author_profile(t
             first_name="Admin",
             last_name="Feed",
             profile_photo_url="profiles/admin-feed.jpg",
+            profile_visibility=ProfileVisibility.public,
         )
         post = Post(
             author_user_id=user.id,
@@ -1317,6 +1516,7 @@ async def test_feed_route_accessible_to_superadmin_and_includes_author_profile(t
 
 @pytest.mark.asyncio
 async def test_feed_service_connection_priority(test_users) -> None:
+    """Connected authors match the feed; unmatched public posts are omitted."""
     user, other = test_users
 
     # Connection low/high user order constraint
@@ -1333,8 +1533,8 @@ async def test_feed_service_connection_priority(test_users) -> None:
         session.add(third_user)
         await session.flush()
         session.add_all([
-            Profile(user_id=other.id, first_name="Conn", last_name="Author"),
-            Profile(user_id=third_user.id, first_name="Third", last_name="Author"),
+            Profile(user_id=other.id, first_name="Conn", last_name="Author", profile_visibility=ProfileVisibility.public),
+            Profile(user_id=third_user.id, first_name="Third", last_name="Author", profile_visibility=ProfileVisibility.public),
         ])
         conn = Connection(user_low_id=low_id, user_high_id=high_id, is_active=True)
         session.add(conn)
@@ -1356,13 +1556,10 @@ async def test_feed_service_connection_priority(test_users) -> None:
 
     async with async_session_factory() as session:
         feed, total, _next_cursor = await get_feed_service(user.id, session, include_total=True)
-        assert len(feed) >= 2
         captions = [item["content"]["caption"] for item in feed]
         assert "Connection Post" in captions
-        assert "Non-connection Post" in captions
-        # Feed is ordered by event time descending (connection priority removed).
-        assert feed[0]["content"]["caption"] == "Non-connection Post"
-        assert feed[1]["content"]["caption"] == "Connection Post"
+        assert "Non-connection Post" not in captions
+        assert feed[0]["content"]["caption"] == "Connection Post"
 
 
 @pytest.mark.asyncio
@@ -1376,7 +1573,11 @@ async def test_routes_post_management_flow(test_users) -> None:
         return User(id=user.id, email=user.email, role="moderator")
 
     app.dependency_overrides[get_current_user] = _override_get_current_user
+    app.dependency_overrides[get_current_user_moderator_or_superadmin] = _override_get_current_user
     app.dependency_overrides[get_current_moderator] = _override_get_current_moderator
+    app.dependency_overrides[require_signed_moderator] = _override_get_current_moderator
+    app.dependency_overrides[get_current_moderator_or_viewer] = _override_get_current_moderator
+    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_get_current_moderator
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -1461,7 +1662,7 @@ async def test_routes_post_management_flow(test_users) -> None:
             delete_res = await ac.request("DELETE", "/api/v1/posts", json={"id": post_id})
             assert delete_res.status_code == 200
 
-            # Verify hard-deleted
+            # Verify soft-deleted (row retained, hidden from API)
             get_deleted = await ac.get(f"/api/v1/posts/{post_id}")
             assert get_deleted.status_code == 200
             body = get_deleted.json()
@@ -1469,7 +1670,11 @@ async def test_routes_post_management_flow(test_users) -> None:
             assert "not found" in body["message"].lower()
     finally:
         app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_current_user_moderator_or_superadmin, None)
         app.dependency_overrides.pop(get_current_moderator, None)
+        app.dependency_overrides.pop(require_signed_moderator, None)
+        app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
+        app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
 
 
 @pytest.mark.asyncio

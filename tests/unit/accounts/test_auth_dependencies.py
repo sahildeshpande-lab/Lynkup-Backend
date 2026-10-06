@@ -224,7 +224,7 @@ async def test_forgot_password_rate_limit(db_session: AsyncSession, monkeypatch)
     from core.auth.config import settings as auth_settings
     res2 = await forgot_password(payload, db_session)
     assert res2.status is False
-    assert res2.message == f"Recently email for reset password has been sent. Please try after {auth_settings.password_reset_token_expire_minutes} mins"
+    assert res2.message == f"Recently email for reset password has been sent. Please try after {auth_settings.password_reset_token_expire_minutes} minutes"
 
 
 @pytest.mark.asyncio
@@ -276,13 +276,12 @@ async def test_require_recent_auth() -> None:
     assert exc.value.status_code == 401
     assert "Recent Firebase authentication required" in exc.value.detail
 
-    # 2. Expired auth_time
+    # 2. Older auth_time is still accepted (no max-age window)
     old_time = int(datetime.now(timezone.utc).timestamp()) - 100000
-    with pytest.raises(HTTPException) as exc:
-        await require_recent_auth({"uid": "123", "auth_time": old_time})
-    assert exc.value.status_code == 401
+    old_res = await require_recent_auth({"uid": "123", "auth_time": old_time})
+    assert old_res["uid"] == "123"
 
-    # 3. Valid recent auth_time
+    # 3. Valid auth_time
     recent_time = int(datetime.now(timezone.utc).timestamp()) - 10
     res = await require_recent_auth({"uid": "123", "auth_time": recent_time})
     assert res["uid"] == "123"

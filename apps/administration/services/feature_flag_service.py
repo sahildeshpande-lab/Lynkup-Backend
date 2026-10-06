@@ -20,20 +20,7 @@ logger = logging.getLogger(__name__)
 
 _FEATURE_FLAG = AdminConfigurationType.FEATURE_FLAG
 
-DEFAULT_FEATURE_FLAGS: tuple[dict[str, Any], ...] = (
-    {
-        "key": "chat",
-        "name": "Chat",
-        "description": "In-app messaging between users on the mobile application.",
-        "is_enabled": True,
-    },
-    {
-        "key": "recommendations",
-        "name": "Recommendations",
-        "description": "Learning and connection recommendations on the mobile application.",
-        "is_enabled": True,
-    },
-)
+DEFAULT_FEATURE_FLAGS: tuple[dict[str, Any], ...] = ()
 
 
 def _serialize_flag(row: AdminConfiguration) -> dict[str, Any]:
@@ -49,7 +36,9 @@ def _serialize_flag(row: AdminConfiguration) -> dict[str, Any]:
 
 
 async def ensure_default_feature_flags(db: AsyncSession) -> None:
-    """Insert default flags if missing. Never overwrites existing rows."""
+    """No default flags are auto-seeded; feature flags are created and managed by admin."""
+    if not DEFAULT_FEATURE_FLAGS:
+        return
     result = await db.execute(select(AdminConfiguration.key))
     existing_keys = {key for key in result.scalars().all()}
     now = utc_now()
@@ -76,7 +65,6 @@ async def ensure_default_feature_flags(db: AsyncSession) -> None:
 
 
 async def list_feature_flags(db: AsyncSession) -> dict[str, Any]:
-    await ensure_default_feature_flags(db)
     result = await db.execute(
         select(AdminConfiguration)
         .where(AdminConfiguration.configuration_type == _FEATURE_FLAG)
@@ -89,6 +77,9 @@ async def list_feature_flags(db: AsyncSession) -> dict[str, Any]:
 async def create_feature_flag(
     payload: FeatureFlagCreateRequest,
     db: AsyncSession,
+    *,
+    actor_user_id: UUID | None = None,
+    actor_role: str | None = None,
 ) -> dict[str, Any]:
     existing = (
         await db.execute(
@@ -110,6 +101,26 @@ async def create_feature_flag(
         updated_at=now,
     )
     db.add(row)
+    await db.flush()
+    if actor_user_id is not None:
+        from apps.administration.services.admin_activity_log_service import create_admin_activity_log
+
+        await create_admin_activity_log(
+            db,
+            user_id=actor_user_id,
+            role=actor_role,
+            action="create",
+            module="feature_flag",
+            record_id=row.id,
+            description=f"created platform features to is_enabled {bool(row.is_enabled)}",
+            metadata={
+                "old": None,
+                "new": {
+                    "flag": row.key,
+                    "enabled": row.is_enabled,
+                },
+            },
+        )
     await db.commit()
     await db.refresh(row)
     return _serialize_flag(row)
@@ -118,6 +129,9 @@ async def create_feature_flag(
 async def update_feature_flag(
     payload: FeatureFlagUpdateRequest,
     db: AsyncSession,
+    *,
+    actor_user_id: UUID | None = None,
+    actor_role: str | None = None,
 ) -> dict[str, Any]:
     row = (
         await db.execute(
@@ -130,10 +144,58 @@ async def update_feature_flag(
     if row is None:
         raise ApiError("Feature flag not found")
 
+    old_enabled = bool(row.is_enabled)
     row.is_enabled = payload.is_enabled
     row.updated_at = utc_now()
     db.add(row)
+
+    if payload.key in ("recommendation", "recommendations"):
+        try:
+            from apps.profiles.db_models import LearningRecommendationSettings
+
+            rec_settings = (
+                await db.execute(select(LearningRecommendationSettings))
+            ).scalars().first()
+            if rec_settings is not None:
+                rec_settings.is_enabled = payload.is_enabled
+                rec_settings.updated_at = utc_now()
+                if payload.is_enabled is True and rec_settings.cycle_start_date is None:
+                    rec_settings.cycle_start_date = utc_now().date()
+                db.add(rec_settings)
+        except Exception as exc:
+            logger.warning(
+                "Could not sync learning recommendation settings from feature flag: %s",
+                exc,
+            )
+
+    if actor_user_id is not None:
+        from apps.administration.services.admin_activity_log_service import create_admin_activity_log
+
+        if row.key in ("recommendation", "recommendations", "learning_spotlight"):
+            feature_label = "learning spotlight"
+        elif row.name:
+            feature_label = row.name.lower()
+        else:
+            feature_label = (row.key or "platform features").replace("_", " ").lower()
+
+        action_word = "enabled" if row.is_enabled else "disabled"
+        description = f"{action_word} the {feature_label} feature"
+
+        await create_admin_activity_log(
+            db,
+            user_id=actor_user_id,
+            role=actor_role,
+            action="update",
+            module="feature_flag",
+            record_id=row.id,
+            description=description,
+            metadata={
+                "old": {"enabled": old_enabled},
+                "new": {"enabled": bool(row.is_enabled)},
+            },
+        )
     await db.commit()
+
     await db.refresh(row)
     return _serialize_flag(row)
 
@@ -141,6 +203,9 @@ async def update_feature_flag(
 async def delete_feature_flag(
     flag_id: UUID,
     db: AsyncSession,
+    *,
+    actor_user_id: UUID | None = None,
+    actor_role: str | None = None,
 ) -> dict[str, Any]:
     """Hard-delete a feature flag by primary key."""
     row = (
@@ -155,6 +220,22 @@ async def delete_feature_flag(
         raise ApiError("Feature flag not found")
 
     deleted = _serialize_flag(row)
+    if actor_user_id is not None:
+        from apps.administration.services.admin_activity_log_service import create_admin_activity_log
+
+        await create_admin_activity_log(
+            db,
+            user_id=actor_user_id,
+            role=actor_role,
+            action="delete",
+            module="feature_flag",
+            record_id=row.id,
+            description="deleted platform features",
+            metadata={
+                "old": {"enabled": bool(row.is_enabled), "flag": row.key},
+                "new": None,
+            },
+        )
     await db.delete(row)
     await db.commit()
     return deleted

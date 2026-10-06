@@ -84,6 +84,12 @@ PORT=8000 RELOAD=true python -m entrypoints.api
 
 The API will be available at `http://localhost:8000`.
 
+#### Start Celery Worker
+```bash
+python -m entrypoints.worker
+python -m entrypoints.worker --queues "kampulynk.queue.bulk_email,kampulynk.queue.exports" 
+```
+
 #### Using Dockerfile
 
 Build docker server
@@ -122,7 +128,7 @@ All routes are prefixed with `/api/v1`. Authenticated endpoints require a Fireba
 Run the unit test suite with coverage over the `apps` package:
 
 ```bash
-python -m pytest --cov=apps tests\unit
+python -m pytest --no-cov
 ```
 
 Coverage is also configured in `pytest.ini` (target: 80% across `apps` and `core`). To generate an HTML coverage report:
@@ -177,3 +183,47 @@ alembic revision --autogenerate -m "describe your change"
 ## Release Notes
 
 For Milestone 1 changes (Firebase forgot-password flow, logout/device tracking, schema updates), see [docs/milestone-1-release-note.md](docs/milestone-1-release-note.md).
+
+
+## Local Development Docker Servers
+
+# Start
+`docker compose -f localsetup/compose.yaml up -d`
+
+# Restart
+`docker compose -f localsetup/compose.yaml restart`
+
+# Stop
+`docker compose -f localsetup/compose.yaml stop`
+
+# Stop and remove containers and networks
+`docker compose -f localsetup/compose.yaml down`
+
+
+## Datadog Agent docker compose
+
+```
+version: '3.8'
+
+services:
+  datadog-agent:
+    image: datadog/agent:latest
+    container_name: datadog-agent
+    environment:
+      - DD_API_KEY=<apikey>
+      - DD_SITE=datadoghq.com
+      - DD_LOGS_ENABLED=true
+      - DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=true
+      - DD_CONTAINER_EXCLUDE_LOGS=name:datadog-agent
+      # Added for App Platform APM integration:
+      - DD_APM_ENABLED=true
+      - DD_APM_NON_LOCAL_TRAFFIC=true
+    ports:
+      - "8126:8126"  # Exposes the APM trace port to the internal VPC
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc/:/host/proc/:ro
+      - /opt/datadog-agent/run:/opt/datadog-agent/run:rw
+      - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
+    restart: unless-stopped
+```

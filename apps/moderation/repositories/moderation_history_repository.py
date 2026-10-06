@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -96,3 +96,38 @@ async def get_latest(
         .limit(1)
     )
     return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def get_latest_comments_by_entity_ids(
+    db: AsyncSession,
+    *,
+    entity_type: ReportEntityType,
+    entity_ids: list[UUID],
+) -> dict[UUID, str | None]:
+    """Return the latest moderation comment keyed by entity_id (bulk, no N+1)."""
+    if entity_type not in _HISTORY_ENTITY_TYPES or not entity_ids:
+        return {}
+
+    ranked = (
+        select(
+            ModerationHistory.entity_id,
+            ModerationHistory.comment,
+            func.row_number()
+            .over(
+                partition_by=ModerationHistory.entity_id,
+                order_by=(
+                    ModerationHistory.created_at.desc(),
+                    ModerationHistory.id.desc(),
+                ),
+            )
+            .label("rn"),
+        )
+        .where(
+            ModerationHistory.entity_type == entity_type,
+            ModerationHistory.entity_id.in_(entity_ids),
+        )
+    ).subquery()
+
+    stmt = select(ranked.c.entity_id, ranked.c.comment).where(ranked.c.rn == 1)
+    rows = (await db.execute(stmt)).all()
+    return {row.entity_id: row.comment for row in rows}

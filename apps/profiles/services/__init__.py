@@ -4,7 +4,7 @@ import sys
 from types import ModuleType
 
 from . import response_service as _service_module_0
-from .response_service import _normalize_name_part, _compose_full_name, build_user_base_response
+from .response_service import _normalize_name_part, _compose_full_name, build_user_base_response, is_graduation_completed
 
 from . import interest_service as _service_module_1
 from .interest_service import _find_existing_academic_interest, _resolve_academic_interest_ids
@@ -42,6 +42,7 @@ __all__ = [
     "_normalize_name_part",
     "_compose_full_name",
     "build_user_base_response",
+    "is_graduation_completed",
     "_find_existing_academic_interest",
     "_resolve_academic_interest_ids",
     "get_completeness_weights",

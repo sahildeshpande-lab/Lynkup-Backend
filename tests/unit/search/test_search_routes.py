@@ -1,9 +1,10 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from apps.accounts.db_models import User
 from apps.search import routes as search_routes
 from core.database.session import get_session
-from core.security.auth import get_current_user
+from core.security.auth import get_current_user, get_current_user_moderator_or_superadmin
 from entrypoints.api import app
 
 
@@ -30,6 +31,7 @@ class _NoopSession:
 
 def setup_module() -> None:
     app.dependency_overrides[get_current_user] = _override_current_user
+    app.dependency_overrides[get_current_user_moderator_or_superadmin] = _override_current_user
     async def _override_session():
         yield _NoopSession()
     app.dependency_overrides[get_session] = _override_session
@@ -37,6 +39,7 @@ def setup_module() -> None:
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_current_user, None)
+    app.dependency_overrides.pop(get_current_user_moderator_or_superadmin, None)
     app.dependency_overrides.pop(get_session, None)
 
 
@@ -62,11 +65,25 @@ async def _search_universities(_params, _db) -> dict:
     }
 
 
-def test_university_search_rejects_short_query() -> None:
+def test_university_search_accepts_short_query(monkeypatch) -> None:
+    async def _search_short_query(params, _db) -> dict:
+        return {
+            "query": params.query,
+            "items": [],
+            "page": params.page,
+            "pageSize": params.pageSize,
+            "totalItems": 0,
+            "totalPages": 0,
+        }
+
+    monkeypatch.setattr(search_routes.services, "search_universities", _search_short_query)
+
     response = client.get("/api/v1/universities", params={"query": "ab", "page": 1, "pageSize": 20})
 
     assert response.status_code == 200
-    assert response.json()["status"] is False
+    body = response.json()
+    assert body["status"] is True
+    assert body["data"]["query"] == "ab"
 
 
 def test_university_search_returns_matches(monkeypatch) -> None:
@@ -84,6 +101,105 @@ def test_university_search_returns_matches(monkeypatch) -> None:
     assert body["data"]["items"][0]["name"] == "Kampu University"
     assert body["data"]["items"][0]["country"] == "United States"
     assert body["data"]["items"][0]["minor"] == [{"name": "Psychology"}]
+
+
+def test_university_search_passes_sort_and_order(monkeypatch) -> None:
+    captured = {}
+
+    async def _capture_search_universities(params, _db) -> dict:
+        captured["sort"] = params.sort
+        captured["order"] = params.order
+        return {
+            "query": params.query,
+            "items": [],
+            "page": params.page,
+            "pageSize": params.pageSize,
+            "totalItems": 0,
+            "totalPages": 0,
+        }
+
+    monkeypatch.setattr(search_routes.services, "search_universities", _capture_search_universities)
+
+    response = client.get(
+        "/api/v1/universities",
+        params={"query": "kampu", "sort": "created_at", "order": "desc", "page": 1, "pageSize": 20},
+    )
+    assert response.status_code == 200
+    assert captured["sort"] == "created_at"
+    assert captured["order"] == "desc"
+
+
+def test_university_search_omits_default_pagination(monkeypatch) -> None:
+    captured = {}
+
+    async def _capture_search_universities(params, _db) -> dict:
+        captured["page"] = params.page
+        captured["pageSize"] = params.pageSize
+        return {
+            "query": params.query,
+            "items": [],
+            "page": 1,
+            "pageSize": 1,
+            "totalItems": 0,
+            "totalPages": 0,
+        }
+
+    monkeypatch.setattr(search_routes.services, "search_universities", _capture_search_universities)
+
+    response = client.get("/api/v1/universities", params={"query": "kampu"})
+    assert response.status_code == 200
+    assert captured["page"] is None
+    assert captured["pageSize"] is None
+
+
+@pytest.mark.asyncio
+async def test_search_universities_service_empty_query_execution():
+    import uuid
+    from unittest.mock import AsyncMock, MagicMock
+    from apps.search.schemas import UniversitySearchParams
+    from apps.search.services import search_universities
+    from apps.profiles.db_models import University
+
+    mock_db = AsyncMock()
+    mock_count_res = MagicMock()
+    mock_count_res.scalar_one.return_value = 1
+    mock_select_res = MagicMock()
+    uni = University(name="Test University", slug="test-uni", country_id=uuid.uuid4(), is_active=True)
+    mock_select_res.all.return_value = [(uni, "United States")]
+    mock_db.execute.side_effect = [mock_count_res, mock_select_res]
+
+    params = UniversitySearchParams(query="", page=1, pageSize=20, order="desc")
+    result = await search_universities(params, mock_db)
+    assert result["totalItems"] == 1
+    assert result["items"][0]["name"] == "Test University"
+
+
+@pytest.mark.asyncio
+async def test_search_universities_service_without_pagination_skips_limit():
+    import uuid
+    from unittest.mock import AsyncMock, MagicMock
+    from apps.search.schemas import UniversitySearchParams
+    from apps.search.services import search_universities
+    from apps.profiles.db_models import University
+
+    mock_db = AsyncMock()
+    mock_count_res = MagicMock()
+    mock_count_res.scalar_one.return_value = 1
+    mock_select_res = MagicMock()
+    uni = University(name="Test University", slug="test-uni", country_id=uuid.uuid4(), is_active=True)
+    mock_select_res.all.return_value = [(uni, "United States")]
+    mock_db.execute.side_effect = [mock_count_res, mock_select_res]
+
+    params = UniversitySearchParams(query="", order="desc")
+    result = await search_universities(params, mock_db)
+    select_stmt = mock_db.execute.await_args_list[1].args[0]
+    compiled = str(select_stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+    assert "limit" not in compiled
+    assert "offset" not in compiled
+    assert result["page"] == 1
+    assert result["pageSize"] == 1
+
+
 
 
 async def _get_academics_info(query, page, page_size, db) -> dict:
@@ -133,7 +249,7 @@ def test_get_academics_info_returns_success(monkeypatch) -> None:
 
 
 def test_list_countries_returns_success(monkeypatch) -> None:
-    async def _list_countries(query, page, page_size, db) -> dict:
+    async def _list_countries(query, page, page_size, db, sort=None, order=None, *args, **kwargs) -> dict:
         assert query == "ind"
         assert page == 1
         assert page_size == 20
@@ -147,6 +263,8 @@ def test_list_countries_returns_success(monkeypatch) -> None:
 
     monkeypatch.setattr(search_routes.services, "list_countries", _list_countries)
 
+
+
     response = client.get("/api/v1/countries", params={"query": "ind", "page": 1, "pageSize": 20})
 
     assert response.status_code == 200
@@ -155,6 +273,40 @@ def test_list_countries_returns_success(monkeypatch) -> None:
     assert body["message"] == "Countries fetched successfully"
     assert body["data"]["items"] == [{"id": "1", "name": "India", "iso_code": "IN"}]
     assert body["data"]["totalItems"] == 1
+
+
+def test_list_countries_sorts_by_created_at(monkeypatch) -> None:
+    captured: dict = {}
+
+    async def _list_countries(**kwargs) -> dict:
+        captured.update(kwargs)
+        return {
+            "items": [],
+            "page": 1,
+            "pageSize": 20,
+            "totalItems": 0,
+            "totalPages": 0,
+        }
+
+    monkeypatch.setattr(search_routes.services, "list_countries", _list_countries)
+
+    response = client.get(
+        "/api/v1/countries",
+        params={"sort": "created_at", "order": "desc"},
+    )
+
+    assert response.status_code == 200
+    assert captured["sort"] == "created_at"
+    assert captured["order"] == "desc"
+
+    captured.clear()
+    response = client.get(
+        "/api/v1/countries",
+        params={"sort": "created_at", "order": "asc"},
+    )
+    assert response.status_code == 200
+    assert captured["sort"] == "created_at"
+    assert captured["order"] == "asc"
 
 
 def test_list_majors_returns_title_cased_combined_values(monkeypatch) -> None:
@@ -245,10 +397,8 @@ def test_search_users_route(monkeypatch) -> None:
         page,
         page_size,
         university_name=None,
-        edu_level=None,
     ):
         assert university_name == ["Kampu University|State University"]
-        assert edu_level == ["1"]
         return {
             "items": [
                 {
@@ -271,9 +421,8 @@ def test_search_users_route(monkeypatch) -> None:
     response = client.get(
         "/api/v1/search-user",
         params={
-            "query": "John Kampu CS Math Bachelors",
+            "query": "John Kampu CS Math",
             "university_name": "Kampu University|State University",
-            "edu_level": "1",
             "page": 1,
             "pageSize": 10,
         },
@@ -285,6 +434,198 @@ def test_search_users_route(monkeypatch) -> None:
     assert body["message"] == "Search results fetched successfully"
     assert body["data"]["items"][0]["firstName"] == "John"
     assert body["data"]["items"][0]["email"] == "john.doe@example.com"
+
+
+def test_search_posts_route_forwards_repeated_filters_and_to_all(monkeypatch) -> None:
+    captured = {}
+
+    async def _mock_search_posts(current_user, db, **kwargs):
+        captured.update(kwargs)
+        return {
+            "items": [],
+            "page": 1,
+            "pageSize": 20,
+            "totalItems": 0,
+            "totalPages": 0,
+        }
+
+    monkeypatch.setattr(search_routes.services, "search_posts", _mock_search_posts)
+
+    response = client.get(
+        "/api/v1/search/posts",
+        params=[
+            ("hashtag", "python"),
+            ("hashtag", "fastapi"),
+            ("hashtag_to_all", "true"),
+            ("academic_interest", "AI"),
+            ("academic_interest", "ML"),
+            ("academic_interest_to_all", "true"),
+            ("university_name", "123"),
+            ("university_name", "456"),
+            ("university_to_all", "true"),
+            ("major", "Computer Science"),
+            ("major", "IT"),
+            ("major_to_all", "true"),
+            ("minor", "AI"),
+            ("minor", "Data Science"),
+            ("minor_to_all", "true"),
+            ("country", "IN"),
+            ("country_to_all", "true"),
+            ("edu_level", "Bachelors"),
+            ("edu_level_to_all", "true"),
+            ("page", "1"),
+            ("pageSize", "20"),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert captured["hashtag"] == ["python", "fastapi"]
+    assert captured["hashtag_to_all"] is True
+    assert captured["academic_interest"] == ["AI", "ML"]
+    assert captured["academic_interest_to_all"] is True
+    assert captured["university_name"] == ["123", "456"]
+    assert captured["university_to_all"] is True
+    assert captured["major"] == ["Computer Science", "IT"]
+    assert captured["major_to_all"] is True
+    assert captured["minor"] == ["AI", "Data Science"]
+    assert captured["minor_to_all"] is True
+    assert captured["country"] == ["IN"]
+    assert captured["country_to_all"] is True
+    assert captured["edu_level"] == ["Bachelors"]
+    assert captured["edu_level_to_all"] is True
+    assert captured["page"] == 1
+    assert captured["page_size"] == 20
+
+
+def test_search_posts_route_omitted_to_all_defaults_false(monkeypatch) -> None:
+    captured = {}
+
+    async def _mock_search_posts(current_user, db, **kwargs):
+        captured.update(kwargs)
+        return {
+            "items": [],
+            "page": 1,
+            "pageSize": 20,
+            "totalItems": 0,
+            "totalPages": 0,
+        }
+
+    monkeypatch.setattr(search_routes.services, "search_posts", _mock_search_posts)
+
+    response = client.get(
+        "/api/v1/search/posts",
+        params=[
+            ("hashtag", "python"),
+            ("hashtag", "fastapi"),
+            ("major", "Computer Science"),
+            ("minor", "AI"),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert captured["hashtag"] == ["python", "fastapi"]
+    assert captured["major"] == ["Computer Science"]
+    assert captured["minor"] == ["AI"]
+    assert captured["hashtag_to_all"] is False
+    assert captured["academic_interest_to_all"] is False
+    assert captured["university_to_all"] is False
+    assert captured["major_to_all"] is False
+    assert captured["minor_to_all"] is False
+    assert captured["country_to_all"] is False
+    assert captured["edu_level_to_all"] is False
+
+
+def test_search_posts_openapi_to_all_params_follow_filters() -> None:
+    params = app.openapi()["paths"]["/api/v1/search/posts"]["get"]["parameters"]
+    names = [param["name"] for param in params]
+    pairs = [
+        ("hashtag", "hashtag_to_all"),
+        ("academic_interest", "academic_interest_to_all"),
+        ("university_name", "university_to_all"),
+        ("major", "major_to_all"),
+        ("minor", "minor_to_all"),
+        ("country", "country_to_all"),
+        ("edu_level", "edu_level_to_all"),
+    ]
+    for filter_name, to_all_name in pairs:
+        assert names.index(to_all_name) == names.index(filter_name) + 1
+        to_all_param = next(param for param in params if param["name"] == to_all_name)
+        description = to_all_param["description"].lower()
+        assert "false" in description or "omitted" in description
+        assert "true" in description
+        assert to_all_param["schema"].get("default") is False
+    assert names.index("page") > names.index("edu_level_to_all")
+    assert "pageSize" in names
+    major_param = next(param for param in params if param["name"] == "major")
+    minor_param = next(param for param in params if param["name"] == "minor")
+
+    def _is_array_schema(schema: dict) -> bool:
+        if schema.get("type") == "array":
+            return True
+        return any(
+            option.get("type") == "array"
+            for option in schema.get("anyOf", []) + schema.get("oneOf", [])
+        )
+
+    assert _is_array_schema(major_param["schema"])
+    assert _is_array_schema(minor_param["schema"])
+
+
+def test_viewer_role_access_to_catalog_endpoints(monkeypatch) -> None:
+    async def _override_viewer_user():
+        return User(email="viewer@example.com", role="viewer", firebase_uid="viewer-uid")
+
+    app.dependency_overrides[get_current_user] = _override_viewer_user
+    app.dependency_overrides[get_current_user_moderator_or_superadmin] = _override_viewer_user
+
+    async def _dummy_list_countries(*args, **kwargs):
+        return {"items": [{"id": "c-1", "name": "India", "iso_code": "IN"}], "page": 1, "pageSize": 10, "totalItems": 1, "totalPages": 1}
+
+    async def _dummy_search_universities(*args, **kwargs):
+        return {"items": [{"id": "u-1", "name": "Stanford University"}], "page": 1, "pageSize": 10, "totalItems": 1, "totalPages": 1}
+
+    async def _dummy_list_majors(*args, **kwargs):
+        return {"items": ["Computer Science"], "page": 1, "pageSize": 10, "totalItems": 1, "totalPages": 1}
+
+    async def _dummy_list_minors(*args, **kwargs):
+        return {"items": ["Mathematics"], "page": 1, "pageSize": 10, "totalItems": 1, "totalPages": 1}
+
+    async def _dummy_list_interests(*args, **kwargs):
+        return {"items": [{"id": 1, "name": "Artificial Intelligence"}], "page": 1, "pageSize": 10, "totalItems": 1, "totalPages": 1}
+
+    monkeypatch.setattr(search_routes.services, "list_countries", _dummy_list_countries)
+    monkeypatch.setattr(search_routes.services, "search_universities", _dummy_search_universities)
+    monkeypatch.setattr(search_routes.services, "list_majors", _dummy_list_majors)
+    monkeypatch.setattr(search_routes.services, "list_minors", _dummy_list_minors)
+    monkeypatch.setattr(search_routes.academic_catalog_services, "list_test_interests", _dummy_list_interests)
+
+    # 1] /countries
+    res_countries = client.get("/api/v1/countries")
+    assert res_countries.status_code == 200
+    assert res_countries.json()["status"] is True
+
+    # 2] /universities
+    res_unis = client.get("/api/v1/universities", params={"query": "stanford"})
+    assert res_unis.status_code == 200
+    assert res_unis.json()["status"] is True
+
+    # 3] /majors
+    res_majors = client.get("/api/v1/majors")
+    assert res_majors.status_code == 200
+    assert res_majors.json()["status"] is True
+
+    # 4] /minor
+    res_minor = client.get("/api/v1/minor")
+    assert res_minor.status_code == 200
+    assert res_minor.json()["status"] is True
+
+    # 5] /interest
+    res_interest = client.get("/api/v1/interest")
+    assert res_interest.status_code == 200
+    assert res_interest.json()["status"] is True
+
+    app.dependency_overrides[get_current_user] = _override_current_user
+    app.dependency_overrides[get_current_user_moderator_or_superadmin] = _override_current_user
 
 
 import pytest
@@ -334,9 +675,17 @@ async def test_search_users_service_logic(monkeypatch) -> None:
             await session.refresh(mod)
             await session.refresh(inactive_target)
 
-            # Assign roles
-            user_role_obj = (await session.execute(select(Role).where(Role.name == "user"))).scalar_one()
-            mod_role_obj = (await session.execute(select(Role).where(Role.name == "moderator"))).scalar_one()
+            # Assign roles (create role rows if this DB has none yet)
+            user_role_obj = (await session.execute(select(Role).where(Role.name == "user"))).scalar_one_or_none()
+            if user_role_obj is None:
+                user_role_obj = Role(name="user", description="user role")
+                session.add(user_role_obj)
+                await session.flush()
+            mod_role_obj = (await session.execute(select(Role).where(Role.name == "moderator"))).scalar_one_or_none()
+            if mod_role_obj is None:
+                mod_role_obj = Role(name="moderator", description="moderator role")
+                session.add(mod_role_obj)
+                await session.flush()
 
             session.add(UserRole(user_id=searcher.id, role_id=user_role_obj.id))
             session.add(UserRole(user_id=target1.id, role_id=user_role_obj.id))

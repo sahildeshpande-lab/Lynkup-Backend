@@ -1,4 +1,4 @@
-"""Automatic blacklist keyword scanning for posts and comments.
+"""Automatic blacklist scanning for posts and comments.
 
 Preserves the existing moderation lifecycle: on match, posts are set to
 ``PostState.flagged`` with action ``"flagged"``; comments use ``is_deleted``.
@@ -8,11 +8,12 @@ Moderator assignment reuses ``assign_next_moderator_round_robin``.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from apps.engagement.db_models import Comment
 from apps.engagement.repositories.comment_repository import (
@@ -29,7 +30,11 @@ from apps.moderation.services.moderator_assignment_service import (
 )
 from common.enums import PostState, ReportEntityType
 from common.exceptions import ApiError
-from core.database.session import async_session_factory
+from core.jobs.claims import (
+    ClaimResult,
+    claim_moderation_comment,
+    claim_moderation_post,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +53,14 @@ def utc_now() -> datetime:
 
 
 def find_matching_words(content: str, blacklist: list[str]) -> list[str]:
-    """Return unique blacklist keywords found as case-insensitive substrings."""
+    """Return unique blacklist keywords found as case-insensitive whole words.
+
+    Keywords are matched as literal text (``re.escape``), bounded by non-word
+    characters so ``spam`` hits ``spam!`` but not ``spammer`` or ``antispam``.
+    """
     if not content or not blacklist:
         return []
+
     haystack = content.casefold()
     found: list[str] = []
     seen: set[str] = set()
@@ -63,10 +73,18 @@ def find_matching_words(content: str, blacklist: list[str]) -> list[str]:
         folded = keyword.casefold()
         if folded in seen:
             continue
-        if folded in haystack:
+        pattern = rf"(?<!\w){re.escape(folded)}(?!\w)"
+        if re.search(pattern, haystack):
             seen.add(folded)
-            found.append(keyword.casefold())
+            found.append(folded)
     return found
+
+
+def _auto_flag_note(blacklist_matches: list[str]) -> str:
+    return (
+        "Automatically flagged due to blacklist keyword match: "
+        + ", ".join(blacklist_matches)
+    )
 
 
 def extract_post_scan_text(post: Post) -> str:
@@ -96,6 +114,22 @@ async def _ensure_moderator_assigned(post: Post, db: AsyncSession) -> None:
         return
     post.moderator_id = await assign_next_moderator_round_robin(db)
     await db.flush()
+    if post.moderator_id is not None:
+        try:
+            from apps.notifications.services import notify_post_assigned
+
+            await notify_post_assigned(
+                db,
+                post_id=post.id,
+                author_user_id=post.author_user_id,
+                moderator_id=post.moderator_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to dispatch post assigned notification post_id=%s moderator_id=%s",
+                post.id,
+                post.moderator_id,
+            )
 
 
 def _needs_scan(scanned_at: datetime | None, updated_at: datetime) -> bool:
@@ -171,10 +205,7 @@ async def _process_post(
 
         post.state = PostState.flagged
         post.moderation_words_found = matches
-        note = (
-            "Automatically flagged due to blacklist keyword match: "
-            + ", ".join(matches)
-        )
+        note = _auto_flag_note(matches)
         post.moderation_notes = note
         post.updated_at = now
         post.auto_moderation_scanned_at = now
@@ -197,10 +228,16 @@ async def _process_post(
         if transitioning_to_flagged and was_counted:
             try:
                 from apps.profiles.services.profile_stats_service import (
-                    decrement_posts_count_for_user,
+                    sync_posts_count_for_visibility_change,
                 )
 
-                await decrement_posts_count_for_user(db, post.author_user_id)
+                await sync_posts_count_for_visibility_change(
+                    db,
+                    post_id=post.id,
+                    author_user_id=post.author_user_id,
+                    was_counted=True,
+                    now_counted=False,
+                )
                 await db.commit()
             except Exception:
                 logger.exception(
@@ -249,73 +286,203 @@ async def _process_comment(
     await db.commit()
 
 
-async def scan_posts(
+def _resolve_session_factory(session_factory=None) -> async_sessionmaker[AsyncSession]:
+    if session_factory is not None:
+        return session_factory
+    from core.database.session import async_session_factory
+
+    return async_session_factory
+
+
+def _resolve_lease_owner(lease_owner: str | None) -> str:
+    return lease_owner or f"auto-moderation:{uuid4()}"
+
+
+async def _clear_moderation_post_lease_if_owner(
     db: AsyncSession,
     *,
-    batch_size: int | None = None,
+    post_id: UUID,
+    lease_owner: str,
+) -> bool:
+    """Clear the post lease only while this worker still owns it."""
+    result = await db.execute(
+        update(Post)
+        .where(Post.id == post_id)
+        .where(Post.moderation_lease_owner == lease_owner)
+        .values(
+            moderation_lease_owner=None,
+            moderation_lease_expires_at=None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount == 1
+
+
+async def _clear_moderation_comment_lease_if_owner(
+    db: AsyncSession,
+    *,
+    comment_id: UUID,
+    lease_owner: str,
+) -> bool:
+    """Clear the comment lease only while this worker still owns it."""
+    result = await db.execute(
+        update(Comment)
+        .where(Comment.id == comment_id)
+        .where(Comment.moderation_lease_owner == lease_owner)
+        .values(
+            moderation_lease_owner=None,
+            moderation_lease_expires_at=None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount == 1
+
+
+async def _scan_post_ids(
+    post_ids: list[UUID],
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    lease_owner: str,
 ) -> int:
-    """Scan up to ``batch_size`` posts that need auto-moderation. Returns processed count."""
-    limit = batch_size if batch_size is not None else auto_moderation_settings.batch_size
-    posts = await _fetch_posts_needing_scan(db, limit=limit)
     processed = 0
-    for post in posts:
-        post_id: UUID = post.id
+    for post_id in post_ids:
+        async with session_factory() as claim_session:
+            claim: ClaimResult = await claim_moderation_post(
+                claim_session,
+                post_id=post_id,
+                lease_owner=lease_owner,
+            )
+        if not claim.claimed:
+            continue
         try:
-            async with async_session_factory() as session:
-                result = await session.execute(select(Post).where(Post.id == post_id))
+            async with session_factory() as work_session:
+                result = await work_session.execute(select(Post).where(Post.id == post_id))
                 fresh = result.scalar_one_or_none()
                 if fresh is None:
                     continue
-                words = await _load_blacklist(session)
-                await _process_post(session, fresh, words)
-                processed += 1
+                words = await _load_blacklist(work_session)
+                await _process_post(work_session, fresh, words)
         except ApiError:
             logger.exception(
                 "Auto-moderation skipped post %s due to assignment/API error",
                 post_id,
             )
+            continue
         except Exception:
             logger.exception("Auto-moderation failed for post %s", post_id)
+            continue
+        async with session_factory() as complete_session:
+            await _clear_moderation_post_lease_if_owner(
+                complete_session,
+                post_id=post_id,
+                lease_owner=lease_owner,
+            )
+            await complete_session.commit()
+        processed += 1
     return processed
+
+
+async def _scan_comment_ids(
+    comment_ids: list[UUID],
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    lease_owner: str,
+) -> int:
+    processed = 0
+    for comment_id in comment_ids:
+        async with session_factory() as claim_session:
+            claim: ClaimResult = await claim_moderation_comment(
+                claim_session,
+                comment_id=comment_id,
+                lease_owner=lease_owner,
+            )
+        if not claim.claimed:
+            continue
+        try:
+            async with session_factory() as work_session:
+                result = await work_session.execute(
+                    select(Comment).where(Comment.id == comment_id)
+                )
+                fresh = result.scalar_one_or_none()
+                if fresh is None:
+                    continue
+                words = await _load_blacklist(work_session)
+                await _process_comment(work_session, fresh, words)
+        except Exception:
+            logger.exception("Auto-moderation failed for comment %s", comment_id)
+            continue
+        async with session_factory() as complete_session:
+            await _clear_moderation_comment_lease_if_owner(
+                complete_session,
+                comment_id=comment_id,
+                lease_owner=lease_owner,
+            )
+            await complete_session.commit()
+        processed += 1
+    return processed
+
+
+async def scan_posts(
+    db: AsyncSession,
+    *,
+    batch_size: int | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    lease_owner: str | None = None,
+) -> int:
+    """Scan up to ``batch_size`` posts that need auto-moderation. Returns processed count."""
+    limit = batch_size if batch_size is not None else auto_moderation_settings.batch_size
+    posts = await _fetch_posts_needing_scan(db, limit=limit)
+    return await _scan_post_ids(
+        [post.id for post in posts],
+        session_factory=_resolve_session_factory(session_factory),
+        lease_owner=_resolve_lease_owner(lease_owner),
+    )
 
 
 async def scan_comments(
     db: AsyncSession,
     *,
     batch_size: int | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    lease_owner: str | None = None,
 ) -> int:
     """Scan up to ``batch_size`` comments that need auto-moderation. Returns processed count."""
     limit = batch_size if batch_size is not None else auto_moderation_settings.batch_size
     comments = await _fetch_comments_needing_scan(db, limit=limit)
-    processed = 0
-    for comment in comments:
-        comment_id: UUID = comment.id
-        try:
-            async with async_session_factory() as session:
-                result = await session.execute(
-                    select(Comment).where(Comment.id == comment_id)
-                )
-                fresh = result.scalar_one_or_none()
-                if fresh is None:
-                    continue
-                words = await _load_blacklist(session)
-                await _process_comment(session, fresh, words)
-                processed += 1
-        except Exception:
-            logger.exception("Auto-moderation failed for comment %s", comment_id)
-    return processed
+    return await _scan_comment_ids(
+        [comment.id for comment in comments],
+        session_factory=_resolve_session_factory(session_factory),
+        lease_owner=_resolve_lease_owner(lease_owner),
+    )
 
 
 async def run_auto_moderation_scan(
     *,
     batch_size: int | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    lease_owner: str | None = None,
 ) -> dict[str, int]:
     """Run one scan cycle for posts and comments."""
+    factory = _resolve_session_factory(session_factory)
+    owner = _resolve_lease_owner(lease_owner)
     limit = batch_size if batch_size is not None else auto_moderation_settings.batch_size
-    async with async_session_factory() as session:
-        posts_processed = await scan_posts(session, batch_size=limit)
-    async with async_session_factory() as session:
-        comments_processed = await scan_comments(session, batch_size=limit)
+    async with factory() as session:
+        post_ids = [post.id for post in await _fetch_posts_needing_scan(session, limit=limit)]
+    posts_processed = await _scan_post_ids(
+        post_ids,
+        session_factory=factory,
+        lease_owner=owner,
+    )
+    async with factory() as session:
+        comment_ids = [
+            comment.id
+            for comment in await _fetch_comments_needing_scan(session, limit=limit)
+        ]
+    comments_processed = await _scan_comment_ids(
+        comment_ids,
+        session_factory=factory,
+        lease_owner=owner,
+    )
     logger.info(
         "Auto-moderation scan finished: posts=%d comments=%d batch_size=%d",
         posts_processed,

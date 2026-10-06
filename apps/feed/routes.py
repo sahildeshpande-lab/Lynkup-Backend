@@ -85,16 +85,32 @@ async def get_post(
     current_user: User = Depends(get_current_user_moderator_or_superadmin),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
+    viewer_role = (
+        current_user.role.value
+        if hasattr(current_user.role, "value")
+        else str(current_user.role)
+    )
     post = await get_post_service(
         post_id=id,
         user_id=current_user.id,
-        db=db
+        db=db,
+        viewer_role=viewer_role,
     )
     post_data = await build_post_detail_response(
         db,
         post,
         viewer_user_id=current_user.id,
     )
+
+    from common.enums import UserActivityLogType
+    from apps.analytics.services import add_user_activity_log_best_effort
+
+    await add_user_activity_log_best_effort(
+        db,
+        current_user.id,
+        UserActivityLogType.VIEW_POST,
+    )
+
     return success_response(
         "Post retrieved successfully",
         post_data,
@@ -158,16 +174,21 @@ async def delete_post(
 @router.get("/posts", response_model=ApiResponse)
 async def list_user_posts(
     user_id: UUID | None = Query(default=None, description="Filter posts by user id"),
-    state: str = Query(
-        default="published",
+    state: str | None = Query(
+        default=None,
         description=(
-            "Default (published): published + reinstate. "
+            "Omit or 'all': for the authenticated user's own posts, returns "
+            "published + reinstate + flagged + processing. "
+            "For another user_id, returns published + reinstate only. "
+            "published: published + reinstate. "
             "flagged: flagged + processing. "
             "processing/draft: that state only. "
+            "rejected: rejected posts only; staff only "
+            "(moderator/viewer/superadmin), including the caller's own posts. "
             "Owner or staff (moderator/viewer/superadmin) may request flagged/processing "
             "for a user_id; regular visitors are limited to published."
         ),
-        enum=["published", "flagged", "processing", "draft"],
+        enum=["all", "published", "flagged", "processing", "draft", "rejected"],
     ),
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
@@ -208,9 +229,10 @@ async def list_user_posts(
             {"items": posts, "summary": summary},
             response_cls=ApiResponse,
         )
+
     from common.pagination import build_paginated_response
     p = page or 1
-    ps = pageSize if pageSize is not None else (total_items if total_items > 0 else 1)
+    ps = pageSize if pageSize is not None else 20
     paginated = build_paginated_response(
         posts,
         p,
@@ -264,18 +286,44 @@ async def get_feed(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    formatted_posts, total_items, next_cursor = await get_feed_service(
-        current_user_id=current_user.id,
-        page=page,
-        page_size=pageSize,
-        cursor=cursor,
-        db=db,
-        include_total=True,
-    )
+    # Unpaginated response is a bare list — totalItems is unused; skip count SQL.
+    is_paginated = not (page is None and pageSize is None and cursor is None)
+
+    if not is_paginated:
+        formatted_posts = await get_feed_service(
+            current_user_id=current_user.id,
+            page=page,
+            page_size=pageSize,
+            cursor=cursor,
+            db=db,
+            include_total=False,
+        )
+        next_cursor = None
+        total_items = 0
+    else:
+        formatted_posts, total_items, next_cursor = await get_feed_service(
+            current_user_id=current_user.id,
+            page=page,
+            page_size=pageSize,
+            cursor=cursor,
+            db=db,
+            include_total=True,
+        )
+
     if next_cursor:
-        # Keep JSON body identical; expose keyset cursor out-of-band for clients that want it.
+        # Also expose keyset cursor out-of-band for clients that already use the header.
         response.headers["X-Next-Cursor"] = next_cursor
-    if page is None and pageSize is None and cursor is None:
+
+    from common.enums import UserActivityLogType
+    from apps.analytics.services import add_user_activity_log_best_effort
+
+    await add_user_activity_log_best_effort(
+        db,
+        current_user.id,
+        UserActivityLogType.VIEW_POST_LIST,
+    )
+
+    if not is_paginated:
         return success_response(
             "Feed retrieved successfully",
             formatted_posts,
@@ -288,8 +336,11 @@ async def get_feed(
         formatted_posts,
         p,
         ps,
-        total_items
-    )
+        total_items,
+    ).model_dump()
+    # Additive cursor fields — existing page/total contract unchanged.
+    paginated["next_cursor"] = next_cursor
+    paginated["has_more"] = next_cursor is not None
     return success_response(
         "Feed retrieved successfully",
         paginated,

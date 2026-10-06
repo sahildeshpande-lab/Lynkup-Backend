@@ -31,7 +31,7 @@ def test_moderation_word_helpers_normalize_and_serialize():
     assert moderation_words_service._normalize_words([" Bad ", "bad", "", "Word"]) == ["bad", "word"]
     assert moderation_words_service._to_response_data(None) == {"profanityWords": []}
     config = SimpleNamespace(profanity_words=["one", "two"])
-    assert moderation_words_service._to_response_data(config) == {"profanityWords": ["one", "two"]}
+    assert moderation_words_service._to_response_data(config) == {"profanityWords": ["two", "one"]}
 
 
 @pytest.mark.asyncio
@@ -41,7 +41,8 @@ async def test_update_moderation_words_creates_and_updates(mock_db, scalar_resul
         UpdateModerationWordsRequest(profanityWords=[" One ", "one", "Two"]),
         create_db,
     )
-    assert created == {"profanityWords": ["one", "two"]}
+    assert created == {"profanityWords": ["two", "one"]}
+
     assert create_db.add.called
     create_db.commit.assert_awaited_once()
     create_db.refresh.assert_awaited_once()
@@ -54,6 +55,36 @@ async def test_update_moderation_words_creates_and_updates(mock_db, scalar_resul
     )
     assert updated == {"profanityWords": ["fresh"]}
     assert existing_config.profanity_words == ["fresh"]
+
+
+@pytest.mark.asyncio
+async def test_update_moderation_words_logs_added_and_removed_words(mock_db, scalar_result, monkeypatch):
+    from uuid import uuid4
+
+    actor_id = uuid4()
+    logged = []
+
+    async def _fake_activity_log(_db, **kwargs):
+        logged.append(kwargs)
+
+    monkeypatch.setattr(
+        "apps.administration.services.admin_activity_log_service.create_admin_activity_log",
+        _fake_activity_log,
+    )
+
+    existing_config = SimpleNamespace(id=uuid4(), profanity_words=["keep", "old"], updated_at=None)
+    db = mock_db(scalar_result(existing_config))
+    await moderation_words_service.update_moderation_words(
+        UpdateModerationWordsRequest(profanityWords=["keep", "new"]),
+        db,
+        actor_user_id=actor_id,
+        actor_role="superadmin",
+    )
+
+    assert [entry["action"] for entry in logged] == ["update", "delete"]
+    assert all(entry["module"] == "profanity_words" for entry in logged)
+    assert logged[0]["metadata"]["added"] == ["new"]
+    assert logged[1]["metadata"]["removed"] == ["old"]
 
 
 @pytest.mark.asyncio
@@ -86,7 +117,7 @@ async def test_search_universities_and_academic_interests(mock_db, scalar_result
     ai = SimpleNamespace(id=1, name="Artificial Intelligence", education_level_id=2, is_active=True)
 
     # education levels + interests + countries + hashtags
-    country = SimpleNamespace(id=uuid4(), name="India", iso_code="IN")
+    country = SimpleNamespace(id=uuid4(), name="India", iso_code="IN", created_at=None)
     db = mock_db(
         scalar_result(values=[bachelors, masters]),
         scalar_result(values=[chemistry, ai]),
@@ -110,7 +141,7 @@ async def test_search_universities_and_academic_interests(mock_db, scalar_result
     ]
     assert "interests" not in info
     assert info["countries"]["items"] == [
-        {"id": str(country.id), "name": "India", "iso_code": "IN"}
+        {"id": str(country.id), "name": "India", "iso_code": "IN", "created_at": None}
     ]
     assert info["countries"]["totalItems"] == 1
     assert info["hashtags"]["items"] == []

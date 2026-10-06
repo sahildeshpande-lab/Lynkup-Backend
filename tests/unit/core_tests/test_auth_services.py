@@ -46,6 +46,31 @@ def test_delete_firebase_user_delegates_to_firebase_admin(monkeypatch) -> None:
     assert deleted == ["firebase-uid-123"]
 
 
+def test_delete_firebase_user_safely_logs_unexpected_errors(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(auth_services, "initialize_firebase_app", lambda: None)
+
+    def _raise(_uid: str) -> None:
+        raise RuntimeError("firebase down")
+
+    monkeypatch.setattr(auth_services.auth, "delete_user", _raise)
+
+    with caplog.at_level("ERROR"):
+        auth_services.delete_firebase_user_safely("firebase-uid-123")
+
+    assert "Failed to delete Firebase user during signup cleanup" in caplog.text
+
+
+def test_delete_firebase_user_ignores_missing_user(monkeypatch) -> None:
+    monkeypatch.setattr(auth_services, "initialize_firebase_app", lambda: None)
+
+    def _raise(_uid):
+        raise auth_services.auth.UserNotFoundError("missing")
+
+    monkeypatch.setattr(auth_services.auth, "delete_user", _raise)
+
+    auth_services.delete_firebase_user("already-gone")
+
+
 def test_update_firebase_password_delegates_to_firebase_admin(monkeypatch) -> None:
     updated = []
 
@@ -59,6 +84,37 @@ def test_update_firebase_password_delegates_to_firebase_admin(monkeypatch) -> No
     auth_services.update_firebase_password("firebase-uid-123", "NewPassword123!")
 
     assert updated == [("firebase-uid-123", {"password": "NewPassword123!"})]
+
+
+def test_update_firebase_email_delegates_to_firebase_admin(monkeypatch) -> None:
+    updated = []
+    deleted = []
+    created = []
+
+    monkeypatch.setattr(auth_services, "initialize_firebase_app", lambda: None)
+    monkeypatch.setattr(
+        auth_services.auth,
+        "update_user",
+        lambda uid, **kwargs: updated.append((uid, kwargs)),
+    )
+    monkeypatch.setattr(
+        auth_services.auth,
+        "delete_user",
+        lambda uid: deleted.append(uid),
+    )
+    monkeypatch.setattr(
+        auth_services.auth,
+        "create_user",
+        lambda **kwargs: created.append(kwargs),
+    )
+
+    auth_services.update_firebase_email("firebase-uid-123", "newemail@example.com")
+
+    assert updated == [
+        ("firebase-uid-123", {"email": "newemail@example.com", "email_verified": False})
+    ]
+    assert deleted == []
+    assert created == []
 
 
 def test_revoke_firebase_tokens_delegates_to_firebase_admin(monkeypatch) -> None:
@@ -111,3 +167,48 @@ def test_disable_and_enable_firebase_user(monkeypatch) -> None:
         ("firebase-uid-456", {"disabled": False}),
     ]
     assert revoked == ["firebase-uid-123"]
+
+
+class _Provider:
+    def __init__(self, provider_id: str) -> None:
+        self.provider_id = provider_id
+
+
+def test_unlink_social_login_providers_unlinks_when_password_exists(monkeypatch) -> None:
+    updated = []
+    record = MagicMock()
+    record.provider_data = [_Provider("password"), _Provider("google.com"), _Provider("apple.com")]
+
+    monkeypatch.setattr(auth_services, "initialize_firebase_app", lambda: None)
+    monkeypatch.setattr(auth_services.auth, "get_user", lambda uid: record)
+    monkeypatch.setattr(
+        auth_services.auth,
+        "update_user",
+        lambda uid, **kwargs: updated.append((uid, kwargs)),
+    )
+
+    unlinked = auth_services.unlink_social_login_providers("firebase-uid-123")
+
+    assert unlinked == ["google.com", "apple.com"]
+    assert updated == [
+        ("firebase-uid-123", {"providers_to_delete": ["google.com", "apple.com"]})
+    ]
+
+
+def test_unlink_social_login_providers_skips_social_only_accounts(monkeypatch) -> None:
+    updated = []
+    record = MagicMock()
+    record.provider_data = [_Provider("google.com")]
+
+    monkeypatch.setattr(auth_services, "initialize_firebase_app", lambda: None)
+    monkeypatch.setattr(auth_services.auth, "get_user", lambda uid: record)
+    monkeypatch.setattr(
+        auth_services.auth,
+        "update_user",
+        lambda uid, **kwargs: updated.append((uid, kwargs)),
+    )
+
+    unlinked = auth_services.unlink_social_login_providers("firebase-uid-123")
+
+    assert unlinked == []
+    assert updated == []

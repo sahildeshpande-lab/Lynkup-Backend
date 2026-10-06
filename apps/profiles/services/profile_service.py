@@ -6,16 +6,48 @@ from apps.accounts.schemas import UserBaseResponse
 from ..schemas import ProfileUpdateRequest, ProfileVisibilityRequest, UpdateProfileMeRequest, UpdateProfileRequest
 from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
-from common.enums import UserStatus, OnboardingStatus, EducationLevel
+from common.enums import UserStatus, OnboardingStatus, EducationLevel, format_user_status
 
 from apps.profiles.normalization import normalize_major_minor
 
 from .completeness_service import calculate_completeness_score
 from .interest_service import _resolve_academic_interest_ids
-from .response_service import build_user_base_response
+from .response_service import apply_profile_graduation_date, build_user_base_response
+from apps.administration.services.admin_activity_log_service import country_details_payload
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def _country_name_for_id(db: AsyncSession, country_id) -> str | None:
+    if not country_id:
+        return None
+    from sqlmodel import select
+    from apps.profiles.db_models.country_db_model import Country
+
+    return (
+        await db.execute(select(Country.name).where(Country.id == country_id))
+    ).scalar_one_or_none()
+
+
+async def _profile_audit_snapshot(profile, db: AsyncSession) -> dict:
+    country_id = getattr(profile, "country_id", None)
+    country_name = await _country_name_for_id(db, country_id)
+    return {
+        "first_name": getattr(profile, "first_name", None),
+        "last_name": getattr(profile, "last_name", None),
+        "major": getattr(profile, "major", None),
+        "minor": getattr(profile, "minor", None),
+        "bio": getattr(profile, "bio", None),
+        "university_id": str(profile.university_id) if getattr(profile, "university_id", None) else None,
+        "country_id": str(country_id) if country_id else None,
+        "country_details": country_details_payload(country_id, country_name),
+        "edu_level": getattr(profile, "edu_level", None),
+        "academic_interests": getattr(profile, "profile_interests_id", None),
+        "has_profile_photo": bool(getattr(profile, "profile_photo_url", None)),
+        "has_banner_photo": bool(getattr(profile, "banner_photo_url", None)),
+    }
 
 
 async def _apply_country_id_update(
@@ -63,7 +95,7 @@ async def get_profile_me(user: User, db: AsyncSession) -> dict:
         db.add(profile)
         await db.commit()
         await db.refresh(profile)
-    user_data = await build_user_base_response(user, profile, db)
+    user_data = await build_user_base_response(user, profile, db, viewer_user_id=user.id)
     return {"user": user_data}
 
 async def update_profile_me(
@@ -148,6 +180,16 @@ async def update_profile_me(
 
     db.add(profile)
 
+    from common.enums import UserActivityLogType
+    from apps.analytics.services import add_user_activity_log
+
+    await add_user_activity_log(
+        db,
+        current_user.id,
+        UserActivityLogType.UPDATE_PROFILE,
+        commit=False,
+    )
+
     await db.commit()
 
     await db.refresh(current_user)
@@ -165,8 +207,8 @@ async def update_profile_me(
     #     import logging
     #     local_logger = logging.getLogger(__name__)
     #     from core.email_service import send_profile_updated_email
-    #     full_name = f"{profile.first_name} {profile.last_name}".strip() or None
-    #     await send_profile_updated_email(current_user.email, full_name)
+    #     first_name = (profile.first_name or "").strip() or None
+    #     await send_profile_updated_email(current_user.email, first_name)
     #     local_logger.info("Profile updated email queued for user ID %s", current_user.id)
     # except Exception as e:
     #     import logging
@@ -176,7 +218,8 @@ async def update_profile_me(
     user_data = await build_user_base_response(
         current_user,
         profile,
-        db
+        db,
+        viewer_user_id=current_user.id,
     )
 
     return {
@@ -196,10 +239,10 @@ async def delete_user_me(user: User, db: AsyncSession) -> dict:
         profile = (
             await db.execute(select(Profile).where(Profile.user_id == user.id))
         ).scalar_one_or_none()
-        user_data = await build_user_base_response(user, profile, db)
+        user_data = await build_user_base_response(user, profile, db, viewer_user_id=user.id)
         return {
             "deleted": True,
-            "status": user.status.value if hasattr(user.status, "value") else str(user.status),
+            "status": format_user_status(user.status),
             "deleted_at": user.deleted_at,
             "purge_after": user.purge_after,
             "user": user_data,
@@ -207,24 +250,19 @@ async def delete_user_me(user: User, db: AsyncSession) -> dict:
 
     apply_scheduled_deletion_fields(user)
     db.add(user)
-
-    from apps.profiles.services.profile_stats_service import (
-        adjust_counts_for_deleting_user,
-    )
-
-    await adjust_counts_for_deleting_user(db, user.id)
     await db.commit()
     await db.refresh(user)
 
+    # Access-only side effects (token revoke / Stream deactivate). Content stays intact.
     await run_deletion_request_side_effects(user, db)
 
     profile = (
         await db.execute(select(Profile).where(Profile.user_id == user.id))
     ).scalar_one_or_none()
-    user_data = await build_user_base_response(user, profile, db)
+    user_data = await build_user_base_response(user, profile, db, viewer_user_id=user.id)
     return {
         "deleted": True,
-        "status": user.status.value if hasattr(user.status, "value") else str(user.status),
+        "status": format_user_status(user.status),
         "deleted_at": user.deleted_at,
         "purge_after": user.purge_after,
         "user": user_data,
@@ -296,7 +334,9 @@ async def get_my_profile_service(
         await db.commit()
         await db.refresh(profile)
 
-    user_data = await build_user_base_response(target_user, profile, db)
+    user_data = await build_user_base_response(
+        target_user, profile, db, viewer_user_id=user.id
+    )
 
     # Inject relationship flags when viewing another user's profile
     if effective_user_id != user.id:
@@ -315,6 +355,10 @@ async def get_my_profile_service(
         user_data["request_received"] = False
         user_data["is_sent"] = False
         user_data["is_request"] = False
+
+    user_data["is_learning_spotlight_recommended"] = (
+        profile is not None and profile.learning_spotlight is not None
+    )
 
     return {"user": user_data}
 
@@ -350,10 +394,34 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
         or payload.lastName is not None
         or "profile_photo_key" in payload.model_fields_set
     )
-    if payload.major is not None:
-        profile.major = normalize_major_minor(payload.major)
-    if payload.minor is not None:
-        profile.minor = normalize_major_minor(payload.minor)
+    from apps.profiles.db_models.major_db_model import Major
+    from apps.profiles.db_models.minor_db_model import Minor
+    from apps.profiles.services.onboarding_service import _resolve_catalog_program
+
+    if "major" in payload.model_fields_set or "major_id" in payload.model_fields_set:
+        if payload.major is None and payload.major_id is None:
+            profile.major_id = None
+            profile.major = None
+        else:
+            is_num = payload.major.strip().isdigit() if (payload.major and isinstance(payload.major, str)) else False
+            p_id = payload.major_id if payload.major_id is not None else (int(payload.major.strip()) if is_num else None)
+            p_name = None if is_num else payload.major
+            profile.major_id, profile.major = await _resolve_catalog_program(
+                db, model=Major, program_id=p_id, name=p_name, label="major"
+            )
+
+    if "minor" in payload.model_fields_set or "minor_id" in payload.model_fields_set:
+        if payload.minor is None and payload.minor_id is None:
+            profile.minor_id = None
+            profile.minor = None
+        else:
+            is_num = payload.minor.strip().isdigit() if (payload.minor and isinstance(payload.minor, str)) else False
+            p_id = payload.minor_id if payload.minor_id is not None else (int(payload.minor.strip()) if is_num else None)
+            p_name = None if is_num else payload.minor
+            profile.minor_id, profile.minor = await _resolve_catalog_program(
+                db, model=Minor, program_id=p_id, name=p_name, label="minor"
+            )
+
     if payload.bio is not None:
         profile.bio = payload.bio
 
@@ -396,11 +464,15 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
         else:
             profile.banner_photo_url = None
 
+    if "graduationDate" in payload.model_fields_set:
+        apply_profile_graduation_date(profile, payload.graduationDate, user=user)
+
     # Recalculate completeness score before saving so the updated fields
     # are reflected immediately in the response.
     profile.completeness_score = await calculate_completeness_score(user.id, db)
 
     db.add(profile)
+    db.add(user)
     await db.commit()
     await db.refresh(profile)
 
@@ -416,20 +488,30 @@ async def update_my_profile_service(user: User, payload: UpdateProfileRequest, d
         await sync_stream_user_on_auth(user, db)
 
     if topic_fields_changed:
-        await TopicService.sync_user_topics(
-            db,
-            user.id,
-            old_topics=old_topics,
-            profile=profile,
-        )
+        # Interest changes: force full refresh so new interest topics always
+        # subscribe (diff-only sync can no-op if capture/build race or empty tokens).
+        if payload.academic_interests is not None:
+            await TopicService.refresh_user_topic_subscriptions(
+                db,
+                user.id,
+                profile,
+                old_topics=old_topics,
+            )
+        else:
+            await TopicService.sync_user_topics(
+                db,
+                user.id,
+                old_topics=old_topics,
+                profile=profile,
+            )
 
     # Temporarily disabled: profile updated email
     # try:
     #     import logging
     #     local_logger = logging.getLogger(__name__)
     #     from core.email_service import send_profile_updated_email
-    #     full_name = f"{profile.first_name} {profile.last_name}".strip() or None
-    #     await send_profile_updated_email(user.email, full_name)
+    #     first_name = (profile.first_name or "").strip() or None
+    #     await send_profile_updated_email(user.email, first_name)
     #     local_logger.info("Profile updated email queued for user ID %s", user.id)
     # except Exception as e:
     #     import logging
@@ -470,10 +552,14 @@ async def update_user_profile_by_admin_service(
     user_id: UUID | str,
     payload: UpdateProfileRequest,
     db: AsyncSession,
+    *,
+    actor_user_id: UUID | None = None,
+    actor_role: str | None = None,
 ) -> dict:
     from uuid import UUID
     from sqlmodel import select
     from fastapi import HTTPException, status
+    from sqlalchemy.orm import selectinload
     from apps.accounts.db_models import User
     from apps.profiles.db_models.profile_db_model import Profile
     from core.images import file_exists, normalize_image_name
@@ -481,7 +567,11 @@ async def update_user_profile_by_admin_service(
 
     # 1. Fetch user
     user_uuid = UUID(str(user_id)) if isinstance(user_id, str) else user_id
-    user_stmt = select(User).where(User.id == user_uuid)
+    user_stmt = (
+        select(User)
+        .options(selectinload(User.roles))
+        .where(User.id == user_uuid)
+    )
     user = (await db.execute(user_stmt)).scalar_one_or_none()
     if not user:
         raise HTTPException(
@@ -497,10 +587,25 @@ async def update_user_profile_by_admin_service(
         db.add(profile)
         await db.flush()
 
+    old_snapshot = await _profile_audit_snapshot(profile, db)
+
     topic_fields_changed = TopicService.affects_topics(payload)
     old_topics: set[str] = set()
     if topic_fields_changed:
         old_topics = await TopicService.capture_topics(db, profile)
+
+    email_changed = False
+    previous_email = (user.email or "").lower().strip()
+    if "email" in payload.model_fields_set and payload.email is not None:
+        from apps.accounts.services.email_service import apply_user_email_change
+
+        email_error = await apply_user_email_change(user, payload.email, db)
+        if email_error is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=email_error.message,
+            )
+        email_changed = user.email.lower().strip() != previous_email
 
     # 3. Apply updates
     if payload.firstName is not None:
@@ -512,10 +617,34 @@ async def update_user_profile_by_admin_service(
         or payload.lastName is not None
         or payload.profile_photo_key is not None
     )
-    if payload.major is not None:
-        profile.major = normalize_major_minor(payload.major)
-    if payload.minor is not None:
-        profile.minor = normalize_major_minor(payload.minor)
+    from apps.profiles.db_models.major_db_model import Major
+    from apps.profiles.db_models.minor_db_model import Minor
+    from apps.profiles.services.onboarding_service import _resolve_catalog_program
+
+    if "major" in payload.model_fields_set or "major_id" in payload.model_fields_set:
+        if payload.major is None and payload.major_id is None:
+            profile.major_id = None
+            profile.major = None
+        else:
+            is_num = payload.major.strip().isdigit() if (payload.major and isinstance(payload.major, str)) else False
+            p_id = payload.major_id if payload.major_id is not None else (int(payload.major.strip()) if is_num else None)
+            p_name = None if is_num else payload.major
+            profile.major_id, profile.major = await _resolve_catalog_program(
+                db, model=Major, program_id=p_id, name=p_name, label="major"
+            )
+
+    if "minor" in payload.model_fields_set or "minor_id" in payload.model_fields_set:
+        if payload.minor is None and payload.minor_id is None:
+            profile.minor_id = None
+            profile.minor = None
+        else:
+            is_num = payload.minor.strip().isdigit() if (payload.minor and isinstance(payload.minor, str)) else False
+            p_id = payload.minor_id if payload.minor_id is not None else (int(payload.minor.strip()) if is_num else None)
+            p_name = None if is_num else payload.minor
+            profile.minor_id, profile.minor = await _resolve_catalog_program(
+                db, model=Minor, program_id=p_id, name=p_name, label="minor"
+            )
+
     if payload.bio is not None:
         profile.bio = payload.bio
 
@@ -569,12 +698,52 @@ async def update_user_profile_by_admin_service(
         else:
             profile.banner_photo_url = None
 
+    if "graduationDate" in payload.model_fields_set:
+        apply_profile_graduation_date(profile, payload.graduationDate, user=user)
+
     # Recalculate completeness score before saving so the updated fields
     # are reflected immediately in the response.
     profile.completeness_score = await calculate_completeness_score(user.id, db)
 
     db.add(profile)
-    await db.commit()
+    db.add(user)
+    if actor_user_id is not None:
+        from apps.administration.services.admin_activity_log_service import (
+            compose_person_label,
+            create_admin_activity_log,
+        )
+
+        target_role = (getattr(user, "role", None) or "user").strip().lower()
+        target_name = compose_person_label(
+            profile.first_name,
+            profile.last_name,
+            getattr(user, "email", None),
+        ) or target_role
+        await create_admin_activity_log(
+            db,
+            user_id=actor_user_id,
+            role=actor_role,
+            action="update",
+            module="profile",
+            record_id=user.id,
+            description=f"updated {target_role} profile {target_name}",
+            metadata={
+                "old": old_snapshot,
+                "new": await _profile_audit_snapshot(profile, db),
+            },
+        )
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        if email_changed:
+            from apps.accounts.services.email_service import revert_user_email_change
+
+            await revert_user_email_change(user, previous_email)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered",
+        ) from None
     await db.refresh(profile)
 
     from apps.recommendations.services.post_keyword_service import (
@@ -588,20 +757,28 @@ async def update_user_profile_by_admin_service(
         await sync_stream_user_on_auth(user, db)
 
     if topic_fields_changed:
-        await TopicService.sync_user_topics(
-            db,
-            user.id,
-            old_topics=old_topics,
-            profile=profile,
-        )
+        if payload.academic_interests is not None:
+            await TopicService.refresh_user_topic_subscriptions(
+                db,
+                user.id,
+                profile,
+                old_topics=old_topics,
+            )
+        else:
+            await TopicService.sync_user_topics(
+                db,
+                user.id,
+                old_topics=old_topics,
+                profile=profile,
+            )
 
     # Temporarily disabled: profile updated email
     # try:
     #     import logging
     #     local_logger = logging.getLogger(__name__)
     #     from core.email_service import send_profile_updated_email
-    #     full_name = f"{profile.first_name} {profile.last_name}".strip() or None
-    #     await send_profile_updated_email(user.email, full_name)
+    #     first_name = (profile.first_name or "").strip() or None
+    #     await send_profile_updated_email(user.email, first_name)
     #     local_logger.info("Profile updated email queued for user ID %s", user.id)
     # except Exception as e:
     #     import logging

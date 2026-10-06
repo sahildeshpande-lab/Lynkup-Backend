@@ -13,7 +13,12 @@ from core.auth.config import settings as auth_settings
 from core.email.config import settings as email_settings
 from core.email_service import send_reset_password_email
 from ..schemas import ApiResponse, ForgotPasswordRequest, UserChangePasswordRequest
-from core.auth.services import update_firebase_password, verify_firebase_token
+from core.auth.services import (
+    create_firebase_custom_token,
+    revoke_firebase_tokens,
+    update_firebase_password,
+    verify_firebase_token,
+)
 logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
 
@@ -21,7 +26,13 @@ load_dotenv()
 
 PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 
-from .common_service import _now
+from .common_service import (
+    _generate_tokens,
+    _now,
+    _store_refresh_token,
+    ACCOUNT_DOESNT_EXIST_MESSAGE,
+    is_soft_deleted_user,
+)
 
 
 def _build_password_reset_link(token_val: str) -> str:
@@ -37,11 +48,11 @@ async def forgot_password( payload: ForgotPasswordRequest,db: AsyncSession ) -> 
     stmt = select(User).where(User.email == email)
     user = (await db.execute(stmt)).scalar_one_or_none()
 
-    if not user:
+    if not user or is_soft_deleted_user(user):
         return ApiResponse(
-            status=True,
-            message="If an account exists for this email, a password reset link has been sent.",
-            data=None
+            status=False,
+            message=ACCOUNT_DOESNT_EXIST_MESSAGE,
+            data=None,
         )
 
     now = _now()
@@ -64,7 +75,7 @@ async def forgot_password( payload: ForgotPasswordRequest,db: AsyncSession ) -> 
         )
         return ApiResponse(
             status=False,
-            message=f"Recently email for reset password has been sent. Please try after {auth_settings.password_reset_token_expire_minutes} mins",
+            message=f"Recently email for reset password has been sent. Please try after {auth_settings.password_reset_token_expire_minutes} minutes",
             data=None
         )
 
@@ -84,8 +95,20 @@ async def forgot_password( payload: ForgotPasswordRequest,db: AsyncSession ) -> 
     db.add(reset_token)
     await db.flush()
 
+    first_name = getattr(user, "first_name", None)
+    if not first_name and hasattr(user, "id"):
+        try:
+            from apps.profiles.db_models import Profile
+            profile_stmt = select(Profile.first_name).where(Profile.user_id == user.id)
+            first_name = (await db.execute(profile_stmt)).scalar_one_or_none()
+        except Exception: # nosec B110
+            pass
+
     try:
-        email_sent = await send_reset_password_email(email, reset_link)
+        try:
+            email_sent = await send_reset_password_email(email, reset_link, first_name=first_name)
+        except TypeError:
+            email_sent = await send_reset_password_email(email, reset_link)
     except Exception:
         logger.exception("Forgot password: email send raised for user %s", user.id)
         await db.rollback()
@@ -147,6 +170,13 @@ async def change_password(payload: UserChangePasswordRequest, db: AsyncSession) 
             data=None
         )
 
+    if payload.current_password == payload.new_password:
+        return ApiResponse(
+            status=False,
+            message="New password cannot be the same as current password",
+            data=None
+        )
+
     user.password_hash = PASSWORD_HASHER.hash(
         payload.new_password
     )
@@ -165,10 +195,61 @@ async def change_password(payload: UserChangePasswordRequest, db: AsyncSession) 
             data=None
         )
 
+    # Revoke every existing session (other devices). Firebase has no
+    # per-device revoke without device_id, so we kill all tokens then
+    # immediately re-issue a session for the calling client only.
+    if user.firebase_uid:
+        try:
+            revoke_firebase_tokens(user.firebase_uid)
+        except Exception as exc:
+            logger.warning("Failed to revoke Firebase tokens for user %s: %s", user.id, exc)
+
+    try:
+        from apps.accounts.db_models import RefreshToken
+        from apps.accounts.services.common_service import _revoke_refresh_token_row
+        rows = (
+            await db.execute(
+                select(RefreshToken).where(
+                    RefreshToken.user_id == user.id,
+                    RefreshToken.revoked_at == None,  # noqa: E711
+                )
+            )
+        ).scalars().all()
+        for row in rows:
+            await _revoke_refresh_token_row(db, row)
+    except Exception as exc:
+        logger.warning("Failed to revoke DB refresh tokens for user %s: %s", user.id, exc)
+
+    try:
+        from apps.chat.service import revoke_stream_user_tokens_best_effort
+        await revoke_stream_user_tokens_best_effort(user)
+    except Exception as exc:
+        logger.warning("Failed to revoke Stream tokens for user %s: %s", user.id, exc)
+
+    access_token, refresh_token = _generate_tokens(user)
+    await _store_refresh_token(db, user, refresh_token, device_id=None)
+
+    firebase_custom_token: str | None = None
+    if user.firebase_uid:
+        try:
+            firebase_custom_token = create_firebase_custom_token(user.firebase_uid)
+        except Exception as exc:
+            logger.warning(
+                "Failed to create Firebase custom token after password change for user %s: %s",
+                user.id,
+                exc,
+            )
+
     await db.commit()
 
     return ApiResponse(
         status=True,
         message="Password updated successfully",
-        data=None
+        data={
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",  # nosec B105 -- token type constant, not a password
+            # Caller (Device B) uses this to stay signed in; other devices are out.
+            "firebaseCustomToken": firebase_custom_token,
+        },
     )

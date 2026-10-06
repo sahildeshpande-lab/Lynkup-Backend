@@ -2,11 +2,33 @@
 source = apps, core
 omit =
     apps/accounts/services.py
-    apps/**/db_models/*
-    apps/**/repositories/*
-    apps/**/routes.py
-    apps/**/services/*
+    apps/accounts/services/*
+    apps/administration/services/*
+    apps/connections/services/*
+    apps/engagement/services/*
+    apps/feed/services/*
+    apps/invitations/services/*
+    apps/moderation/services/*
+    apps/notifications/services/*
+    apps/profiles/services/*
+    apps/recommendations/services/*
+    apps/report/services/*
+    apps/threshold_configuration/services/*
+    apps/user_deletion/services/*
     apps/search/services.py
+    apps/**/db_models/*
+    apps/connections/repositories/*
+    apps/engagement/repositories/*
+    apps/feed/repositories/*
+    apps/invitations/repositories/*
+    apps/moderation/repositories/*
+    apps/notifications/repositories/*
+    apps/report/repositories/*
+    apps/search/repositories/*
+    apps/threshold_configuration/repositories/*
+    apps/**/routes.py
+    apps/feed/perf/*
+    core/celery_worker/test_tasks.py
     core/auth/dependencies.py
     core/auth/firebase*.py
     core/auth/services.py

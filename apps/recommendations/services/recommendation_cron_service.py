@@ -4,7 +4,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,31 +64,33 @@ class RecommendationCronService:
     """Decide *when* learning recommendations should be generated.
 
     Generation itself is owned by ``RecommendationGenerationService``.
-    Invoked by a scheduler later — not exposed as an API route and not
-    scheduled here.
+    Invoked by Celery for scheduled and admin-triggered runs.
     """
 
     def __init__(
         self,
         *,
         settings_service: RecommendationSettingsService | None = None,
+        session_factory=None,
         generation_service: RecommendationGenerationService | None = None,
     ) -> None:
+        self._session_factory = session_factory
         self._settings_service = settings_service or RecommendationSettingsService()
         self._generation_service = (
             generation_service or RecommendationGenerationService()
         )
 
     @classmethod
-    async def run_recommendation_generation(cls) -> bool:
+    async def run_recommendation_generation(cls, *, session_factory=None) -> bool:
         """Entry point the scheduler will call.
 
         Returns True when generation ran, False when skipped (disabled or unset).
         """
-        return await cls()._run_recommendation_generation()
+        return await cls(session_factory=session_factory)._run_recommendation_generation()
 
     async def _run_recommendation_generation(self) -> bool:
-        async with async_session_factory() as session:
+        session_factory = self._session_factory or async_session_factory
+        async with session_factory() as session:
             if not await self._settings_service.is_cron_enabled(session):
                 persisted = await self._settings_service.get_persisted_settings(session)
                 if persisted is None:
@@ -104,7 +106,7 @@ class RecommendationCronService:
                 return False
 
             settings = await self._settings_service.get_persisted_settings(session)
-            assert settings is not None  # guaranteed by is_cron_enabled
+            assert settings is not None  # nosec B101 -- internal invariant guaranteed by is_cron_enabled check
             generation_frequency_days = settings.generation_frequency_days
             max_recommendations = settings.max_recommendations
             profiles = await self._get_profiles(session)
@@ -146,7 +148,7 @@ class RecommendationCronService:
                     profile.user_id,
                 )
 
-                async with async_session_factory() as session:
+                async with session_factory() as session:
                     await self._generation_service.generate_for_user(
                         session,
                         profile.user_id,
@@ -167,6 +169,8 @@ class RecommendationCronService:
                 )
 
         self._log_summary(stats, duration_seconds=time.perf_counter() - started)
+        if stats.failed:
+            raise RuntimeError(f"Recommendation generation failed for {stats.failed} users")
         return True
 
     async def _get_profiles(self, session: AsyncSession) -> list[_ProfileCandidate]:

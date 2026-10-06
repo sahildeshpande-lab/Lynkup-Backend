@@ -63,7 +63,14 @@ from apps.report.schemas import (
     is_report_reviewed,
 )
 from apps.threshold_configuration.services import get_enabled_moderation_threshold
-from common.enums import PostState, ReportEntityType, ReportStatus, UserStatus
+from common.enums import (
+    PostState,
+    ReportEntityType,
+    ReportStatus,
+    ReportedEntityOrder,
+    ReportedEntitySort,
+    UserStatus,
+)
 from common.exceptions import ApiError
 from common.pagination import build_paginated_response
 from common.responses import error_response, success_response
@@ -245,6 +252,7 @@ async def _resolve_report_moderator_id(
     db: AsyncSession,
     *,
     entity_type: ReportEntityType,
+    entity_id: UUID | None = None,
     post: Post | None = None,
 ) -> UUID | None:
     """
@@ -252,12 +260,30 @@ async def _resolve_report_moderator_id(
 
     - Post reports reuse the moderator already assigned at publish time.
     - Comment reports reuse the parent post's moderator when set.
-    - User reports (and posts/comments with no moderator) use the shared
+    - If an open (under_review) report already exists for this entity, reuse its moderator.
+    - Otherwise (and for user reports with no open report), use the shared
       round-robin cursor; fall back to first active moderator, then superadmin.
     """
     if entity_type in (ReportEntityType.post, ReportEntityType.comment):
         if post is not None and post.moderator_id is not None:
             return post.moderator_id
+
+    if entity_id is not None:
+        stmt = (
+            select(Report.moderator_id)
+            .where(
+                Report.entity_type == entity_type,
+                Report.entity_id == entity_id,
+                Report.status == ReportStatus.under_review,
+                Report.is_deleted.is_(False),
+                Report.moderator_id.is_not(None),
+            )
+            .order_by(Report.created_at.desc())
+            .limit(1)
+        )
+        existing_mod_id = (await db.execute(stmt)).scalar_one_or_none()
+        if existing_mod_id is not None:
+            return existing_mod_id
 
     try:
         return await assign_next_moderator_round_robin(db)
@@ -275,6 +301,29 @@ async def _resolve_report_moderator_id(
         return superadmin_ids[0]
 
     return None
+
+
+async def _action_reports_by_system(
+    db: AsyncSession,
+    entity_type: ReportEntityType,
+    entity_id: UUID,
+) -> None:
+    stmt = (
+        select(Report)
+        .where(
+            Report.entity_type == entity_type,
+            Report.entity_id == entity_id,
+            Report.status == ReportStatus.under_review,
+            Report.is_deleted.is_(False),
+        )
+    )
+    result = await db.execute(stmt)
+    reports = result.scalars().all()
+    for r in reports:
+        r.status = ReportStatus.actioned
+        r.admin_comment = "Actioned performed by System"
+        r.updated_at = datetime.now(timezone.utc)
+        db.add(r)
 
 
 async def _apply_post_report_threshold(
@@ -312,12 +361,20 @@ async def _apply_post_report_threshold(
     # Keep moderator_id / is_moderator_reviewed / reviewed_at unchanged.
     db.add(post)
 
+    await _action_reports_by_system(db, ReportEntityType.post, post.id)
+
     if was_counted:
         from apps.profiles.services.profile_stats_service import (
-            decrement_posts_count_for_user,
+            sync_posts_count_for_visibility_change,
         )
 
-        await decrement_posts_count_for_user(db, post.author_user_id)
+        await sync_posts_count_for_visibility_change(
+            db,
+            post_id=post.id,
+            author_user_id=post.author_user_id,
+            was_counted=True,
+            now_counted=False,
+        )
     return True
 
 
@@ -340,6 +397,7 @@ async def _apply_comment_report_threshold(
     if comment.parent_comment_id is None:
         await update_post_comment_count(db, comment.post_id, -1)
     await mark_comment_deleted(db, comment)
+    await _action_reports_by_system(db, ReportEntityType.comment, comment.id)
     return True
 
 
@@ -385,6 +443,7 @@ async def _apply_user_report_threshold(
         moderator_id=None,
         comment="Auto-suspended after report threshold",
     )
+    await _action_reports_by_system(db, ReportEntityType.user, user.id)
     return True
 
 
@@ -396,6 +455,7 @@ async def create_report_service(
     if payload.entity_type == ReportEntityType.user and payload.entity_id == user_id:
         return error_response("You cannot report yourself", response_cls=ApiResponse)
 
+    target_entity_id: UUID = payload.entity_id
     post: Post | None = None
     comment: Comment | None = None
     target_user: User | None = None
@@ -407,7 +467,7 @@ async def create_report_service(
         if payload.entity_type == ReportEntityType.user:
             target_user = (
                 await db.execute(
-                    select(User).where(User.id == payload.entity_id).with_for_update()
+                    select(User).where(User.id == target_entity_id).with_for_update()
                 )
             ).scalar_one_or_none()
             if target_user is None:
@@ -425,12 +485,36 @@ async def create_report_service(
         elif payload.entity_type == ReportEntityType.post:
             post = (
                 await db.execute(
-                    select(Post).where(Post.id == payload.entity_id).with_for_update()
+                    select(Post).where(Post.id == target_entity_id).with_for_update()
                 )
             ).scalar_one_or_none()
+
+            # If not found directly as a Post, check if entity_id is a Repost ID
+            if post is None:
+                from apps.engagement.db_models import Repost
+
+                repost = (
+                    await db.execute(
+                        select(Repost).where(
+                            Repost.id == target_entity_id,
+                            Repost.is_deleted.is_(False),
+                        )
+                    )
+                ).scalar_one_or_none()
+
+                if repost is not None:
+                    target_entity_id = repost.post_id
+                    post = (
+                        await db.execute(
+                            select(Post)
+                            .where(Post.id == target_entity_id)
+                            .with_for_update()
+                        )
+                    ).scalar_one_or_none()
+
             if post is None:
                 return error_response("Post does not exist", response_cls=ApiResponse)
-            if post.state == PostState.deleted:
+            if post.state in (PostState.deleted, PostState.rejected):
                 return error_response(
                     "Cannot report a soft-deleted post",
                     response_cls=ApiResponse,
@@ -447,7 +531,7 @@ async def create_report_service(
             comment = (
                 await db.execute(
                     select(Comment)
-                    .where(Comment.id == payload.entity_id)
+                    .where(Comment.id == target_entity_id)
                     .with_for_update()
                 )
             ).scalar_one_or_none()
@@ -469,18 +553,19 @@ async def create_report_service(
             db,
             user_id,
             payload.entity_type,
-            payload.entity_id,
+            target_entity_id,
             post_revision_id=post_revision_id,
         )
         if existing is not None:
             return error_response(
-                "You have already reported this entity",
+                "You have already reported this entity.",
                 response_cls=ApiResponse,
             )
 
         moderator_id = await _resolve_report_moderator_id(
             db,
             entity_type=payload.entity_type,
+            entity_id=target_entity_id,
             post=post,
         )
 
@@ -488,7 +573,7 @@ async def create_report_service(
             db,
             reported_id=user_id,
             entity_type=payload.entity_type,
-            entity_id=payload.entity_id,
+            entity_id=target_entity_id,
             reason=payload.reason,
             moderator_id=moderator_id,
             post_revision_id=post_revision_id,
@@ -508,7 +593,7 @@ async def create_report_service(
     except IntegrityError:
         await db.rollback()
         return error_response(
-            "You have already reported this entity",
+            "You have already reported this entity.",
             response_cls=ApiResponse,
         )
     except Exception:
@@ -547,7 +632,7 @@ async def create_report_service(
                 db,
                 user_id=notify_user_suspended.id,
                 status=UserStatus.suspended.value,
-                reason="Your account was suspended after reaching the report threshold.",
+                reason="Your account was suspended by the system.",
             )
             if notify_user_suspended.firebase_uid:
                 try:
@@ -646,11 +731,13 @@ async def _batch_load_posts(
         return {}
 
     AuthorProfile = aliased(Profile)
+    AuthorUser = aliased(User)
     ModeratorUser = aliased(User)
     ModeratorProfile = aliased(Profile)
     stmt = (
-        select(Post, AuthorProfile, ModeratorUser, ModeratorProfile)
+        select(Post, AuthorProfile, ModeratorUser, ModeratorProfile, AuthorUser)
         .outerjoin(AuthorProfile, AuthorProfile.user_id == Post.author_user_id)
+        .outerjoin(AuthorUser, AuthorUser.id == Post.author_user_id)
         .outerjoin(ModeratorUser, ModeratorUser.id == Post.moderator_id)
         .outerjoin(ModeratorProfile, ModeratorProfile.user_id == Post.moderator_id)
         .where(Post.id.in_(post_ids))
@@ -660,11 +747,12 @@ async def _batch_load_posts(
         post.id: format_post_detail(
             post,
             author_profile=author_profile,
+            author_user=author_user,
             moderator_user=moderator_user,
             moderator_profile=moderator_profile,
             viewer_user_id=viewer_user_id,
         )
-        for post, author_profile, moderator_user, moderator_profile in rows
+        for post, author_profile, moderator_user, moderator_profile, author_user in rows
     }
 
 
@@ -770,12 +858,19 @@ async def get_reported_entities(
     page: int = 1,
     page_size: int = 20,
     viewer_user_id: UUID,
+    sort: ReportedEntitySort = ReportedEntitySort.report_count,
+    order: ReportedEntityOrder = ReportedEntityOrder.desc,
+    search: str | None = None,
 ) -> ReportedEntityListResponse:
     """
     Return one moderation-dashboard row per reported entity.
 
     Each item includes the full entity payload plus report metadata.
     Optionally filter by report status (under_review, actioned, rejected).
+    Sort by report_count (default), created_at, updated_at, or latest_reported_at.
+    ``order`` defaults to desc.
+    Search matches author/user name plus post content, university, or comment text
+    depending on ``entity_type``.
     """
     _validate_entity_type(entity_type)
     offset = (page - 1) * page_size
@@ -787,12 +882,16 @@ async def get_reported_entities(
         moderator_id=moderator_id,
         offset=offset,
         limit=page_size,
+        sort=sort,
+        order=order,
+        search=search,
     )
     total_items = await count_reported_entities(
         db,
         entity_type=entity_type,
         status=status,
         moderator_id=moderator_id,
+        search=search,
     )
     summary_counts = await count_reported_entities_summary_by_status(
         db,
@@ -872,13 +971,39 @@ async def get_report_details_admin_service(
 ) -> ReportResponse:
     row = await get_report_by_id(db, report_id)
     if row is None:
+        stmt = (
+            select(Report)
+            .where(Report.entity_id == report_id, Report.is_deleted.is_(False))
+            .order_by(Report.created_at.desc())
+        )
+        reports = (await db.execute(stmt)).scalars().all()
+        if reports:
+            under_review_reports = [r for r in reports if r.status == ReportStatus.under_review]
+            target_report = under_review_reports[0] if under_review_reports else reports[0]
+            row = await get_report_by_id(db, target_report.id)
+
+    if row is None:
         return error_response("Report not found", response_cls=ReportResponse)
 
     report = row[0]
+    if report.entity_type == ReportEntityType.post:
+        post = (
+            await db.execute(select(Post).where(Post.id == report.entity_id))
+        ).scalar_one_or_none()
+        if post is None or post.state == PostState.deleted:
+            return error_response("Report not found", response_cls=ReportResponse)
+    elif report.entity_type == ReportEntityType.comment:
+        comment = (
+            await db.execute(select(Comment).where(Comment.id == report.entity_id))
+        ).scalar_one_or_none()
+        if comment is None or comment.is_deleted:
+            return error_response("Report not found", response_cls=ReportResponse)
+
     report_counts = await count_reports_by_entity_keys(
         db,
         [(report.entity_type, report.entity_id)],
     )
+
     previous_rows = await get_previous_report_comments(
         db,
         entity_type=report.entity_type,
@@ -911,6 +1036,7 @@ async def _apply_actioned_report_to_entity(
     report: Report,
     *,
     moderator_id: UUID,
+    admin_comment: str | None = None,
 ) -> str | None:
     """
     Apply side effects when a report is actioned.
@@ -926,6 +1052,10 @@ async def _apply_actioned_report_to_entity(
     """
     from datetime import datetime, timezone
 
+    history_comment = (
+        admin_comment.strip() if admin_comment and admin_comment.strip() else None
+    )
+
     if report.entity_type == ReportEntityType.post:
         post = (
             await db.execute(select(Post).where(Post.id == report.entity_id))
@@ -937,7 +1067,8 @@ async def _apply_actioned_report_to_entity(
         was_counted = post.state in counted_states
 
         post.state = PostState.flagged
-        post.moderator_id = moderator_id
+        if post.moderator_id is None:
+            post.moderator_id = moderator_id
         post.is_moderator_reviewed = True
         post.reviewed_at = datetime.now(timezone.utc)
         post.updated_at = datetime.now(timezone.utc)
@@ -945,10 +1076,16 @@ async def _apply_actioned_report_to_entity(
 
         if was_counted:
             from apps.profiles.services.profile_stats_service import (
-                decrement_posts_count_for_user,
+                sync_posts_count_for_visibility_change,
             )
 
-            await decrement_posts_count_for_user(db, post.author_user_id)
+            await sync_posts_count_for_visibility_change(
+                db,
+                post_id=post.id,
+                author_user_id=post.author_user_id,
+                was_counted=True,
+                now_counted=False,
+            )
 
         from apps.moderation.services import record_moderation_history
 
@@ -958,7 +1095,7 @@ async def _apply_actioned_report_to_entity(
             entity_id=post.id,
             action="flagged",
             moderator_id=moderator_id,
-            comment=None,
+            comment=history_comment,
         )
         return None
 
@@ -994,7 +1131,7 @@ async def _apply_actioned_report_to_entity(
             entity_id=user.id,
             action="suspended",
             moderator_id=moderator_id,
-            comment=None,
+            comment=history_comment,
         )
 
         if user.firebase_uid:
@@ -1012,17 +1149,91 @@ async def _apply_actioned_report_to_entity(
     return None
 
 
+def _status_value(value: object) -> str:
+    return value.value if hasattr(value, "value") else str(value)
+
+
+async def _build_report_review_metadata(
+    db: AsyncSession,
+    report: Report,
+    new_status: ReportStatus,
+) -> dict[str, Any]:
+    old_report_status = _status_value(report.status)
+    if new_status == ReportStatus.rejected:
+        return {
+            "old": {"report_status": old_report_status},
+            "new": {"report_status": ReportStatus.rejected.value},
+        }
+
+    metadata: dict[str, Any] = {
+        "report_status": {
+            "old": old_report_status,
+            "new": ReportStatus.actioned.value,
+        }
+    }
+    if report.entity_type == ReportEntityType.post:
+        post = (
+            await db.execute(select(Post).where(Post.id == report.entity_id))
+        ).scalar_one_or_none()
+        old_status = _status_value(post.state) if post is not None else None
+        metadata["old"] = {"post_status": old_status}
+        metadata["new"] = {"post_status": PostState.flagged.value}
+        return metadata
+
+    if report.entity_type == ReportEntityType.comment:
+        comment = await get_comment_by_id(db, report.entity_id)
+        metadata["old"] = {
+            "comment_is_deleted": bool(getattr(comment, "is_deleted", False)) if comment else None,
+        }
+        metadata["new"] = {"comment_is_deleted": True}
+        return metadata
+
+    if report.entity_type == ReportEntityType.user:
+        user = (
+            await db.execute(select(User).where(User.id == report.entity_id))
+        ).scalar_one_or_none()
+        old_status = _status_value(user.status) if user is not None else None
+        metadata["old"] = {"status": old_status}
+        metadata["new"] = {"status": UserStatus.suspended.value}
+        return metadata
+
+    return metadata
+
+
 async def review_report_admin_service(
     db: AsyncSession,
     current_admin_id: UUID,
     payload: ReportReviewRequest,
+    *,
+    actor_role: str | None = None,
 ) -> ReportResponse:
     report_id = payload.report_id
     row = await get_report_by_id(db, report_id)
     if row is None:
-        return error_response("Report not found", response_cls=ReportResponse)
+        stmt = (
+            select(Report)
+            .where(Report.entity_id == report_id, Report.is_deleted.is_(False))
+            .order_by(Report.created_at.desc())
+        )
+        reports = (await db.execute(stmt)).scalars().all()
+        if reports:
+            under_review_reports = [r for r in reports if r.status == ReportStatus.under_review]
+            target_report = under_review_reports[0] if under_review_reports else reports[0]
+            row = await get_report_by_id(db, target_report.id)
+
+    if row is None:
+        return error_response("Inappropiate report id", response_cls=ReportResponse)
 
     report = row[0]
+    activity_metadata = await _build_report_review_metadata(db, report, payload.status)
+
+    post_to_notify: Post | None = None
+    if payload.status == ReportStatus.actioned and report.entity_type == ReportEntityType.post:
+        post = (
+            await db.execute(select(Post).where(Post.id == report.entity_id))
+        ).scalar_one_or_none()
+        if post is not None and post.state != PostState.flagged:
+            post_to_notify = post
 
     try:
         if payload.status == ReportStatus.actioned:
@@ -1030,17 +1241,34 @@ async def review_report_admin_service(
                 db,
                 report,
                 moderator_id=current_admin_id,
+                admin_comment=payload.admin_comment,
             )
             if action_error:
                 await db.rollback()
                 return error_response(action_error, response_cls=ReportResponse)
 
-        await update_report(
+        # Action only the reviewed report; keep report_count and sibling reports intact.
+        updated = await update_report(
             db,
-            report_id=report_id,
+            report_id=report.id,
             status=payload.status,
             admin_comment=payload.admin_comment,
             moderator_id=current_admin_id,
+        )
+        if updated is None:
+            await db.rollback()
+            return error_response("Inappropiate report id", response_cls=ReportResponse)
+        from apps.administration.services.admin_activity_log_service import create_admin_activity_log
+
+        await create_admin_activity_log(
+            db,
+            user_id=current_admin_id,
+            role=actor_role,
+            action=_status_value(payload.status),
+            module="report",
+            record_id=report.id,
+            description=f"{_status_value(payload.status)} a report",
+            metadata=activity_metadata,
         )
         await db.commit()
     except Exception:
@@ -1048,7 +1276,25 @@ async def review_report_admin_service(
         logger.exception("Failed to review report report_id=%s", report_id)
         return error_response("Failed to update report", response_cls=ReportResponse)
 
-    updated_row = await get_report_by_id(db, report_id)
+    if post_to_notify is not None:
+        try:
+            from apps.notifications.services import POST_FLAGGED, notify_post_author
+
+            await notify_post_author(
+                db,
+                post_id=post_to_notify.id,
+                author_user_id=post_to_notify.author_user_id,
+                notification_type=POST_FLAGGED,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to notify post author after reviewing report post_id=%s",
+                post_to_notify.id,
+            )
+
+    updated_row = await get_report_by_id(db, report.id)
+    if updated_row is None:
+        return error_response("Inappropiate report id", response_cls=ReportResponse)
     report = updated_row[0]
     report_counts = await count_reports_by_entity_keys(
         db,

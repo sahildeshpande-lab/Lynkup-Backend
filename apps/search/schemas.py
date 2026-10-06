@@ -11,8 +11,15 @@ from common.schemas import ApiResponse
 
 class UniversitySearchParams(BaseModel):
     query: str
-    page: int = Field(default=1, ge=1)
-    pageSize: int = Field(default=20, ge=1, le=100)
+    page: int | None = Field(default=None, ge=1)
+    pageSize: int | None = Field(default=None, ge=1, le=200)
+    sort: str | None = None
+    order: str | None = None
+    sort_by: str | None = None
+    order_by: str | None = None
+
+
+
 
 
 class AcademicInterestCreate(BaseModel):

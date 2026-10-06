@@ -18,6 +18,15 @@ class RecommendationSettings(BaseSettings):
         default="https://api.semanticscholar.org/graph/v1",
         alias="SEMANTIC_SCHOLAR_BASE_URL",
     )
+    semantic_scholar_rps: float = Field(
+        default=1.0,
+        alias="SEMANTIC_SCHOLAR_RPS",
+        gt=0.0,
+        description=(
+            "Global Semantic Scholar request rate (requests per second) enforced "
+            "across workers via Redis when available."
+        ),
+    )
     min_keyword_score: float = Field(default=0.45, alias="MIN_KEYWORD_SCORE", ge=0.0, le=1.0)
     hf_home: str | None = Field(
         default=None,

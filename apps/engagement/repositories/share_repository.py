@@ -26,18 +26,41 @@ async def get_user_share_event(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+async def get_share_event_for_post(
+    db: AsyncSession,
+    post_id: UUID,
+) -> ShareEvent | None:
+    """Return the earliest share for this post that already has a Branch code."""
+    stmt = (
+        select(ShareEvent)
+        .where(
+            ShareEvent.post_id == post_id,
+            ShareEvent.branch_code.is_not(None),
+            ShareEvent.branch_url.is_not(None),
+        )
+        .order_by(ShareEvent.created_at.asc())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def create_share_event(
     db: AsyncSession,
     user_id: UUID,
     post_id: UUID,
     *,
+    branch_code: str | None = None,
+    branch_url: str | None = None,
     now: datetime | None = None,
 ) -> ShareEvent:
+    timestamp = now or utc_now()
     share_event = ShareEvent(
         user_id=user_id,
         post_id=post_id,
-        created_at=now or utc_now(),
-        updated_at=now or utc_now(),
+        branch_code=branch_code,
+        branch_url=branch_url,
+        created_at=timestamp,
+        updated_at=timestamp,
     )
     db.add(share_event)
     return share_event

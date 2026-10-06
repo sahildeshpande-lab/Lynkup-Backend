@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -62,7 +63,9 @@ _TARGET_TYPE_PREFIX: dict[NotificationTargetType, str] = {
 
 async def resolve_firebase_topics_from_targets(
     db: AsyncSession,
-    targets: list[tuple[NotificationTargetType, list[str]]],
+    targets: list[tuple[NotificationTargetType, list[str]]]
+    | list[tuple[NotificationTargetType, list[str], bool]]
+    | list[tuple[NotificationTargetType, list[str], bool, bool | None]],
 ) -> set[str]:
     """
     Map campaign TOPIC targets to Firebase topic names.
@@ -71,11 +74,13 @@ async def resolve_firebase_topics_from_targets(
     publish directly without resolving individual users.
     """
     topics: set[str] = set()
-    for target_type, values in targets:
+    for item in targets:
+        target_type, values = item[0], item[1]
+
         prefix = _TARGET_TYPE_PREFIX.get(target_type)
         if not prefix:
             continue
-        for raw in values:
+        for raw in (values or []):
             value = str(raw).strip()
             if not value:
                 continue
@@ -325,9 +330,9 @@ class TopicService:
         return topics
 
     @staticmethod
-    def subscribe(tokens: list[str], topics: set[str]) -> dict[str, Any]:
+    async def subscribe(tokens: list[str], topics: set[str]) -> dict[str, Any]:
         """Subscribe every token to each topic. Failures are logged, not raised."""
-        return TopicService._apply_topic_operation(
+        return await TopicService._apply_topic_operation(
             tokens=tokens,
             topics=topics,
             operation="subscribe",
@@ -335,9 +340,9 @@ class TopicService:
         )
 
     @staticmethod
-    def unsubscribe(tokens: list[str], topics: set[str]) -> dict[str, Any]:
+    async def unsubscribe(tokens: list[str], topics: set[str]) -> dict[str, Any]:
         """Unsubscribe every token from each topic. Failures are logged, not raised."""
-        return TopicService._apply_topic_operation(
+        return await TopicService._apply_topic_operation(
             tokens=tokens,
             topics=topics,
             operation="unsubscribe",
@@ -374,7 +379,7 @@ class TopicService:
             return {
                 "topics_to_subscribe": [],
                 "topics_to_unsubscribe": [],
-                "token_count": 0,
+                "token_count": 0,  # nosec B105 -- integer counter, not a password
                 "subscribe": None,
                 "unsubscribe": None,
             }
@@ -384,27 +389,58 @@ class TopicService:
         db: AsyncSession,
         user_id: UUID,
         profile: Profile,
+        *,
+        old_topics: set[str] | None = None,
+        fcm_token: str | None = None,
     ) -> dict[str, Any]:
         """
-        Reconcile and (re)subscribe all expected topics for a user.
+        Reconcile and (re)subscribe expected topics for a user.
 
-        Uses a diff when topic membership changed, then idempotently subscribes
-        every expected topic so legacy users catch up after login/OTP even when
-        the stored profile has not changed since their last sync attempt.
+        Login/OTP catch-up (``old_topics is None``): subscribe every expected
+        topic once (force-subscribe). Diff-based profile updates pass
+        ``old_topics`` so only added/removed topics are synced.
+
+        Pass ``fcm_token`` on login so the current device is subscribed even when
+        the installation row was just written or token lookup is incomplete.
         """
         try:
-            old_topics = await TopicService.capture_topics(db, profile)
             new_topics = await TopicService.build_topics(db, profile)
-            result = await TopicService.sync_topics(
+            tokens = await get_active_fcm_tokens_for_users(db, [user_id])
+            login_token = (fcm_token or "").strip()
+            if login_token and login_token not in tokens:
+                tokens = [*tokens, login_token]
+
+            # Login/OTP: subscribe the full expected set once (no sync_topics).
+            if old_topics is None:
+                result: dict[str, Any] = {
+                    "topics_to_subscribe": sorted(new_topics),
+                    "topics_to_unsubscribe": [],
+                    "token_count": len(tokens),  # nosec B105 -- integer counter
+                    "subscribe": None,
+                    "unsubscribe": None,
+                }
+                if tokens and new_topics:
+                    result["force_subscribe"] = await TopicService.subscribe(
+                        tokens,
+                        new_topics,
+                    )
+                elif new_topics and not tokens:
+                    logger.info(
+                        "Firebase topic refresh skipped force-subscribe "
+                        "(no FCM tokens) user_id=%s topics=%s",
+                        user_id,
+                        sorted(new_topics),
+                    )
+                return result
+
+            # Profile/admin update: diff against prior topics only.
+            return await TopicService.sync_topics(
                 db,
                 user_id,
-                old_topics=old_topics,
+                old_topics=set(old_topics),
                 new_topics=new_topics,
+                tokens=tokens,
             )
-            tokens = await get_active_fcm_tokens_for_users(db, [user_id])
-            if tokens and new_topics:
-                result["force_subscribe"] = TopicService.subscribe(tokens, new_topics)
-            return result
         except Exception:
             logger.exception(
                 "Firebase topic refresh failed user_id=%s",
@@ -413,7 +449,7 @@ class TopicService:
             return {
                 "topics_to_subscribe": [],
                 "topics_to_unsubscribe": [],
-                "token_count": 0,
+                "token_count": 0,  # nosec B105 -- integer counter, not a password
                 "subscribe": None,
                 "unsubscribe": None,
             }
@@ -425,10 +461,12 @@ class TopicService:
         *,
         old_topics: set[str],
         new_topics: set[str],
+        tokens: list[str] | None = None,
     ) -> dict[str, Any]:
         """
-        Diff topic sets and sync all active FCM tokens for the user.
+        Diff topic sets and sync FCM tokens for the user.
 
+        When ``tokens`` is provided, reuse them (no second FCM lookup).
         Unchanged topics are left alone. Firebase errors never propagate.
         Prefer ``sync_user_topics`` from profile flows.
         """
@@ -438,7 +476,7 @@ class TopicService:
         result: dict[str, Any] = {
             "topics_to_subscribe": sorted(topics_to_subscribe),
             "topics_to_unsubscribe": sorted(topics_to_unsubscribe),
-            "token_count": 0,
+            "token_count": 0,  # nosec B105 -- integer counter, not a password
             "subscribe": None,
             "unsubscribe": None,
         }
@@ -450,14 +488,15 @@ class TopicService:
             )
             return result
 
-        try:
-            tokens = await get_active_fcm_tokens_for_users(db, [user_id])
-        except Exception:
-            logger.exception(
-                "Failed to load active FCM tokens for topic sync user_id=%s",
-                user_id,
-            )
-            return result
+        if tokens is None:
+            try:
+                tokens = await get_active_fcm_tokens_for_users(db, [user_id])
+            except Exception:
+                logger.exception(
+                    "Failed to load active FCM tokens for topic sync user_id=%s",
+                    user_id,
+                )
+                return result
 
         result["token_count"] = len(tokens)
         if not tokens:
@@ -468,9 +507,9 @@ class TopicService:
             return result
 
         if topics_to_subscribe:
-            result["subscribe"] = TopicService.subscribe(tokens, topics_to_subscribe)
+            result["subscribe"] = await TopicService.subscribe(tokens, topics_to_subscribe)
         if topics_to_unsubscribe:
-            result["unsubscribe"] = TopicService.unsubscribe(
+            result["unsubscribe"] = await TopicService.unsubscribe(
                 tokens,
                 topics_to_unsubscribe,
             )
@@ -508,7 +547,7 @@ class TopicService:
             )
             if not topics:
                 return
-            TopicService.unsubscribe([token], topics)
+            await TopicService.unsubscribe([token], topics)
         except Exception:
             logger.exception(
                 "Failed to unsubscribe device from Firebase topics on logout user_id=%s",
@@ -516,7 +555,7 @@ class TopicService:
             )
 
     @staticmethod
-    def _apply_topic_operation(
+    async def _apply_topic_operation(
         *,
         tokens: list[str],
         topics: set[str],
@@ -551,7 +590,11 @@ class TopicService:
 
         for topic in cleaned_topics:
             try:
-                response = api(cleaned_tokens, topic)
+                response = await asyncio.to_thread(
+                    api,
+                    cleaned_tokens,
+                    topic,
+                )
                 failure_count = int(getattr(response, "failure_count", 0) or 0)
                 success_count = int(getattr(response, "success_count", 0) or 0)
                 if failure_count:

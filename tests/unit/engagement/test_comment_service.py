@@ -11,7 +11,7 @@ from sqlalchemy import Index, UniqueConstraint
 from sqlalchemy.sql.schema import CheckConstraint
 
 from apps.engagement.db_models import Comment, CommentReaction
-from apps.engagement.schemas import CreateCommentRequest, DeleteCommentRequest
+from apps.engagement.schemas import CreateCommentRequest, EditCommentRequest, DeleteCommentRequest
 from apps.engagement.services import comment_service as svc
 from common.enums import ReactionType
 
@@ -23,6 +23,7 @@ def _comment(
     post_id=None,
     user_id=None,
     is_deleted: bool = False,
+    is_edited: bool = False,
     comment_text: str = "Hello",
 ):
     return SimpleNamespace(
@@ -32,6 +33,7 @@ def _comment(
         parent_comment_id=parent_comment_id,
         level=level,
         is_deleted=is_deleted,
+        is_edited=is_edited,
         like_count=0,
         reply_count=0,
         comment_text=comment_text,
@@ -85,7 +87,8 @@ async def test_create_top_level_comment(mock_db):
     assert response.message == "Comment created successfully"
     assert response.data.level == 1
     assert response.data.comment_text == "Great post!"
-    assert response.data.can_delete_comment is True
+    assert response.data.can_delete is True
+    assert response.data.can_edit is True
 
 
 @pytest.mark.asyncio
@@ -222,10 +225,12 @@ async def test_get_post_comments_nested_structure(mock_db):
     assert response.status is True
     assert len(response.data.comments) == 1
     assert response.data.comments[0].level == 1
-    assert response.data.comments[0].can_delete_comment is False
+    assert response.data.comments[0].can_delete is False
+    assert response.data.comments[0].can_edit is False
     assert response.data.comments[0].replies[0].comment_text == "Reply"
     assert response.data.comments[0].replies[0].level == 2
-    assert response.data.comments[0].replies[0].can_delete_comment is False
+    assert response.data.comments[0].replies[0].can_delete is False
+    assert response.data.comments[0].replies[0].can_edit is False
     assert response.data.comments[0].author.bio == "Campus ambassador"
 
 
@@ -254,7 +259,7 @@ async def test_soft_delete_comment(mock_db):
     assert response.status is True
     assert response.data.is_deleted is True
     assert response.data.comment_text == "Hello"
-    assert response.data.can_delete_comment is True
+    assert response.data.can_delete is True
     update_comment_count.assert_awaited_once_with(db, comment.post_id, -1)
     db.commit.assert_awaited_once()
 
@@ -309,9 +314,12 @@ async def test_get_post_comments_can_delete_only_for_author(mock_db):
     ):
         response = await svc.get_post_comments(db, viewer_id, post_id)
 
-    assert response.data.comments[0].can_delete_comment is True
-    assert response.data.comments[1].can_delete_comment is False
-    assert response.data.comments[1].replies[0].can_delete_comment is True
+    assert response.data.comments[0].can_delete is True
+    assert response.data.comments[0].can_edit is True
+    assert response.data.comments[1].can_delete is False
+    assert response.data.comments[1].can_edit is False
+    assert response.data.comments[1].replies[0].can_delete is True
+    assert response.data.comments[1].replies[0].can_edit is True
     assert response.data.comments[1].replies[0].comment_text == "My reply"
 
 
@@ -436,3 +444,242 @@ def test_comment_reaction_model_indexes_constraints_and_relationships():
     assert "uq_comment_reactions_comment_user" in unique_names
     assert hasattr(CommentReaction, "comment")
     assert hasattr(CommentReaction, "user")
+
+
+@pytest.mark.asyncio
+async def test_edit_comment_success(mock_db):
+    post_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    comment = _comment(post_id=post_id, user_id=user_id, comment_text="Original text", is_edited=False)
+    payload = EditCommentRequest(post_id=post_id, comment_id=comment.id, comment_text="Edited text")
+    db = mock_db()
+
+    async def fake_update_comment_text(d, c, text):
+        c.comment_text = text
+        c.is_edited = True
+        return c
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "get_comment_for_update", AsyncMock(return_value=comment)),
+        patch.object(svc, "update_comment_text", side_effect=fake_update_comment_text),
+        patch.object(svc, "fetch_profiles_by_user_ids", AsyncMock(return_value={})),
+        patch.object(svc, "fetch_user_comment_reactions", AsyncMock(return_value={})),
+    ):
+        response = await svc.edit_post_comment(db, user_id, payload)
+
+    assert response.status is True
+    assert response.message == "Comment edited successfully"
+    assert response.data.comment_text == "Edited text"
+    assert response.data.is_edited is True
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_edit_comment_post_not_found(mock_db):
+    post_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    payload = EditCommentRequest(post_id=post_id, comment_id=uuid.uuid4(), comment_text="New text")
+    db = mock_db()
+
+    with patch.object(svc, "post_exists", AsyncMock(return_value=False)):
+        with pytest.raises(HTTPException) as exc:
+            await svc.edit_post_comment(db, user_id, payload)
+        assert exc.value.status_code == 404
+        assert exc.value.detail == "Post not found"
+
+
+@pytest.mark.asyncio
+async def test_edit_comment_comment_not_found(mock_db):
+    post_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    payload = EditCommentRequest(post_id=post_id, comment_id=uuid.uuid4(), comment_text="New text")
+    db = mock_db()
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "get_comment_for_update", AsyncMock(return_value=None)),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await svc.edit_post_comment(db, user_id, payload)
+        assert exc.value.status_code == 404
+        assert exc.value.detail == "Comment not found"
+
+
+@pytest.mark.asyncio
+async def test_edit_comment_wrong_post(mock_db):
+    post_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    comment = _comment(post_id=uuid.uuid4(), user_id=user_id)
+    payload = EditCommentRequest(post_id=post_id, comment_id=comment.id, comment_text="New text")
+    db = mock_db()
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "get_comment_for_update", AsyncMock(return_value=comment)),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await svc.edit_post_comment(db, user_id, payload)
+        assert exc.value.status_code == 400
+        assert exc.value.detail == "Comment does not belong to this post"
+
+
+@pytest.mark.asyncio
+async def test_edit_comment_not_owner(mock_db):
+    post_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    comment = _comment(post_id=post_id, user_id=uuid.uuid4())
+    payload = EditCommentRequest(post_id=post_id, comment_id=comment.id, comment_text="New text")
+    db = mock_db()
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "get_comment_for_update", AsyncMock(return_value=comment)),
+    ):
+        response = await svc.edit_post_comment(db, user_id, payload)
+
+    assert response.status is False
+    assert response.message == "Not the authenticated user"
+
+
+@pytest.mark.asyncio
+async def test_edit_comment_deleted_comment(mock_db):
+    post_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    comment = _comment(post_id=post_id, user_id=user_id, is_deleted=True)
+    payload = EditCommentRequest(post_id=post_id, comment_id=comment.id, comment_text="New text")
+    db = mock_db()
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "get_comment_for_update", AsyncMock(return_value=comment)),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await svc.edit_post_comment(db, user_id, payload)
+        assert exc.value.status_code == 400
+        assert exc.value.detail == "Cannot edit a deleted comment"
+
+
+@pytest.mark.asyncio
+async def test_edit_comment_empty_text(mock_db):
+    post_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    comment = _comment(post_id=post_id, user_id=user_id)
+    payload = EditCommentRequest(post_id=post_id, comment_id=comment.id, comment_text="   ")
+    db = mock_db()
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "get_comment_for_update", AsyncMock(return_value=comment)),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await svc.edit_post_comment(db, user_id, payload)
+        assert exc.value.status_code == 422
+        assert exc.value.detail == "Comment text is required"
+
+
+@pytest.mark.asyncio
+async def test_create_reply_to_deleted_comment_rejected(mock_db):
+    post_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    parent = _comment(level=1, post_id=post_id, is_deleted=True)
+    db = mock_db()
+    payload = CreateCommentRequest(
+        post_id=post_id,
+        comment_text="Reply to deleted comment",
+        parent_comment_id=parent.id,
+    )
+
+    with (
+        patch.object(svc, "post_exists", AsyncMock(return_value=True)),
+        patch.object(svc, "get_comment_by_id", AsyncMock(return_value=parent)),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await svc.create_post_comment(db, user_id, payload)
+        assert exc.value.status_code == 400
+        assert exc.value.detail == "Cannot reply to a deleted comment"
+
+
+@pytest.mark.asyncio
+async def test_mark_comment_deleted_cascades_to_children(mock_db):
+    from apps.engagement.repositories.comment_repository import mark_comment_deleted
+
+    parent = _comment(level=1, is_deleted=False)
+    child1 = _comment(level=2, parent_comment_id=parent.id, is_deleted=False)
+    child2 = _comment(level=2, parent_comment_id=parent.id, is_deleted=False)
+    grandchild = _comment(level=3, parent_comment_id=child1.id, is_deleted=False)
+
+    db = mock_db()
+
+    # Sequence of DB executions:
+    # 1. Fetch children of parent -> [child1, child2]
+    # 2. Fetch children of child1, child2 -> [grandchild]
+    # 3. Fetch children of grandchild -> []
+    db.execute.side_effect = [
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [child1, child2])),
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [grandchild])),
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
+    ]
+
+    await mark_comment_deleted(db, parent)
+
+    assert parent.is_deleted is True
+    assert child1.is_deleted is True
+    assert child2.is_deleted is True
+    assert grandchild.is_deleted is True
+    assert db.add.call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_create_comment_author_suspended_raises_api_error(mock_db):
+    from common.enums import UserStatus
+    from common.exceptions import ApiError
+
+    post_id = uuid.uuid4()
+    author_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    db = mock_db()
+    payload = CreateCommentRequest(post_id=post_id, comment_text="Great post!")
+
+    db.execute.side_effect = [
+        # post_author_res query
+        SimpleNamespace(first=lambda: (author_id,)),
+        # block check
+        SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None)),
+        # author status check query in check_post_engagement_allowed
+        SimpleNamespace(scalar_one_or_none=lambda: SimpleNamespace(status=UserStatus.suspended, is_deleted=False, deleted_at=None)),
+    ]
+
+    with patch.object(svc, "post_exists", AsyncMock(return_value=True)):
+        with pytest.raises(ApiError) as exc:
+            await svc.create_post_comment(db, user_id, payload)
+        assert "Original post author is suspended" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_create_comment_author_banned_raises_api_error(mock_db):
+    from common.enums import UserStatus
+    from common.exceptions import ApiError
+
+    post_id = uuid.uuid4()
+    author_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    db = mock_db()
+    payload = CreateCommentRequest(post_id=post_id, comment_text="Great post!")
+
+    db.execute.side_effect = [
+        # post_author_res query
+        SimpleNamespace(first=lambda: (author_id,)),
+        # block check
+        SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None)),
+        # author status check query in check_post_engagement_allowed
+        SimpleNamespace(scalar_one_or_none=lambda: SimpleNamespace(status=UserStatus.banned, is_deleted=False, deleted_at=None)),
+    ]
+
+    with patch.object(svc, "post_exists", AsyncMock(return_value=True)):
+        with pytest.raises(ApiError) as exc:
+            await svc.create_post_comment(db, user_id, payload)
+        assert "Original post author is banned" in str(exc.value)
+
+
+

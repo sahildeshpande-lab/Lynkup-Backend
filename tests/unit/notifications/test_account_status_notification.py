@@ -55,15 +55,14 @@ async def test_notify_account_status_uses_default_body_when_reason_missing():
     assert "banned" in create.await_args.kwargs["body"].lower()
 
 
-def test_admin_user_status_request_requires_note_for_restrictive_statuses():
+def test_admin_user_status_request_note_is_optional():
     from apps.administration.schemas import AdminUserStatusRequest
-    from pydantic import ValidationError
 
-    with pytest.raises(ValidationError):
-        AdminUserStatusRequest(status="suspended")
+    suspended = AdminUserStatusRequest(status="suspended")
+    assert suspended.note is None
 
-    with pytest.raises(ValidationError):
-        AdminUserStatusRequest(status="banned", note="   ")
+    banned_blank = AdminUserStatusRequest(status="banned", note="   ")
+    assert banned_blank.note is None
 
     ok = AdminUserStatusRequest(status="suspended", note=" Abuse ")
     assert ok.note == "Abuse"

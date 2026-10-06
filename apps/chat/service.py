@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from stream_chat import StreamChat
@@ -13,6 +14,9 @@ from apps.chat.config import settings
 from apps.chat.schemas import StreamTokenData
 from apps.profiles.services.response_service import _compose_full_name
 from core.images import generate_profile_image_url
+
+if TYPE_CHECKING:
+    from apps.profiles.db_models.profile_db_model import Profile
 
 logger = logging.getLogger(__name__)
 
@@ -62,25 +66,49 @@ def build_stream_user_payload(
         "image": profile_photo_url,
     }
 
+async def upsert_stream_user(
+    user: User,
+    db: AsyncSession,
+    profile: Profile | None = None,
+) -> None:
+    if profile is None:
+        profile = await _fetch_user_profile(db, user)
 
-async def upsert_stream_user(user: User, db: AsyncSession) -> None:
-    profile = await _fetch_user_profile(db, user)
     user_payload = build_stream_user_payload(user, profile)
 
     try:
-        get_stream_client().upsert_user(user_payload)
+        await asyncio.to_thread(
+            get_stream_client().upsert_user,
+            user_payload,
+        )
         logger.info("Stream user upserted for user_id=%s", user.id)
     except StreamChatError:
         raise
     except Exception as exc:
-        logger.exception("Stream user upsert failed for user_id=%s", user.id)
+        logger.exception(
+            "Stream user upsert failed for user_id=%s",
+            user.id,
+        )
         raise StreamChatError("Failed to sync user with Stream Chat") from exc
 
+# async def upsert_stream_user(user: User, db: AsyncSession, profile: Profile | None = None,) -> None:
+#     profile = await _fetch_user_profile(db, user)
+#     user_payload = build_stream_user_payload(user, profile)
 
-async def sync_stream_user_on_auth(user: User, db: AsyncSession) -> None:
+#     try:
+#         get_stream_client().upsert_user(user_payload)
+#         logger.info("Stream user upserted for user_id=%s", user.id)
+#     except StreamChatError:
+#         raise
+#     except Exception as exc:
+#         logger.exception("Stream user upsert failed for user_id=%s", user.id)
+#         raise StreamChatError("Failed to sync user with Stream Chat") from exc
+
+
+async def sync_stream_user_on_auth(user: User, db: AsyncSession ,  profile: Profile | None = None,) -> None:
     """Best-effort Stream user sync during login. Never raises to callers."""
     try:
-        await upsert_stream_user(user, db)
+        await upsert_stream_user(user, db, profile=profile)
     except StreamChatError as exc:
         logger.warning("Stream user upsert skipped for user_id=%s: %s", user.id, exc)
     except Exception as exc:

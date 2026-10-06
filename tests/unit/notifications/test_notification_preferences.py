@@ -16,12 +16,16 @@ def _preference(**kwargs):
         "user_id": uuid4(),
         "push_enabled": True,
         "in_app_enabled": True,
+        "email_preferences": {
+            "bulk_email": True,
+        },
         "category_preferences": {
             "CONNECTION_REQUEST": True,
             "CONNECTION_ACCEPTED": True,
             "DIRECT_MESSAGE": True,
             "ANNOUNCEMENT": True,
             "TOPIC": True,
+            "weekly_lynkup_request_reminder": True,
         },
     }
     defaults.update(kwargs)
@@ -34,6 +38,11 @@ ACTIVE_DEFAULTS = {
     "DIRECT_MESSAGE": True,
     "ANNOUNCEMENT": True,
     "TOPIC": True,
+}
+
+MERGED_WITH_WEEKLY = {
+    **ACTIVE_DEFAULTS,
+    "weekly_lynkup_request_reminder": True,
 }
 
 
@@ -59,6 +68,7 @@ async def test_merged_category_preferences_uses_db_defaults_and_user_overrides(m
         "DIRECT_MESSAGE": False,
         "ANNOUNCEMENT": True,
         "TOPIC": True,
+        "weekly_lynkup_request_reminder": True,
     }
     assert "LEGACY_INACTIVE" not in merged
 
@@ -95,7 +105,7 @@ async def test_merged_category_preferences_excludes_deactivated_categories(mock_
 async def test_get_preferences_initializes_new_user_from_db_categories(mock_db):
     db = mock_db()
     user_id = uuid4()
-    created = _preference(user_id=user_id, category_preferences=dict(ACTIVE_DEFAULTS))
+    created = _preference(user_id=user_id, category_preferences=dict(MERGED_WITH_WEEKLY))
 
     with (
         patch.object(svc, "get_preferences_by_user_id", AsyncMock(return_value=None)),
@@ -111,12 +121,15 @@ async def test_get_preferences_initializes_new_user_from_db_categories(mock_db):
     assert response.status is True
     assert response.message == "Notification preferences fetched successfully."
     assert response.data is not None
-    assert response.data.category_preferences == ACTIVE_DEFAULTS
+    assert response.data.category_preferences == MERGED_WITH_WEEKLY
+    assert response.data.email_preferences == {
+        "bulk_email": True,
+    }
     defaults.assert_awaited()
     create.assert_awaited_once_with(
         db,
         user_id=user_id,
-        category_preferences=ACTIVE_DEFAULTS,
+        category_preferences=MERGED_WITH_WEEKLY,
     )
     db.commit.assert_awaited_once()
 
@@ -232,14 +245,14 @@ async def test_update_preferences_partial_category_patch(mock_db):
         user_id=user_id,
         push_enabled=True,
         in_app_enabled=True,
-        category_preferences=dict(ACTIVE_DEFAULTS),
+        category_preferences=dict(MERGED_WITH_WEEKLY),
     )
     updated = _preference(
         user_id=user_id,
         push_enabled=False,
         in_app_enabled=True,
         category_preferences={
-            **ACTIVE_DEFAULTS,
+            **MERGED_WITH_WEEKLY,
             "DIRECT_MESSAGE": False,
         },
     )
@@ -281,7 +294,7 @@ async def test_update_preferences_partial_category_patch(mock_db):
 async def test_update_preferences_ignores_unknown_category_keys(mock_db):
     db = mock_db()
     user_id = uuid4()
-    existing = _preference(user_id=user_id, category_preferences=dict(ACTIVE_DEFAULTS))
+    existing = _preference(user_id=user_id, category_preferences=dict(MERGED_WITH_WEEKLY))
     payload = UpdateNotificationPreferencesRequest(
         category_preferences={"NOT_A_REAL_CATEGORY": False, "TOPIC": False},
     )
@@ -304,6 +317,7 @@ async def test_update_preferences_ignores_unknown_category_keys(mock_db):
     saved = persist.await_args.kwargs["category_preferences"]
     assert "NOT_A_REAL_CATEGORY" not in saved
     assert saved["TOPIC"] is False
+    assert "weekly_lynkup_request_reminder" in saved
 
 
 @pytest.mark.asyncio
@@ -327,3 +341,302 @@ async def test_get_default_category_preferences_falls_back_to_notification_types
         "TOPIC": True,
         "CONNECTION_REQUEST": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_list_notifications_includes_totalcount_above_page():
+    from datetime import datetime, timezone
+    from apps.notifications.db_models import Notification, NotificationType
+
+    user_id = uuid4()
+    type_id = uuid4()
+    notif_type = NotificationType(id=type_id, name="CONNECTION_REQUEST", is_active=True)
+
+    n1 = Notification(
+        id=uuid4(),
+        recipient_user_id=user_id,
+        notification_type_id=type_id,
+        title="Test 1",
+        body="Body 1",
+        is_read=False,
+        created_at=datetime.now(timezone.utc),
+    )
+    n1.notification_type = notif_type
+
+    n2 = Notification(
+        id=uuid4(),
+        recipient_user_id=user_id,
+        notification_type_id=type_id,
+        title="Test 2",
+        body="Body 2",
+        is_read=True,
+        read_at=datetime.now(timezone.utc),
+        created_at=datetime.now(timezone.utc),
+    )
+    n2.notification_type = notif_type
+
+    db = AsyncMock()
+    preference = _preference(user_id=user_id)
+
+    with (
+        patch.object(svc, "_get_or_create_preferences", AsyncMock(return_value=preference)),
+        patch.object(
+            svc,
+            "_list_unified_notifications_for_user",
+            AsyncMock(return_value=[(n1, False, False, None), (n2, False, True, n2.read_at)]),
+        ),
+    ):
+        response = await svc.list_notifications(db, user_id=user_id, page=1, page_size=10)
+
+    data = response.data
+    assert data["Totalcount"] == 1
+    assert data["page"] == 1
+    assert data["pageSize"] == 10
+    assert data["totalItems"] == 2
+    assert data["reason"] == {}
+    assert list(data.keys()) == [
+        "items",
+        "Totalcount",
+        "page",
+        "pageSize",
+        "totalItems",
+        "totalPages",
+        "reason",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_notifications_unpaginated_includes_totalcount():
+    from datetime import datetime, timezone
+    from apps.notifications.db_models import Notification, NotificationType
+
+    user_id = uuid4()
+    type_id = uuid4()
+    notif_type = NotificationType(id=type_id, name="CONNECTION_REQUEST", is_active=True)
+
+    n1 = Notification(
+        id=uuid4(),
+        recipient_user_id=user_id,
+        notification_type_id=type_id,
+        title="Test 1",
+        body="Body 1",
+        is_read=False,
+        created_at=datetime.now(timezone.utc),
+    )
+    n1.notification_type = notif_type
+
+    db = AsyncMock()
+    preference = _preference(user_id=user_id)
+
+    with (
+        patch.object(svc, "_get_or_create_preferences", AsyncMock(return_value=preference)),
+        patch.object(
+            svc,
+            "_list_unified_notifications_for_user",
+            AsyncMock(return_value=[(n1, False, False, None)]),
+        ),
+    ):
+        response = await svc.list_notifications(db, user_id=user_id)
+
+    data = response.data
+    assert data["Totalcount"] == 1
+    assert data["reason"] == {}
+    assert list(data.keys()) == ["items", "Totalcount", "reason"]
+
+
+@pytest.mark.asyncio
+async def test_list_notifications_returns_reason_when_in_app_disabled(mock_db):
+    db = mock_db()
+    user_id = uuid4()
+    preference = _preference(user_id=user_id, in_app_enabled=False)
+
+    with patch.object(
+        svc,
+        "_get_or_create_preferences",
+        AsyncMock(return_value=preference),
+    ):
+        response = await svc.list_notifications(db, user_id=user_id)
+
+    data = response.data
+    assert data["items"] == []
+    assert data["Totalcount"] == 0
+    assert data["reason"] == {
+        "code": "IN_APP_NOTIFICATIONS_DISABLED",
+        "message": "In-app notifications are turned off. Please turn them on to view your available notifications.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_notifications_paginated_returns_reason_when_in_app_disabled(mock_db):
+    db = mock_db()
+    user_id = uuid4()
+    preference = _preference(user_id=user_id, in_app_enabled=False)
+
+    with patch.object(
+        svc,
+        "_get_or_create_preferences",
+        AsyncMock(return_value=preference),
+    ):
+        response = await svc.list_notifications(
+            db,
+            user_id=user_id,
+            page=1,
+            page_size=20,
+        )
+
+    data = response.data
+    assert data["items"] == []
+    assert data["Totalcount"] == 0
+    assert data["totalItems"] == 0
+    assert data["reason"] == {
+        "code": "IN_APP_NOTIFICATIONS_DISABLED",
+        "message": "In-app notifications are turned off. Please turn them on to view your available notifications.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_preferences_partial_email_bulk_only(mock_db):
+    db = mock_db()
+    user_id = uuid4()
+    existing = _preference(user_id=user_id)
+    updated = _preference(
+        user_id=user_id,
+        email_preferences={
+            "bulk_email": False,
+        },
+    )
+    payload = UpdateNotificationPreferencesRequest(
+        email_preferences={"bulk_email": False},
+    )
+
+    with (
+        patch.object(svc, "get_preferences_by_user_id", AsyncMock(return_value=existing)),
+        patch.object(
+            svc,
+            "get_default_category_preferences",
+            AsyncMock(return_value=dict(ACTIVE_DEFAULTS)),
+        ),
+        patch.object(
+            svc,
+            "persist_update_preferences",
+            AsyncMock(return_value=updated),
+        ) as persist,
+    ):
+        response = await svc.update_preferences(db, user_id=user_id, payload=payload)
+
+    assert response.status is True
+    assert response.data is not None
+    assert response.data.email_preferences == {
+        "bulk_email": False,
+    }
+    # First persist may be from get-or-create merge; last call is the email update.
+    email_calls = [
+        c.kwargs.get("email_preferences")
+        for c in persist.await_args_list
+        if c.kwargs.get("email_preferences") is not None
+    ]
+    assert email_calls[-1] == {"bulk_email": False}
+
+
+@pytest.mark.asyncio
+async def test_update_preferences_partial_category_weekly_only(mock_db):
+    db = mock_db()
+    user_id = uuid4()
+    existing = _preference(user_id=user_id)
+    updated = _preference(
+        user_id=user_id,
+        category_preferences={
+            **MERGED_WITH_WEEKLY,
+            "weekly_lynkup_request_reminder": False,
+        },
+    )
+    payload = UpdateNotificationPreferencesRequest(
+        category_preferences={"weekly_lynkup_request_reminder": False},
+    )
+
+    with (
+        patch.object(svc, "get_preferences_by_user_id", AsyncMock(return_value=existing)),
+        patch.object(
+            svc,
+            "get_default_category_preferences",
+            AsyncMock(return_value=dict(ACTIVE_DEFAULTS)),
+        ),
+        patch.object(
+            svc,
+            "persist_update_preferences",
+            AsyncMock(return_value=updated),
+        ) as persist,
+    ):
+        response = await svc.update_preferences(db, user_id=user_id, payload=payload)
+
+    assert response.data.category_preferences["weekly_lynkup_request_reminder"] is False
+    assert "weekly_lynkup_request_reminder" not in response.data.email_preferences
+    assert response.data.email_preferences["bulk_email"] is True
+    category_calls = [
+        c.kwargs.get("category_preferences")
+        for c in persist.await_args_list
+        if c.kwargs.get("category_preferences") is not None
+    ]
+    assert category_calls[-1]["weekly_lynkup_request_reminder"] is False
+
+
+def test_update_preferences_rejects_weekly_in_email_preferences():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as exc:
+        UpdateNotificationPreferencesRequest(
+            email_preferences={"weekly_lynkup_request_reminder": False},
+        )
+    assert "Unsupported email preference keys" in str(exc.value)
+
+
+def test_update_preferences_rejects_unsupported_email_keys():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as exc:
+        UpdateNotificationPreferencesRequest(
+            email_preferences={"export_email": False},
+        )
+    assert "Unsupported email preference keys" in str(exc.value)
+
+
+def test_is_email_preference_enabled_defaults_true_when_missing():
+    from apps.notifications.email_preferences import (
+        EMAIL_PREF_BULK_EMAIL,
+        is_email_preference_enabled,
+    )
+
+    assert is_email_preference_enabled(None, EMAIL_PREF_BULK_EMAIL) is True
+    assert is_email_preference_enabled({"email_preferences": {}}, EMAIL_PREF_BULK_EMAIL) is True
+    pref = SimpleNamespace(email_preferences={})
+    assert is_email_preference_enabled(pref, EMAIL_PREF_BULK_EMAIL) is True
+    pref_disabled = SimpleNamespace(email_preferences={"bulk_email": False})
+    assert is_email_preference_enabled(pref_disabled, EMAIL_PREF_BULK_EMAIL) is False
+
+
+@pytest.mark.asyncio
+async def test_filter_users_eligible_for_email_preference(mock_db, scalar_result):
+    from apps.notifications.email_preferences import EMAIL_PREF_BULK_EMAIL
+    from apps.notifications.repositories import notification_repository as repo
+
+    enabled = uuid4()
+    disabled = uuid4()
+    missing = uuid4()
+    prefs = [
+        SimpleNamespace(
+            user_id=enabled,
+            email_preferences={"bulk_email": True},
+        ),
+        SimpleNamespace(
+            user_id=disabled,
+            email_preferences={"bulk_email": False},
+        ),
+    ]
+    db = mock_db(scalar_result(values=prefs))
+
+    result = await repo.filter_users_eligible_for_email_preference(
+        db,
+        [enabled, disabled, missing],
+        preference=EMAIL_PREF_BULK_EMAIL,
+    )
+    assert result == [enabled, missing]

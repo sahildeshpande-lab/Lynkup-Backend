@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -103,6 +104,9 @@ async def get_enabled_moderation_threshold(
 async def update_moderation_thresholds(
     payload: UpdateModerationThresholdsRequest,
     db: AsyncSession,
+    *,
+    actor_user_id: UUID | None = None,
+    actor_role: str | None = None,
 ) -> ModerationThresholdsData:
     await ensure_default_thresholds(db)
     now = utc_now()
@@ -112,14 +116,40 @@ async def update_moderation_thresholds(
         if getattr(payload, field) is not None
     }
 
+    old_values: dict[str, int] = {}
+    new_values: dict[str, int] = {}
     for field, threshold in updates.items():
         key = THRESHOLD_KEYS[field]
         row = await get_threshold_row_by_key(db, key)
         if row is None:
             raise ApiError(f"Threshold configuration '{key}' not found")
+        fallback = int(THRESHOLD_META[field]["default"])
+        old_values[field] = _threshold_from_value(row.value, fallback=fallback)
+        new_values[field] = int(threshold)
         row.value = {"threshold": int(threshold)}
         row.updated_at = now
         db.add(row)
+
+    if actor_user_id is not None:
+        from apps.administration.services.admin_activity_log_service import create_admin_activity_log
+
+        changes = ", ".join(
+            f"{field} to {value}" for field, value in new_values.items()
+        )
+        await create_admin_activity_log(
+            db,
+            user_id=actor_user_id,
+            role=actor_role,
+            action="update",
+            module="moderation_threshold",
+            record_id=None,
+            description=(
+                f"updated moderation thresholds {changes}"
+                if changes
+                else "updated moderation thresholds"
+            ),
+            metadata={"old": old_values, "new": new_values},
+        )
 
     await db.commit()
     return await get_moderation_thresholds(db)

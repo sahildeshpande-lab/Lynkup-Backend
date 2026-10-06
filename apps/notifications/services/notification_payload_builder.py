@@ -21,7 +21,10 @@ class NotificationPayloadBuilder:
         "POST_FLAGGED": {"screen": "post"},
         "POST_REINSTATED": {"screen": "post"},
         "POST_REJECTED": {"screen": "post"},
+        "POST_RECOGNITION": {"screen": "post"},
+        "LEARNING_SPOTLIGHT_RECOMMENDED": {"screen": "learning_spotlight"},
         "ACCOUNT_STATUS_CHANGED": {"screen": "account"},
+        "CONNECTION_REMINDER": {"screen": "explore"},
         # Future examples (uncomment / fill when wiring those types):
         # "DIRECT_MESSAGE": {"screen": "chat"},
         # "TOPIC": {"screen": "notifications"},

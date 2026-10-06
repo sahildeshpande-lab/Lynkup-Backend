@@ -1,7 +1,8 @@
 fastapi
 uvicorn[standard]
-pyzipper
 sqlmodel
+ddtrace
+rapidfuzz
 sqlalchemy
 asyncpg
 spacy
@@ -15,13 +16,16 @@ keybert
 stream-chat
 aiosqlite
 psycopg2-binary
-redis
-celery
+# Enable Kombu's Redis client constraints (5.6.2 requires redis<6.5).
+celery[redis]==5.6.3
+kombu==5.6.2
+celery-types
+celery-redbeat
+certifi
 opentelemetry-api
 opentelemetry-sdk
 opentelemetry-instrumentation-fastapi
 opentelemetry-instrumentation-sqlalchemy
-opentelemetry-instrumentation-redis
 datetime
 pwdlib[bcrypt]
 bcrypt
@@ -38,10 +42,16 @@ python-dotenv
 firebase-admin
 aioapns
 boto3
+pyzipper
 cryptography>=42.0.0
 pyOpenSSL>=24.0.0
 pydantic[email]
 pydantic-settings
+disposable-email-domains
 alembic
 bleach
+pandas
+openpyxl
 pysonar
+lingua-language-detector>=2.0.0
+ddtrace==4.14.0

@@ -11,17 +11,15 @@ from sqlmodel import select
 from apps.accounts.db_models import User
 from apps.administration.schemas import RecommendationSettingsUpdateRequest
 from apps.profiles.db_models.profile_db_model import Profile
-from apps.recommendations.services.recommendation_cron_service import (
-    RecommendationCronService,
-)
 from apps.recommendations.services.recommendation_settings_service import (
     RecommendationSettingsService,
     settings_to_dict,
 )
 from common.pagination import paginate_items
 from common.schemas import ApiResponse
+from apps.administration.dependencies import require_signed_admin
 from core.database.session import get_session
-from core.security.auth import get_current_admin, get_current_user
+from core.security.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +93,7 @@ async def search_recommendation_papers(
 @router.get("/admin/recommendation-settings", response_model=ApiResponse)
 async def get_recommendation_settings(
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(require_signed_admin),
     page: int | None = Query(default=None, ge=1, description="Page number for settings history"),
     pageSize: int | None = Query(
         default=None,
@@ -133,7 +131,7 @@ async def get_recommendation_settings(
 async def patch_recommendation_settings(
     payload: RecommendationSettingsUpdateRequest,
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(require_signed_admin),
 ) -> ApiResponse:
     """Update recommendation cron configuration only. All body fields are optional."""
     changes = payload.model_dump(exclude_unset=True)
@@ -150,6 +148,10 @@ async def patch_recommendation_settings(
             is_enabled=payload.is_enabled,
             generation_frequency_days=payload.generation_frequency_days,
             max_recommendations=payload.max_recommendations,
+            cycle_configuration=payload.cycle_configuration,
+            learning_spotlight_papers_count=payload.learning_spotlight_papers_count,
+            is_pushnotification_enabled=payload.is_pushnotification_enabled,
+            actor_role=current_user.role,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -168,55 +170,24 @@ async def patch_recommendation_settings(
     )
 
 
-@router.post("/admin/runcron", response_model=ApiResponse)
+@router.post("/admin/runcron", response_model=ApiResponse, status_code=202)
 async def run_recommendation_cron(
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(require_signed_admin),
+    db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """Manually execute recommendation generation for development/testing."""
-    admin_id = current_user.id
-    logger.info(
-        "[recommendation-cron]\nManual execution started\nadmin_id=%s",
-        admin_id,
-    )
+    """Queue recommendation generation for a Celery worker."""
+    from core.celery_worker.config import CeleryTaskQueue
+    from core.jobs.publishing import publish_admin_task
+    from apps.administration.services.admin_activity_log_service import create_admin_activity_log
 
-    started = time.perf_counter()
-    try:
-        ran = await RecommendationCronService.run_recommendation_generation()
-    except Exception:
-        execution_time_seconds = round(time.perf_counter() - started, 3)
-        logger.exception(
-            "[recommendation-cron]\nManual execution failed\nadmin_id=%s\n"
-            "execution_time_seconds=%s",
-            admin_id,
-            execution_time_seconds,
-        )
-        return ApiResponse(
-            status=False,
-            message="Recommendation generation failed.",
-        )
-
-    execution_time_seconds = round(time.perf_counter() - started, 3)
-    if not ran:
-        logger.info(
-            "[recommendation-cron]\nManual execution skipped\nadmin_id=%s\n"
-            "execution_time_seconds=%s",
-            admin_id,
-            execution_time_seconds,
-        )
-        return ApiResponse(
-            status=False,
-            message=(
-                "Recommendation generation is disabled or not configured. "
-                "Enable it in admin recommendation settings."
-            ),
-        )
-
-    logger.info(
-        "[recommendation-cron]\nManual execution completed\nadmin_id=%s\n"
-        "execution_time_seconds=%s",
-        admin_id,
-        execution_time_seconds,
+    task_id = await publish_admin_task("kampulynk.recommendations.tick", CeleryTaskQueue.BACKGROUND_QUEUE)
+    await create_admin_activity_log(
+        db, user_id=current_user.id, role=current_user.role, action="queue",
+        module="recommendation", record_id=None,
+        description="queued recommendation generation",
+        metadata={"task_id": task_id}, commit=True,
     )
     return ApiResponse(
-        message="Recommendation generation completed successfully.",
+        message="Recommendation generation queued.",
+        data={"task_id": task_id, "status": "queued"},
     )

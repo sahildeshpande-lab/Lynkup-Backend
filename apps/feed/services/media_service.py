@@ -15,6 +15,7 @@ from apps.feed.content_utils import (
 from apps.feed.db_models import MediaAsset, PostAttachment
 from common.enums import MediaAssetState, MediaType
 from common.exceptions import ApiError
+from common.filenames import normalize_filename
 from core.images import generate_download_url
 from core.images.storage_service import storage_service
 
@@ -128,7 +129,7 @@ async def _build_media_asset(
         owner_user_id=user_id,
         key=key,
         type=resolved_media_type,
-        original_filename=file.filename,
+        original_filename=normalize_filename(file.filename),
         mime_type=content_type,
         file_size=len(content),
         state=MediaAssetState.published,
@@ -141,6 +142,7 @@ def _media_asset_to_response(media_asset: MediaAsset) -> dict:
         "url": generate_download_url(media_asset.key),
         "key": media_asset.key,
         "type": media_asset.type.value if hasattr(media_asset.type, "value") else str(media_asset.type),
+        "original_filename": media_asset.original_filename,
     }
 
 

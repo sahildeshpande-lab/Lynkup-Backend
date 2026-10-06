@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional, Literal
 from uuid import UUID
 
@@ -11,8 +11,8 @@ from pydantic import (
     Field,
     ConfigDict,
     field_validator,
-    model_validator,
 )
+from pydantic_core import PydanticCustomError
 
 from common.enums import Role, AdminUserStatus
 
@@ -45,7 +45,7 @@ class AdminUserStatusRequest(BaseModel):
     note: str | None = Field(
         default=None,
         max_length=5000,
-        description="Required reason when suspending or banning a user.",
+        description="Optional reason when changing a user's status.",
     )
 
     @field_validator("note")
@@ -56,12 +56,6 @@ class AdminUserStatusRequest(BaseModel):
         stripped = value.strip()
         return stripped or None
 
-    @model_validator(mode="after")
-    def require_note_for_restrictive_status(self) -> "AdminUserStatusRequest":
-        if self.status in (AdminUserStatus.suspended, AdminUserStatus.banned) and not self.note:
-            raise ValueError("note is required when status is suspended or banned")
-        return self
-
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -71,11 +65,13 @@ class TokenResponse(BaseModel):
 
 
 class AdminSignupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     firstName: str
     lastName: str
     email: EmailStr
     password: str = Field(min_length=8, max_length=20)
-    role: Role = "superadmin"
+    role: Role
 
     @field_validator("firstName", "lastName")
     @classmethod
@@ -106,6 +102,8 @@ class AdminSignupRequest(BaseModel):
 class AdminLoginRequest(BaseModel):
     email: EmailStr
     password: str
+    # Optional pre-login signing-key registration id. Bound only after auth succeeds.
+    keyId: UUID | None = None
 
     @field_validator("email")
     @classmethod
@@ -113,6 +111,18 @@ class AdminLoginRequest(BaseModel):
         if not value or not value.strip():
             raise ValueError("email cannot be blank")
         return value.lower().strip()
+
+
+class AdminSigningKeyRegisterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    publicKey: str = Field(..., min_length=1, description="RSA public key PEM or base64 SPKI")
+
+
+class AdminSigningKeyRevokeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    keyId: UUID
 
 
 class AdminOnboardingRequest(BaseModel):
@@ -180,8 +190,22 @@ class AdminPublishPostRequest(BaseModel):
 
 class RecommendationSettingsResponse(BaseModel):
     is_enabled: bool
+    is_running: bool = False
     generation_frequency_days: int
     max_recommendations: int
+    # Learning Spotlight global cycle anchor (server-managed; null until first enable).
+    cycle_start_date: date | None = None
+    # Learning Spotlight 5-day cycle order configuration.
+    cycle_configuration: dict[str, Any] | None = None
+    # Pending cycle configuration staged for next cycle (null when no pending changes).
+    next_cycle_configuration: dict[str, Any] | None = None
+    # Current active cycle strategy (e.g. "leading_thinker") and day (1-5).
+    current_cycle: str | None = None
+    current_cycle_day: int | None = None
+    # Learning Spotlight number of daily papers (minimum 1, default 1; no upper limit).
+    learning_spotlight_papers_count: int = 1
+    # When true, users receive Learning Spotlight push notifications.
+    is_pushnotification_enabled: bool = True
     # GET returns admin full name; PATCH still returns UUID.
     updated_by: UUID | str | None
     updated_at: datetime | None
@@ -211,6 +235,36 @@ class RecommendationSettingsUpdateRequest(BaseModel):
     is_enabled: bool | None = None
     generation_frequency_days: int | None = Field(default=None, ge=1, le=365)
     max_recommendations: int | None = Field(default=None, ge=1, le=50)
+    cycle_configuration: dict[str, Any] | None = None
+    learning_spotlight_papers_count: int | None = Field(
+        default=None,
+        description="Number of daily Learning Spotlight papers (minimum 1, no upper limit).",
+    )
+    is_pushnotification_enabled: bool | None = Field(
+        default=None,
+        description="When true, users receive Learning Spotlight push notifications.",
+    )
+
+    @field_validator("learning_spotlight_papers_count")
+    @classmethod
+    def validate_papers_count(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise PydanticCustomError(
+                "greater_than_equal",
+                "must be at least 1",
+            )
+        return value
+
+    @field_validator("cycle_configuration")
+    @classmethod
+    def validate_cycle_cfg(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        from apps.learningspotlight.services.cycle_service import validate_cycle_configuration
+
+        validated = validate_cycle_configuration(value)
+        return {"cycle": [t.value for t in validated]}
+
 
 
 class FeatureFlagItem(BaseModel):
@@ -267,6 +321,20 @@ class FeatureFlagCreateRequest(BaseModel):
         return stripped or None
 
 
+class AdminActivityLogItem(BaseModel):
+    id: UUID
+    user_id: UUID
+    user_name: str | None = None
+    role: str
+    action: str
+    module: str
+    record_id: UUID | None = None
+    description: str | None = None
+    metadata: dict[str, Any] | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class FeatureFlagUpdateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -284,4 +352,66 @@ class FeatureFlagUpdateRequest(BaseModel):
         if not normalized:
             raise ValueError("key cannot be blank")
         return normalized
+
+
+from enum import Enum
+
+
+class TemplateStatusEnum(str, Enum):
+    active = "active"
+    inactive = "inactive"
+
+
+class TemplateCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    subject: str = Field(min_length=1, max_length=255)
+    body_html: str = Field(min_length=1)
+    status: TemplateStatusEnum = TemplateStatusEnum.active
+
+    @field_validator("name", "subject", "body_html")
+    @classmethod
+    def validate_non_empty(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("Field cannot be blank")
+        return value.strip()
+
+
+class TemplateUpdate(BaseModel):
+    template_id: UUID
+    subject: str | None = Field(default=None, max_length=255)
+    body_html: str | None = None
+    status: TemplateStatusEnum | None = None
+
+    @field_validator("subject", "body_html")
+    @classmethod
+    def validate_optional_non_empty(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("Field cannot be blank")
+        return value.strip() if value is not None else None
+
+
+class TemplateResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    subject: str
+    body_html: str
+    updated_by: UUID | None = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class TemplateListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    subject: str
+    updated_by: UUID | None = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
 

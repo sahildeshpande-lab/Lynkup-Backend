@@ -15,9 +15,10 @@ from apps.bulk_send.schemas import (
 )
 from apps.bulk_send.service import BulkSendService, get_bulk_send_service
 from common.exceptions import ApiError
+from common.pagination import OptionalPaginationParams
 from common.responses import error_response, success_response
 from core.database.session import get_session
-from core.security.auth import get_current_admin
+from apps.administration.dependencies import require_signed_admin
 
 router = APIRouter(prefix="/admin/bulk-send", tags=["Bulk Send Email"])
 
@@ -30,7 +31,7 @@ router = APIRouter(prefix="/admin/bulk-send", tags=["Bulk Send Email"])
 )
 async def upload_bulk_attachment(
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(require_signed_admin),
     service: BulkSendService = Depends(get_bulk_send_service),
 ) -> AttachmentUploadResponse:
     try:
@@ -53,10 +54,16 @@ async def upload_bulk_attachment(
     response_model=CreateCampaignResponse,
     status_code=status.HTTP_200_OK,
     summary="Create a bulk email campaign",
+    description=(
+        "Create and queue a bulk email campaign. Audience ``targets`` support "
+        "MAJOR, MINOR, EDUCATION_LEVEL, UNIVERSITY, COUNTRY, INTEREST, HASHTAG, and USER. "
+        "Filters across types are AND'd; values within a type are OR'd. "
+        "Optional ``is_alumni`` further restricts to alumni."
+    ),
 )
 async def create_bulk_campaign(
     payload: CreateBulkCampaignRequest,
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(require_signed_admin),
     db: AsyncSession = Depends(get_session),
     service: BulkSendService = Depends(get_bulk_send_service),
 ) -> CreateCampaignResponse:
@@ -79,14 +86,20 @@ async def create_bulk_campaign(
     summary="List bulk email campaigns",
 )
 async def list_bulk_campaigns(
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(require_signed_admin),
     db: AsyncSession = Depends(get_session),
     service: BulkSendService = Depends(get_bulk_send_service),
     page: int = Query(default=1, ge=1),
     pageSize: int = Query(default=20, ge=1, le=200),
+    search: str | None = Query(
+        default=None,
+        description="Search campaign name, email title (subject), or body",
+    ),
 ) -> CampaignListResponse:
     _ = current_user
-    data = await service.list_campaigns_page(db=db, page=page, page_size=pageSize)
+    data = await service.list_campaigns_page(
+        db=db, page=page, page_size=pageSize, search=search
+    )
     return success_response(
         "Bulk email campaigns fetched successfully.",
         data=data,
@@ -102,13 +115,24 @@ async def list_bulk_campaigns(
 )
 async def get_bulk_campaign(
     campaign_id: UUID,
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(require_signed_admin),
     db: AsyncSession = Depends(get_session),
     service: BulkSendService = Depends(get_bulk_send_service),
+    pagination: OptionalPaginationParams = Depends(),
+    search: str | None = Query(
+        default=None,
+        description="Search recipients by first_name or last_name",
+    ),
 ) -> CampaignDetailResponse:
     _ = current_user
     try:
-        data = await service.get_campaign_detail(db=db, campaign_id=campaign_id)
+        data = await service.get_campaign_detail(
+            db=db,
+            campaign_id=campaign_id,
+            page=pagination.page,
+            page_size=pagination.pageSize,
+            search=search,
+        )
     except ApiError as exc:
         return error_response(exc.message, response_cls=CampaignDetailResponse)
 

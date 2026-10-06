@@ -11,7 +11,7 @@ from core.auth.services import revoke_firebase_tokens
 logger = logging.getLogger(__name__)
 
 from .common_service import _now, _revoke_refresh_token_row
-from .device_otp_service import clear_session_email_verification, deactivate_push_for_user_installations
+from .device_otp_service import clear_session_otp_state, deactivate_push_for_user_installations
 
 async def logout(
     payload: LogoutRequest,
@@ -128,8 +128,8 @@ async def logout_all(current_user: User, db: AsyncSession) -> dict:
         await db.delete(installation)
 
     # Logout-all removes every trusted device, so the next sign-in requires OTP.
-    # Keep account status as-is (do not downgrade active → pending).
-    clear_session_email_verification(current_user)
+    # Keep account status and email_verified_at as-is (device trust is separate).
+    clear_session_otp_state(current_user)
     current_user.updated_at = _now()
     db.add(current_user)
 

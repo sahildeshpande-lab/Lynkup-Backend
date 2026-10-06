@@ -86,6 +86,28 @@ def test_patch_me_turns_off_onboarding(monkeypatch) -> None:
     assert body["data"]["user"]["is_onboarding_completed"] is True
 
 
+def test_patch_profile_remove_minor(monkeypatch) -> None:
+    from apps.profiles import services as profiles_services
+
+    async def _mock_update_my_profile_service(user, payload, db):
+        assert "minor" in payload.model_fields_set
+        assert payload.minor is None
+        return {"user": {"minor": None, "minor_id": None}}
+
+    monkeypatch.setattr(profiles_services, "update_my_profile_service", _mock_update_my_profile_service)
+
+    response = client.patch(
+        "/api/v1/updateprofile",
+        json={"minor": None},
+        headers={"Authorization": "Bearer access_test-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is True
+    assert body["data"]["user"]["minor"] is None
+
+
 def test_get_public_profile_returns_success() -> None:
     response = client.get("/api/v1/users/abc123@example.com")
 
@@ -113,7 +135,9 @@ def test_get_me_returns_user_payload(monkeypatch) -> None:
         assert target_user_id is None
         return {"user": {
             "email": "jane@example.com",
-            "is_onboarding_completed": False
+            "is_onboarding_completed": False,
+            "is_alumni": False,
+            "is_learning_spotlight_recommended": False,
         }}
 
     monkeypatch.setattr(profiles_services, "get_my_profile_service", _mock_get_my_profile_service)
@@ -125,6 +149,8 @@ def test_get_me_returns_user_payload(monkeypatch) -> None:
     assert body["status"] is True
     assert body["data"]["user"]["email"] == "jane@example.com"
     assert body["data"]["user"]["is_onboarding_completed"] is False
+    assert body["data"]["user"]["is_alumni"] is False
+    assert body["data"]["user"]["is_learning_spotlight_recommended"] is False
 
 
 def test_get_me_accepts_user_id_query(monkeypatch) -> None:
@@ -179,7 +205,7 @@ def test_delete_user_me_returns_success(monkeypatch) -> None:
     from apps.profiles import services as profiles_services
 
     async def _mock_delete_user_me(user, db):
-        return {"deleted": True, "status": "deleting", "deleted_at": datetime.now(timezone.utc).isoformat()}
+        return {"deleted": True, "status": "Deleting", "deleted_at": datetime.now(timezone.utc).isoformat()}
 
     monkeypatch.setattr(profiles_services, "delete_user_me", _mock_delete_user_me)
 
@@ -193,7 +219,7 @@ def test_delete_user_me_returns_success(monkeypatch) -> None:
     assert body["status"] is True
     assert body["message"] == "user deletion scheduled"
     assert body["data"]["deleted"] is True
-    assert body["data"]["status"] == "deleting"
+    assert body["data"]["status"] == "Deleting"
     assert "deleted_at" in body["data"]
 
 
@@ -213,6 +239,7 @@ def test_complete_onboarding_returns_success_payload(monkeypatch) -> None:
         banner_photo_key,
         db,
         invitation_code=None,
+        **_kwargs,
     ):
         assert education_level_id == 2
         assert country_id == "22222222-2222-2222-2222-222222222222"
@@ -241,3 +268,72 @@ def test_complete_onboarding_returns_success_payload(monkeypatch) -> None:
     assert body["status"] is True
     assert body["message"] == "onboarding completed"
     assert body["data"]["onboarded"] is True
+
+
+def test_complete_onboarding_allows_omitting_minor(monkeypatch) -> None:
+    from apps.profiles import services as profiles_services
+
+    async def _mock_complete_onboarding(
+        user,
+        bio,
+        major,
+        minor,
+        country_id,
+        university_id,
+        education_level_id,
+        academic_interests,
+        profile_photo_key,
+        banner_photo_key,
+        db,
+        invitation_code=None,
+        major_id=None,
+        minor_id=None,
+        graduation_date=None,
+    ):
+        assert major == "Computer Science"
+        assert minor is None
+        assert major_id is None
+        assert minor_id is None
+        return {"user": {"email": user.email}, "onboarded": True}
+
+    monkeypatch.setattr(profiles_services, "complete_onboarding", _mock_complete_onboarding)
+
+    response = client.post(
+        "/api/v1/users/onboarding",
+        json={
+            "country_id": "22222222-2222-2222-2222-222222222222",
+            "university_id": "11111111-1111-1111-1111-111111111111",
+            "major": "Computer Science",
+            "education_level_id": 2,
+            "academic_interests": ["Math", "CS"],
+        },
+        headers={"Authorization": "Bearer access_jane@example.com"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] is True
+    assert body["message"] == "onboarding completed"
+
+
+def test_onboarding_request_treats_blank_minor_as_omitted() -> None:
+    from apps.profiles.schemas import OnboardingRequest
+
+    payload = OnboardingRequest(
+        university_id="11111111-1111-1111-1111-111111111111",
+        major="Computer Science",
+        education_level_id=2,
+        academic_interests=["Math"],
+    )
+    assert payload.minor is None
+    assert payload.minor_id is None
+
+    blank = OnboardingRequest(
+        university_id="11111111-1111-1111-1111-111111111111",
+        major="Computer Science",
+        minor="   ",
+        education_level_id=2,
+        academic_interests=["Math"],
+    )
+    assert blank.minor is None
+

@@ -18,8 +18,6 @@ credentials/
 .env.*
 !.env.example
 
-*.p8
-
 .DS_Store
 Thumbs.db
 
@@ -31,5 +29,14 @@ tech_stackl
 .agents
 sonar-project.properties
 entrypoints/static/uploads/*
+storage/
+
 
 alembic/versions/*
+!alembic/versions/20261004_create_admin_signing_keys.py
+!alembic/versions/20261004_create_admin_sessions_and_signing_key_session_id.py
+apps/export/README.md
+.idea/*
+.idea
+
+celerybeat-schedule*

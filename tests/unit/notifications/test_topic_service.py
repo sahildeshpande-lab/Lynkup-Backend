@@ -145,8 +145,8 @@ async def test_sync_topics_subscribes_and_unsubscribes_diff_only(mock_db) -> Non
             "apps.notifications.services.topic_service.get_active_fcm_tokens_for_users",
             AsyncMock(return_value=tokens),
         ) as tokens_mock,
-        patch.object(TopicService, "subscribe", return_value={"successful_count": 2}) as sub,
-        patch.object(TopicService, "unsubscribe", return_value={"successful_count": 1}) as unsub,
+        patch.object(TopicService, "subscribe", AsyncMock(return_value={"successful_count": 2})) as sub,
+        patch.object(TopicService, "unsubscribe", AsyncMock(return_value={"successful_count": 1})) as unsub,
     ):
         result = await TopicService.sync_topics(
             db,
@@ -156,11 +156,11 @@ async def test_sync_topics_subscribes_and_unsubscribes_diff_only(mock_db) -> Non
         )
 
     tokens_mock.assert_awaited_once_with(db, [user_id])
-    sub.assert_called_once()
-    unsub.assert_called_once()
+    sub.assert_awaited_once()
+    unsub.assert_awaited_once()
 
-    subscribed = sub.call_args.args[1]
-    unsubscribed = unsub.call_args.args[1]
+    subscribed = sub.await_args.args[1]
+    unsubscribed = unsub.await_args.args[1]
     assert subscribed == {"university_stanford", "interest_ai"}
     assert unsubscribed == {"university_mit"}
     assert "major_computer_science" not in subscribed
@@ -178,8 +178,8 @@ async def test_sync_topics_no_op_when_unchanged(mock_db) -> None:
             "apps.notifications.services.topic_service.get_active_fcm_tokens_for_users",
             AsyncMock(),
         ) as tokens_mock,
-        patch.object(TopicService, "subscribe") as sub,
-        patch.object(TopicService, "unsubscribe") as unsub,
+        patch.object(TopicService, "subscribe", AsyncMock()) as sub,
+        patch.object(TopicService, "unsubscribe", AsyncMock()) as unsub,
     ):
         result = await TopicService.sync_topics(
             db,
@@ -189,12 +189,13 @@ async def test_sync_topics_no_op_when_unchanged(mock_db) -> None:
         )
 
     tokens_mock.assert_not_awaited()
-    sub.assert_not_called()
-    unsub.assert_not_called()
+    sub.assert_not_awaited()
+    unsub.assert_not_awaited()
     assert result["token_count"] == 0
 
 
-def test_subscribe_continues_after_topic_failure() -> None:
+@pytest.mark.asyncio
+async def test_subscribe_continues_after_topic_failure() -> None:
     response_ok = SimpleNamespace(success_count=2, failure_count=0)
 
     with (
@@ -205,8 +206,12 @@ def test_subscribe_continues_after_topic_failure() -> None:
             "apps.notifications.services.topic_service.messaging.subscribe_to_topic",
             side_effect=[RuntimeError("boom"), response_ok],
         ) as api,
+        patch(
+            "apps.notifications.services.topic_service.asyncio.to_thread",
+            new=AsyncMock(side_effect=lambda fn, *args: fn(*args)),
+        ),
     ):
-        result = TopicService.subscribe(
+        result = await TopicService.subscribe(
             ["token-1", "token-2"],
             {"topic_a", "topic_b"},
         )
@@ -214,6 +219,31 @@ def test_subscribe_continues_after_topic_failure() -> None:
     assert api.call_count == 2
     assert result["successful_count"] == 1
     assert result["failed_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_subscribe_uses_asyncio_to_thread() -> None:
+    response_ok = SimpleNamespace(success_count=1, failure_count=0)
+
+    with (
+        patch(
+            "apps.notifications.services.topic_service.initialize_firebase_app",
+        ),
+        patch(
+            "apps.notifications.services.topic_service.messaging.subscribe_to_topic",
+            return_value=response_ok,
+        ) as api,
+        patch(
+            "apps.notifications.services.topic_service.asyncio.to_thread",
+            new=AsyncMock(side_effect=lambda fn, *args: fn(*args)),
+        ) as to_thread,
+    ):
+        result = await TopicService.subscribe(["token-1"], {"topic_a"})
+
+    to_thread.assert_awaited()
+    assert to_thread.await_args.args[0] is api
+    assert result["successful_count"] == 1
+    assert result["failed_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -283,6 +313,7 @@ async def test_update_profile_syncs_topic_diff(mock_db) -> None:
         first_name="A",
         last_name="B",
         major="Old Major",
+        major_id=None,
         minor=None,
         bio=None,
         university_id=None,
@@ -293,13 +324,19 @@ async def test_update_profile_syncs_topic_diff(mock_db) -> None:
         completeness_score=0,
     )
     payload = UpdateProfileRequest(major="New Major")
+    catalog_row = SimpleNamespace(id=1, name="New Major", is_active=True)
+    execute_results = [
+        SimpleNamespace(scalar_one_or_none=lambda: profile),
+        SimpleNamespace(scalar_one_or_none=lambda: catalog_row),
+    ]
+
+    async def _execute(_statement):
+        if execute_results:
+            return execute_results.pop(0)
+        return SimpleNamespace(scalar_one_or_none=lambda: catalog_row)
 
     with (
-        patch.object(
-            db,
-            "execute",
-            AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: profile)),
-        ),
+        patch.object(db, "execute", AsyncMock(side_effect=_execute)),
         patch.object(svc, "calculate_completeness_score", AsyncMock(return_value=70)),
         patch.object(svc, "get_my_profile_service", AsyncMock(return_value={"user": {}})),
         patch(
@@ -371,6 +408,7 @@ async def test_update_profile_continues_when_topic_sync_fails(mock_db) -> None:
         first_name="A",
         last_name="B",
         major="CS",
+        major_id=None,
         minor=None,
         bio=None,
         university_id=None,
@@ -381,13 +419,19 @@ async def test_update_profile_continues_when_topic_sync_fails(mock_db) -> None:
         completeness_score=0,
     )
     payload = UpdateProfileRequest(major="Math")
+    catalog_row = SimpleNamespace(id=2, name="Math", is_active=True)
+    execute_results = [
+        SimpleNamespace(scalar_one_or_none=lambda: profile),
+        SimpleNamespace(scalar_one_or_none=lambda: catalog_row),
+    ]
+
+    async def _execute(_statement):
+        if execute_results:
+            return execute_results.pop(0)
+        return SimpleNamespace(scalar_one_or_none=lambda: catalog_row)
 
     with (
-        patch.object(
-            db,
-            "execute",
-            AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: profile)),
-        ),
+        patch.object(db, "execute", AsyncMock(side_effect=_execute)),
         patch.object(svc, "calculate_completeness_score", AsyncMock(return_value=70)),
         patch.object(
             svc,
@@ -415,7 +459,7 @@ async def test_admin_update_profile_syncs_topics(mock_db) -> None:
 
     db = mock_db()
     user_id = uuid4()
-    user = SimpleNamespace(id=user_id)
+    user = SimpleNamespace(id=user_id, email="user@example.com")
     profile = SimpleNamespace(
         user_id=user_id,
         first_name="A",
@@ -440,9 +484,10 @@ async def test_admin_update_profile_syncs_topics(mock_db) -> None:
     async def _execute(_statement):
         if execute_results:
             return execute_results.pop(0)
-        return SimpleNamespace(scalar_one_or_none=lambda: profile)
+        return SimpleNamespace(scalar_one_or_none=lambda: None)
 
     db.execute = AsyncMock(side_effect=_execute)
+
 
     with (
         patch.object(svc, "calculate_completeness_score", AsyncMock(return_value=70)),
@@ -501,3 +546,290 @@ async def test_sync_user_topics_builds_new_and_diffs(mock_db) -> None:
         new_topics={"university_stanford", "major_cs"},
     )
     assert result["token_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_update_profile_interest_change_uses_refresh(mock_db) -> None:
+    from apps.profiles.schemas import UpdateProfileRequest
+    from apps.profiles.services import profile_service as svc
+
+    db = mock_db()
+    user = SimpleNamespace(id=uuid4())
+    profile = SimpleNamespace(
+        user_id=user.id,
+        first_name="A",
+        last_name="B",
+        major="CS",
+        major_id=1,
+        minor=None,
+        bio=None,
+        university_id=None,
+        edu_level=None,
+        profile_interests_id=[2084],
+        profile_photo_url=None,
+        banner_photo_url=None,
+        completeness_score=0,
+    )
+    payload = UpdateProfileRequest(academic_interests=["218", "2084"])
+
+    with (
+        patch.object(
+            db,
+            "execute",
+            AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: profile)),
+        ),
+        patch.object(svc, "calculate_completeness_score", AsyncMock(return_value=70)),
+        patch.object(svc, "get_my_profile_service", AsyncMock(return_value={"user": {}})),
+        patch(
+            "apps.profiles.services.profile_service._resolve_academic_interest_ids",
+            AsyncMock(return_value=[218, 2084]),
+        ),
+        patch(
+            "apps.notifications.services.topic_service.TopicService.capture_topics",
+            AsyncMock(return_value={"interest_old"}),
+        ),
+        patch(
+            "apps.notifications.services.topic_service.TopicService.refresh_user_topic_subscriptions",
+            AsyncMock(return_value={}),
+        ) as refresh,
+        patch(
+            "apps.notifications.services.topic_service.TopicService.sync_user_topics",
+            AsyncMock(return_value={}),
+        ) as sync,
+    ):
+        await svc.update_my_profile_service(user=user, payload=payload, db=db)
+
+    refresh.assert_awaited_once()
+    assert refresh.await_args.kwargs["old_topics"] == {"interest_old"}
+    sync.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_topics_reuses_provided_tokens_without_query(mock_db) -> None:
+    db = mock_db()
+    user_id = uuid4()
+    tokens = ["token-a"]
+
+    with (
+        patch(
+            "apps.notifications.services.topic_service.get_active_fcm_tokens_for_users",
+            AsyncMock(),
+        ) as tokens_mock,
+        patch.object(TopicService, "subscribe", AsyncMock(return_value={"successful_count": 1})) as sub,
+        patch.object(TopicService, "unsubscribe", AsyncMock()) as unsub,
+    ):
+        result = await TopicService.sync_topics(
+            db,
+            user_id,
+            old_topics={"major_cs"},
+            new_topics={"major_cs", "interest_ai"},
+            tokens=tokens,
+        )
+
+    tokens_mock.assert_not_awaited()
+    sub.assert_awaited_once_with(tokens, {"interest_ai"})
+    unsub.assert_not_awaited()
+    assert result["token_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_login_otp_subscribes_once_without_sync_topics(mock_db) -> None:
+    """old_topics=None (login/OTP): force-subscribe once; never call sync_topics."""
+    db = mock_db()
+    user_id = uuid4()
+    profile = SimpleNamespace(user_id=user_id)
+    expected = {"interest_algorithm", "major_cs", "university_mit"}
+
+    with (
+        patch.object(
+            TopicService,
+            "build_topics",
+            AsyncMock(return_value=expected),
+        ) as build,
+        patch.object(
+            TopicService,
+            "sync_topics",
+            AsyncMock(),
+        ) as sync,
+        patch(
+            "apps.notifications.services.topic_service.get_active_fcm_tokens_for_users",
+            AsyncMock(return_value=["token-db"]),
+        ) as tokens_mock,
+        patch.object(
+            TopicService,
+            "subscribe",
+            AsyncMock(return_value={"ok": True}),
+        ) as subscribe,
+    ):
+        result = await TopicService.refresh_user_topic_subscriptions(
+            db,
+            user_id,
+            profile,
+            fcm_token="login-device-token",
+        )
+
+    build.assert_awaited_once()
+    tokens_mock.assert_awaited_once_with(db, [user_id])
+    sync.assert_not_awaited()
+    subscribe.assert_awaited_once_with(
+        ["token-db", "login-device-token"],
+        expected,
+    )
+    assert result["force_subscribe"] == {"ok": True}
+    assert result["topics_to_subscribe"] == sorted(expected)
+    assert result["topics_to_unsubscribe"] == []
+    assert result["token_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_login_after_logout_resubscribes_all_topics(mock_db) -> None:
+    """After logout unsubscribes, next login (old_topics=None) resubscribes all."""
+    db = mock_db()
+    user_id = uuid4()
+    profile = SimpleNamespace(user_id=user_id)
+    expected = {"country_india", "major_cs"}
+
+    with (
+        patch.object(
+            TopicService,
+            "build_topics",
+            AsyncMock(return_value=expected),
+        ),
+        patch.object(TopicService, "sync_topics", AsyncMock()) as sync,
+        patch(
+            "apps.notifications.services.topic_service.get_active_fcm_tokens_for_users",
+            AsyncMock(return_value=["token-1"]),
+        ),
+        patch.object(TopicService, "subscribe", AsyncMock(return_value={"ok": True})) as subscribe,
+    ):
+        result = await TopicService.refresh_user_topic_subscriptions(
+            db,
+            user_id,
+            profile,
+        )
+
+    sync.assert_not_awaited()
+    subscribe.assert_awaited_once_with(["token-1"], expected)
+    assert result["force_subscribe"] == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_refresh_profile_update_uses_sync_topics_diff_only(mock_db) -> None:
+    """old_topics provided: sync_topics handles diff; no extra force-subscribe."""
+    db = mock_db()
+    user_id = uuid4()
+    profile = SimpleNamespace(user_id=user_id)
+    new_topics = {"interest_algorithm", "major_cs"}
+    old_topics = {"major_cs"}
+    tokens = ["token-1"]
+
+    with (
+        patch.object(
+            TopicService,
+            "build_topics",
+            AsyncMock(return_value=new_topics),
+        ),
+        patch.object(
+            TopicService,
+            "sync_topics",
+            AsyncMock(return_value={"token_count": 1, "topics_to_subscribe": ["interest_algorithm"]}),
+        ) as sync,
+        patch(
+            "apps.notifications.services.topic_service.get_active_fcm_tokens_for_users",
+            AsyncMock(return_value=tokens),
+        ) as tokens_mock,
+        patch.object(TopicService, "subscribe", AsyncMock()) as subscribe,
+    ):
+        result = await TopicService.refresh_user_topic_subscriptions(
+            db,
+            user_id,
+            profile,
+            old_topics=old_topics,
+        )
+
+    tokens_mock.assert_awaited_once_with(db, [user_id])
+    sync.assert_awaited_once_with(
+        db,
+        user_id,
+        old_topics=old_topics,
+        new_topics=new_topics,
+        tokens=tokens,
+    )
+    subscribe.assert_not_awaited()
+    assert "force_subscribe" not in result
+    assert result["token_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_includes_login_fcm_token_when_missing_from_db(mock_db) -> None:
+    db = mock_db()
+    user_id = uuid4()
+    profile = SimpleNamespace(user_id=user_id)
+
+    with (
+        patch.object(
+            TopicService,
+            "build_topics",
+            AsyncMock(return_value={"interest_algorithm"}),
+        ),
+        patch.object(
+            TopicService,
+            "sync_topics",
+            AsyncMock(),
+        ) as sync,
+        patch(
+            "apps.notifications.services.topic_service.get_active_fcm_tokens_for_users",
+            AsyncMock(return_value=[]),
+        ),
+        patch.object(
+            TopicService,
+            "subscribe",
+            AsyncMock(return_value={"ok": True}),
+        ) as subscribe,
+    ):
+        result = await TopicService.refresh_user_topic_subscriptions(
+            db,
+            user_id,
+            profile,
+            fcm_token="login-device-token",
+        )
+
+    sync.assert_not_awaited()
+    subscribe.assert_awaited_once_with(["login-device-token"], {"interest_algorithm"})
+    assert result["force_subscribe"] == {"ok": True}
+    assert result["token_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_login_skips_subscribe_when_no_tokens(mock_db, caplog) -> None:
+    db = mock_db()
+    user_id = uuid4()
+    profile = SimpleNamespace(user_id=user_id)
+
+    with (
+        patch.object(
+            TopicService,
+            "build_topics",
+            AsyncMock(return_value={"major_cs"}),
+        ),
+        patch.object(TopicService, "sync_topics", AsyncMock()) as sync,
+        patch(
+            "apps.notifications.services.topic_service.get_active_fcm_tokens_for_users",
+            AsyncMock(return_value=[]),
+        ),
+        patch.object(TopicService, "subscribe", AsyncMock()) as subscribe,
+        caplog.at_level("INFO"),
+    ):
+        result = await TopicService.refresh_user_topic_subscriptions(
+            db,
+            user_id,
+            profile,
+        )
+
+    sync.assert_not_awaited()
+    subscribe.assert_not_awaited()
+    assert "force_subscribe" not in result
+    assert result["token_count"] == 0
+    assert any(
+        "skipped force-subscribe" in record.message for record in caplog.records
+    )

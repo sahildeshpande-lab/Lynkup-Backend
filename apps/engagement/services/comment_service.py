@@ -19,6 +19,7 @@ from apps.engagement.repositories.comment_repository import (
     get_comment_for_update,
     increment_reply_count,
     mark_comment_deleted,
+    update_comment_text,
     count_top_level_comments,
     update_post_comment_count,
     post_exists,
@@ -33,6 +34,7 @@ from apps.engagement.schemas import (
     CommentListResponse,
     CommentResponse,
     CreateCommentRequest,
+    EditCommentRequest,
     DeleteCommentRequest,
 )
 from apps.engagement.services.author_service import format_engagement_author
@@ -57,18 +59,22 @@ def _format_comment(
     current_user_id: UUID,
     replies: list[CommentData] | None = None,
 ) -> CommentData:
+    is_author = comment.user_id == current_user_id
+    can_edit_flag = is_author and not comment.is_deleted
     return CommentData(
         id=comment.id,
         post_id=comment.post_id,
         parent_comment_id=comment.parent_comment_id,
         level=comment.level,
         is_deleted=comment.is_deleted,
+        is_edited=bool(getattr(comment, "is_edited", False)),
         like_count=comment.like_count,
         reply_count=comment.reply_count,
         comment_text=comment.comment_text,
         author=author,
         user_reaction=user_reaction,
-        can_delete_comment=comment.user_id == current_user_id,
+        can_edit=can_edit_flag,
+        can_delete=is_author,
         created_at=comment.created_at,
         updated_at=comment.updated_at,
         replies=replies or [],
@@ -136,8 +142,9 @@ async def create_post_comment(
 
     from apps.feed.db_models import Post
     from sqlmodel import select
+
     post_author_res = (await db.execute(select(Post.author_user_id).where(Post.id == post_id))).first()
-    author_id = post_author_res[0] if post_author_res else None
+    author_id = post_author_res[0] if post_author_res and isinstance(post_author_res[0], (UUID, str)) else None
     if author_id is not None:
         from common.user_visibility import check_post_engagement_allowed
         await check_post_engagement_allowed(db, user_id, author_id)
@@ -159,6 +166,11 @@ async def create_post_comment(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Parent comment does not belong to this post",
             )
+        if parent.is_deleted:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot reply to a deleted comment",
+            )
         if parent.level >= settings.comment_max_depth:
             return error_response(
                 f"Maximum nesting depth of {settings.comment_max_depth} exceeded",
@@ -179,6 +191,16 @@ async def create_post_comment(
             await increment_reply_count(db, parent.id)
         elif payload.parent_comment_id is None:
             await update_post_comment_count(db, post_id, 1)
+
+        from common.enums import UserActivityLogType
+        from apps.analytics.services import add_user_activity_log
+
+        await add_user_activity_log(
+            db,
+            user_id,
+            UserActivityLogType.CREATE_COMMENT,
+            commit=False,
+        )
         await db.commit()
         await db.refresh(comment)
         from apps.recommendations.services.engagement_keyword_service import (
@@ -347,6 +369,69 @@ async def delete_comment(
             comment,
             author=_format_author(profile, university),
             user_reaction=None,
+            current_user_id=user_id,
+        ),
+        response_cls=CommentResponse,
+    )
+
+
+async def edit_post_comment(
+    db: AsyncSession,
+    user_id: UUID,
+    payload: EditCommentRequest,
+) -> CommentResponse:
+    if not await post_exists(db, payload.post_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
+
+    comment = await get_comment_for_update(db, payload.comment_id)
+    if comment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found")
+    if comment.post_id != payload.post_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Comment does not belong to this post",
+        )
+    if comment.user_id != user_id:
+        return error_response(
+            "Not the authenticated user",
+            response_cls=CommentResponse,
+        )
+    if comment.is_deleted:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot edit a deleted comment",
+        )
+
+    text = payload.comment_text.strip()
+    if not text:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Comment text is required",
+        )
+
+    try:
+        await update_comment_text(db, comment, text)
+        await db.commit()
+        await db.refresh(comment)
+    except Exception:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to edit comment",
+        )
+
+    profiles = await fetch_profiles_by_user_ids(db, [comment.user_id])
+    profile, university = profiles.get(comment.user_id, (None, None))
+
+    reactions_raw = await fetch_user_comment_reactions(db, user_id, [comment.id])
+    user_reaction = format_user_reaction(reactions_raw.get(comment.id))
+
+    return success_response(
+        "Comment edited successfully",
+        _format_comment(
+            comment,
+            author=_format_author(profile, university),
+            user_reaction=user_reaction,
             current_user_id=user_id,
         ),
         response_cls=CommentResponse,

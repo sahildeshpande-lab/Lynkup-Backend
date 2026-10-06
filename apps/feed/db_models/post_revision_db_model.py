@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, Column, DateTime, JSON
+from sqlalchemy import Boolean, Column, DateTime, Index, JSON
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel, Relationship
 
@@ -14,6 +14,13 @@ def utc_now() -> datetime:
 
 class PostRevision(SQLModel, table=True):
     __tablename__ = "post_revisions"
+    __table_args__ = (
+        Index(
+            "ix_post_revisions_post_id_triggered_moderation_review",
+            "post_id",
+            "triggered_moderation_review",
+        ),
+    )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True, index=True)
     post_id: UUID = Field(foreign_key="posts.id", nullable=False, index=True)

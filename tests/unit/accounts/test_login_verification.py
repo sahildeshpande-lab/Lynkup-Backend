@@ -2,6 +2,7 @@ import pytest
 import pytest_asyncio
 import uuid
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 from sqlmodel import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from core.database.session import async_session_factory
@@ -80,7 +81,7 @@ async def test_login_active_user(db_session: AsyncSession):
     assert response.message == "Login successful"
     assert response.data["emailSent"] is False
     assert response.data["user"]["email"] == email
-    assert response.data["user"]["status"] == "active"
+    assert response.data["user"]["status"] == "Active"
 
 
 @pytest.mark.asyncio
@@ -89,7 +90,7 @@ async def test_login_active_user_new_device(db_session: AsyncSession, monkeypatc
     from apps.accounts.services import _hash_password
     from apps.accounts.schemas import LoginRequest
     sent_emails = []
-    async def mock_send_otp_email(to_email, otp, otp_purpose):
+    async def mock_send_otp_email(to_email, otp, otp_purpose, first_name=None):
         sent_emails.append((to_email, otp, otp_purpose))
         return True
     monkeypatch.setattr("apps.accounts.services.device_otp_service.send_otp_email", mock_send_otp_email)
@@ -148,7 +149,7 @@ async def test_login_unverified_device_reuses_otp_without_resending(db_session: 
 
     sent_emails = []
 
-    async def mock_send_otp_email(to_email, otp, otp_purpose):
+    async def mock_send_otp_email(to_email, otp, otp_purpose, first_name=None):
         sent_emails.append((to_email, otp, otp_purpose))
         return True
 
@@ -228,7 +229,7 @@ async def test_verify_otp_marks_device_verified_and_subsequent_login_bypasses(db
 
     sent_emails = []
 
-    async def mock_send_otp_email(to_email, otp, otp_purpose):
+    async def mock_send_otp_email(to_email, otp, otp_purpose, first_name=None):
         sent_emails.append((to_email, otp, otp_purpose))
         return True
 
@@ -321,7 +322,7 @@ async def test_resend_otp_replaces_previous_otp(db_session: AsyncSession, monkey
 
     sent_emails = []
 
-    async def mock_send_otp_email(to_email, otp, otp_purpose):
+    async def mock_send_otp_email(to_email, otp, otp_purpose, first_name=None):
         sent_emails.append((to_email, otp, otp_purpose))
         return True
 
@@ -420,7 +421,7 @@ async def test_login_same_device_strips_device_id(db_session: AsyncSession):
 
     assert response.status is True
     assert response.message == "Login successful"
-    assert response.data["user"]["status"] == "active"
+    assert response.data["user"]["status"] == "Active"
 
 
 @pytest.mark.asyncio
@@ -431,7 +432,7 @@ async def test_login_after_verify_otp_does_not_revert_to_pending(db_session: Asy
 
     sent_emails = []
 
-    async def mock_send_otp_email(to_email, otp, otp_purpose):
+    async def mock_send_otp_email(to_email, otp, otp_purpose, first_name=None):
         sent_emails.append((to_email, otp, otp_purpose))
         return True
 
@@ -507,7 +508,7 @@ async def test_login_after_verify_otp_does_not_revert_to_pending(db_session: Asy
 
     login_after_verify = await login(payload=login_payload, firebase_user=firebase_claims, db=db_session)
     assert login_after_verify.status is True
-    assert login_after_verify.data["user"]["status"] == "active"
+    assert login_after_verify.data["user"]["status"] == "Active"
     assert login_after_verify.data["needsOtp"] is False
 
     final_user = await db_session.get(User, user.id)
@@ -531,7 +532,7 @@ async def test_login_pending_user_sends_otp(db_session: AsyncSession, monkeypatc
     from apps.accounts.services import _hash_password
     from apps.accounts.schemas import LoginRequest
     sent_emails = []
-    async def mock_send_otp_email(to_email, otp, otp_purpose):
+    async def mock_send_otp_email(to_email, otp, otp_purpose, first_name=None):
         sent_emails.append((to_email, otp, otp_purpose))
         return True
     monkeypatch.setattr("apps.accounts.services.device_otp_service.send_otp_email", mock_send_otp_email)
@@ -612,7 +613,7 @@ async def test_logout_same_device_does_not_require_otp_again(db_session: AsyncSe
 
     sent_emails = []
 
-    async def mock_send_otp_email(to_email, otp, otp_purpose):
+    async def mock_send_otp_email(to_email, otp, otp_purpose, first_name=None):
         sent_emails.append((to_email, otp, otp_purpose))
         return True
 
@@ -751,10 +752,12 @@ async def test_email_queue_and_cron_worker(db_session: AsyncSession, monkeypatch
     await db_session.execute(delete(TransactionalEmailLog))
     await db_session.commit()
 
-    # Mock SendGrid call
+    # Mock SendGrid call (signature must match _actually_send_email_via_sendgrid)
     sent_grid_calls = []
-    async def mock_actually_send(to_email, subject, html_body, from_email):
-        sent_grid_calls.append((to_email, subject, html_body, from_email))
+    async def mock_actually_send(
+        to_email, subject, html_body, from_email, attachment_path=None, **kwargs
+    ):
+        sent_grid_calls.append((to_email, subject, html_body, from_email, attachment_path))
         return True
     monkeypatch.setattr("core.email_service._actually_send_email_via_sendgrid", mock_actually_send)
 
@@ -871,6 +874,97 @@ async def test_verify_otp_skips_success_email_when_onboarding_completed(db_sessi
 
 
 @pytest.mark.asyncio
+async def test_verify_otp_skips_success_email_after_logout_all_device_retrust(
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    from apps.accounts.services import _hash_password, login, logout_all, verify_otp
+    from apps.accounts.schemas import LoginRequest, OtpVerifyRequest
+    from apps.accounts.db_models import UserInstallation
+
+    sent_success_emails = []
+
+    async def mock_send_verification_success_email(*args, **kwargs):
+        sent_success_emails.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(
+        "apps.accounts.services.auth_service.send_verification_success_email",
+        mock_send_verification_success_email,
+    )
+    monkeypatch.setattr("apps.accounts.services.device_otp_service.send_otp_email", AsyncMock(return_value=True))
+
+    uid = str(uuid.uuid4())
+    email = f"retrust_{uid[:8]}@example.com"
+    otp = "4321"
+    user = User(
+        firebase_uid=uid,
+        email=email,
+        password_hash=_hash_password("ValidPassword123"),
+        status=UserStatus.pending,
+        onboarding_status="not_started",
+        email_otp=otp,
+        email_otp_created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    db_session.add(user)
+    await db_session.commit()
+
+    first_verify = await verify_otp(
+        payload=OtpVerifyRequest(email=email, otp=otp, firebaseId="valid-id-token"),
+        firebase_user={"uid": uid, "email": email},
+        db=db_session,
+    )
+    assert first_verify.status is True
+    assert len(sent_success_emails) == 1
+
+    db_session.add(
+        UserInstallation(
+            user_id=user.id,
+            device_id="device-retrust",
+            platform=None,
+            app_version=None,
+            installed_at=datetime.now(timezone.utc),
+            last_active_at=datetime.now(timezone.utc),
+            is_active=True,
+            is_device_verified=True,
+            verified_at=datetime.now(timezone.utc),
+        )
+    )
+    await db_session.commit()
+
+    await logout_all(current_user=user, db=db_session)
+
+    refreshed = await db_session.get(User, user.id)
+    assert refreshed.email_verified_at is not None
+
+    login_response = await login(
+        payload=LoginRequest(
+            email=email,
+            password="ValidPassword123",
+            firebaseId="valid-id-token",
+            device_id="device-retrust",
+        ),
+        firebase_user={"uid": uid, "email": email},
+        db=db_session,
+    )
+    assert login_response.status is True
+    assert login_response.data["needsOtp"] is True
+
+    refreshed = await db_session.get(User, user.id)
+    retrust_otp = refreshed.email_otp
+
+    second_verify = await verify_otp(
+        payload=OtpVerifyRequest(email=email, otp=retrust_otp, firebaseId="valid-id-token"),
+        firebase_user={"uid": uid, "email": email},
+        db=db_session,
+    )
+    assert second_verify.status is True
+    assert len(sent_success_emails) == 1
+
+
+@pytest.mark.asyncio
 async def test_verify_email_returns_no_template_when_onboarding_completed(db_session: AsyncSession):
     from apps.accounts.services import verify_email
 
@@ -930,3 +1024,78 @@ async def test_refresh_token_never_expires(db_session: AsyncSession):
     
     decoded = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     assert "exp" not in decoded
+
+
+@pytest.mark.asyncio
+async def test_login_requires_otp_when_email_unverified_but_device_trusted(
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    from apps.accounts.services import _hash_password
+    from apps.accounts.schemas import LoginRequest
+    from apps.accounts.db_models import UserInstallation
+
+    sent_emails = []
+
+    async def mock_send_otp_email(to_email, otp, otp_purpose, first_name=None):
+        sent_emails.append((to_email, otp, otp_purpose))
+        return True
+
+    monkeypatch.setattr(
+        "apps.accounts.services.device_otp_service.send_otp_email",
+        mock_send_otp_email,
+    )
+
+    uid = str(uuid.uuid4())
+    email = f"unverified_email_{uid[:8]}@example.com"
+    user = User(
+        firebase_uid=uid,
+        email=email,
+        password_hash=_hash_password("ValidPassword123"),
+        status=UserStatus.active,
+        onboarding_status="completed",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        email_verified_at=None,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(
+        UserInstallation(
+            user_id=user.id,
+            device_id="trusted-device",
+            platform=None,
+            app_version=None,
+            installed_at=datetime.now(timezone.utc),
+            last_active_at=datetime.now(timezone.utc),
+            is_active=True,
+            is_device_verified=True,
+            verified_at=datetime.now(timezone.utc),
+        )
+    )
+    await db_session.commit()
+
+    login_payload = LoginRequest(
+        email=email,
+        password="ValidPassword123",
+        firebaseId="valid-id-token",
+        device_id="trusted-device",
+    )
+    firebase_claims = {"uid": uid, "email": email}
+
+    response = await login(payload=login_payload, firebase_user=firebase_claims, db=db_session)
+    assert response.status is True
+    assert response.data["needsOtp"] is True
+    assert response.data["emailSent"] is True
+    assert response.data["isDeviceVerified"] is False
+    assert len(sent_emails) == 1
+
+    installation = (
+        await db_session.execute(
+            select(UserInstallation).where(
+                UserInstallation.user_id == user.id,
+                UserInstallation.device_id == "trusted-device",
+            )
+        )
+    ).scalar_one()
+    assert installation.is_device_verified is False

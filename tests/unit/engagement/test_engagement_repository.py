@@ -25,13 +25,15 @@ async def test_fetch_post_engagement_flags_batches_reactions_reposts_and_bookmar
     post_a = uuid.uuid4()
     post_b = uuid.uuid4()
     post_c = uuid.uuid4()
-    profile_id = uuid.uuid4()
 
     db = mock_db(
-        FakeScalarResult(values=[(post_a, ReactionType.like)]),
-        FakeScalarResult(values=[post_c]),
-        scalar_result(profile_id),
-        FakeScalarResult(values=[post_b]),
+        FakeScalarResult(
+            values=[
+                (post_a, ReactionType.like, False, False),
+                (post_b, None, False, True),
+                (post_c, None, True, False),
+            ]
+        ),
     )
 
     flags = await fetch_post_engagement_flags(db, user_id, [post_a, post_b, post_c])
@@ -40,16 +42,25 @@ async def test_fetch_post_engagement_flags_batches_reactions_reposts_and_bookmar
     assert post_a in flags.liked_post_ids
     assert post_b in flags.reposted_post_ids
     assert post_c in flags.bookmarked_post_ids
-    assert db.execute.await_count == 4
+    assert db.execute.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_fetch_post_engagement_flags_skips_reposts_without_profile(mock_db, scalar_result):
+async def test_fetch_post_engagement_flags_excludes_deleted_reposts(mock_db):
+    post_id = uuid.uuid4()
     db = mock_db(
-        FakeScalarResult(values=[]),
-        FakeScalarResult(values=[]),
-        scalar_result(None),
+        FakeScalarResult(values=[(post_id, None, False, False)]),
     )
-    flags = await fetch_post_engagement_flags(db, uuid.uuid4(), [uuid.uuid4()])
+    flags = await fetch_post_engagement_flags(db, uuid.uuid4(), [post_id])
+    assert post_id not in flags.reposted_post_ids
+
+
+@pytest.mark.asyncio
+async def test_fetch_post_engagement_flags_skips_reposts_without_profile(mock_db):
+    post_id = uuid.uuid4()
+    db = mock_db(
+        FakeScalarResult(values=[(post_id, None, False, False)]),
+    )
+    flags = await fetch_post_engagement_flags(db, uuid.uuid4(), [post_id])
     assert flags.reposted_post_ids == frozenset()
-    assert db.execute.await_count == 3
+    assert db.execute.await_count == 1

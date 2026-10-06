@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import Any
 from fastapi import HTTPException, status, UploadFile
 from botocore.exceptions import ClientError
@@ -31,15 +32,10 @@ def get_media_url(key: str) -> str:
     """
     if not key:
         return ""
-    if key.startswith("http://") or key.startswith("https://"):
-        return key
-    
-    clean_key = key.lstrip("/")
-    image_endpoint = (config.settings.S3_FILE_ENDPOINT
-            or config.settings.S3_CDN_ENDPOINT or "").rstrip("/")
-    if image_endpoint:
-        return f"{image_endpoint}/{clean_key}"
-    return f"/{clean_key}"
+    public_url = config.public_media_url(key)
+    if public_url:
+        return public_url
+    return f"/{key.lstrip('/')}"
 
 
 def delete_file(key: str) -> None:
@@ -128,7 +124,7 @@ class StorageService:
                 Bucket=bucket,
                 Key=key,
                 Body=content,
-                ContentType=content_type,
+                ContentType=config.normalize_object_content_type(content_type, content),
                 ACL="public-read",
             )
                
@@ -168,8 +164,9 @@ class StorageService:
         filename: str | None = None,
     ) -> dict[str, Any]:
         """
-        Uploads banner image under banners/{banner_id}.{ext}.
-        Replaces existing file if present.
+        Uploads banner image under banners/{banner_id}/{uuid}.{ext}.
+        A new key is used on every upload so CDN/browser caches do not keep
+        serving a previous file at the same URL.
         """
         content, extracted_ct, extracted_fn = await cls._extract_content(file)
         final_ct = content_type or extracted_ct or "image/png"
@@ -178,10 +175,10 @@ class StorageService:
         validate_image(content, final_ct)
 
         ext = get_extension(final_ct, final_fn)
-        key = f"banners/{banner_id}.{ext}"
+        key = f"banners/{banner_id}/{uuid.uuid4()}.{ext}"
 
         cls.upload_file(content=content, key=key, content_type=final_ct)
-        url = get_media_url(key)
+        url = config.generate_profile_image_url(key)
 
         return {
             "status": True,
@@ -201,8 +198,9 @@ class StorageService:
         filename: str | None = None,
     ) -> dict[str, Any]:
         """
-        Uploads profile image under profiles/{user_id}.{ext}.
-        Replaces existing file if present.
+        Uploads profile image under profiles/{user_id}/{uuid}.{ext}.
+        A new key is used on every upload so CDN/browser caches do not keep
+        serving a previous file at the same URL.
         """
         content, extracted_ct, extracted_fn = await cls._extract_content(file)
         final_ct = content_type or extracted_ct or "image/png"
@@ -211,10 +209,10 @@ class StorageService:
         validate_image(content, final_ct)
 
         ext = get_extension(final_ct, final_fn)
-        key = f"profiles/{user_id}.{ext}"
+        key = f"profiles/{user_id}/{uuid.uuid4()}.{ext}"
 
         cls.upload_file(content=content, key=key, content_type=final_ct)
-        url = get_media_url(key)
+        url = config.generate_profile_image_url(key)
 
         return {
             "status": True,

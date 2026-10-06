@@ -9,20 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.feed.db_models import PostRevision
 
 
-async def get_latest_post_revision(
-    db: AsyncSession,
-    post_id: UUID,
-) -> PostRevision | None:
-    """Return the newest revision for ``post_id``, or ``None`` if none exist."""
-    stmt = (
-        select(PostRevision)
-        .where(PostRevision.post_id == post_id)
-        .order_by(PostRevision.created_at.desc(), PostRevision.id.desc())
-        .limit(1)
-    )
-    return (await db.execute(stmt)).scalar_one_or_none()
-
-
 async def get_processing_events(
     db: AsyncSession,
     post_id: UUID,
@@ -41,6 +27,20 @@ async def get_processing_events(
         .order_by(PostRevision.created_at.desc(), PostRevision.id.desc())
     )
     return list((await db.execute(stmt)).scalars().all())
+
+
+async def get_latest_post_revision(
+    db: AsyncSession,
+    post_id: UUID,
+) -> PostRevision | None:
+    """Return the current/latest revision for a post (created_at DESC, id DESC)."""
+    stmt = (
+        select(PostRevision)
+        .where(PostRevision.post_id == post_id)
+        .order_by(PostRevision.created_at.desc(), PostRevision.id.desc())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
 
 
 async def posts_with_triggered_moderation_review(

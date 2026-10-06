@@ -10,12 +10,14 @@ from entrypoints.api import app
 from core.database.session import get_session
 from core.security.auth import get_current_app_user, get_current_moderator, get_current_moderator_or_viewer
 from apps.accounts.db_models import User
+from common.enums import ReportedEntityOrder, ReportedEntitySort
 from common.schemas import ApiResponse
 from apps.report.schemas import (
     ReportListResponse,
     ReportResponse,
     ReportedEntityListResponse,
 )
+from apps.administration.dependencies import require_signed_moderator, require_signed_moderator_or_viewer
 
 client = TestClient(app)
 
@@ -48,14 +50,18 @@ def setup_module() -> None:
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_app_user] = _mock_current_user
     app.dependency_overrides[get_current_moderator] = _mock_current_moderator
+    app.dependency_overrides[require_signed_moderator] = _mock_current_moderator
     app.dependency_overrides[get_current_moderator_or_viewer] = _mock_current_moderator
+    app.dependency_overrides[require_signed_moderator_or_viewer] = _mock_current_moderator
 
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_app_user, None)
     app.dependency_overrides.pop(get_current_moderator, None)
+    app.dependency_overrides.pop(require_signed_moderator, None)
     app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
+    app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
 
 
 def test_post_report_success():
@@ -102,6 +108,37 @@ def test_get_reports_admin_success():
     assert response.status_code == status.HTTP_200_OK
     assert response.json()["status"] is True
     list_svc.assert_awaited_once()
+    assert list_svc.await_args.kwargs["moderator_id"] is None
+
+
+def test_get_reports_admin_ignores_moderator_id_param():
+    mock_response = ReportListResponse(
+        status=True,
+        message="Reports retrieved successfully.",
+        data={
+            "items": [],
+            "page": 1,
+            "pageSize": 20,
+            "totalItems": 0,
+            "totalPages": 0,
+        },
+    )
+
+    with patch("apps.report.routes.get_reports", AsyncMock(return_value=mock_response)) as list_svc:
+        response = client.get(
+            "/api/v1/admin/reports",
+            params={
+                "entity_type": "user",
+                "entity_id": str(_MOCK_ENTITY_ID),
+                "moderator_id": str(uuid.uuid4()),
+            },
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["status"] is True
+    list_svc.assert_awaited_once()
+    assert list_svc.await_args.kwargs["moderator_id"] is None
+
 
 
 def test_get_reported_entities_admin_success():
@@ -138,6 +175,139 @@ def test_get_reported_entities_admin_success():
     assert response.json()["message"] == "Reported entities fetched successfully."
     detail_svc.assert_awaited_once()
     assert detail_svc.await_args.kwargs["status"].value == "under_review"
+    assert detail_svc.await_args.kwargs["sort"] == ReportedEntitySort.report_count
+    assert detail_svc.await_args.kwargs["order"] == ReportedEntityOrder.desc
+
+
+def test_get_reported_entities_admin_sort_by_latest_reported_at():
+    mock_response = ReportedEntityListResponse(
+        status=True,
+        message="Reported entities fetched successfully.",
+        data={
+            "items": [],
+            "summary": {
+                "under_review": 0,
+                "actioned": 0,
+                "rejected": 0,
+            },
+            "total": 0,
+            "page": 1,
+            "pageSize": 20,
+            "totalItems": 0,
+            "totalPages": 0,
+        },
+    )
+
+    with patch(
+        "apps.report.routes.get_reported_entities",
+        AsyncMock(return_value=mock_response),
+    ) as detail_svc:
+        response = client.get(
+            "/api/v1/admin/reports/details",
+            params={"entity_type": "post", "sort": "latest_reported_at"},
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    detail_svc.assert_awaited_once()
+    assert detail_svc.await_args.kwargs["sort"] == ReportedEntitySort.latest_reported_at
+    assert detail_svc.await_args.kwargs["order"] == ReportedEntityOrder.desc
+
+
+def test_get_reported_entities_admin_sort_by_created_at_asc():
+    mock_response = ReportedEntityListResponse(
+        status=True,
+        message="Reported entities fetched successfully.",
+        data={
+            "items": [],
+            "summary": {
+                "under_review": 0,
+                "actioned": 0,
+                "rejected": 0,
+            },
+            "total": 0,
+            "page": 1,
+            "pageSize": 20,
+            "totalItems": 0,
+            "totalPages": 0,
+        },
+    )
+
+    with patch(
+        "apps.report.routes.get_reported_entities",
+        AsyncMock(return_value=mock_response),
+    ) as detail_svc:
+        response = client.get(
+            "/api/v1/admin/reports/details",
+            params={"entity_type": "post", "sort": "created_at", "order": "asc"},
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    detail_svc.assert_awaited_once()
+    assert detail_svc.await_args.kwargs["sort"] == ReportedEntitySort.created_at
+    assert detail_svc.await_args.kwargs["order"] == ReportedEntityOrder.asc
+
+
+def test_get_reported_entities_admin_sort_by_updated_at():
+    mock_response = ReportedEntityListResponse(
+        status=True,
+        message="Reported entities fetched successfully.",
+        data={
+            "items": [],
+            "summary": {
+                "under_review": 0,
+                "actioned": 0,
+                "rejected": 0,
+            },
+            "total": 0,
+            "page": 1,
+            "pageSize": 20,
+            "totalItems": 0,
+            "totalPages": 0,
+        },
+    )
+
+    with patch(
+        "apps.report.routes.get_reported_entities",
+        AsyncMock(return_value=mock_response),
+    ) as detail_svc:
+        response = client.get(
+            "/api/v1/admin/reports/details",
+            params={"entity_type": "post", "sort": "updated_at", "order": "desc"},
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    detail_svc.assert_awaited_once()
+    assert detail_svc.await_args.kwargs["sort"] == ReportedEntitySort.updated_at
+    assert detail_svc.await_args.kwargs["order"] == ReportedEntityOrder.desc
+
+
+def test_get_reported_entities_admin_passes_search():
+    mock_response = ReportedEntityListResponse(
+        status=True,
+        message="Reported entities fetched successfully.",
+        data={
+            "items": [],
+            "summary": {"under_review": 0, "actioned": 0, "rejected": 0},
+            "total": 0,
+            "page": 1,
+            "pageSize": 20,
+            "totalItems": 0,
+            "totalPages": 0,
+        },
+    )
+
+    with patch(
+        "apps.report.routes.get_reported_entities",
+        AsyncMock(return_value=mock_response),
+    ) as detail_svc:
+        response = client.get(
+            "/api/v1/admin/reports/details",
+            params={"entity_type": "post", "search": "jane"},
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["status"] is True
+    assert detail_svc.await_args.kwargs["search"] == "jane"
 
 
 def test_get_report_by_id_admin_success():
@@ -195,6 +365,47 @@ def test_review_report_admin_success():
     review_svc.assert_awaited_once()
 
 
+def test_review_report_admin_viewer():
+    async def _mock_current_viewer():
+        user = User(id=_MOCK_ADMIN_ID, email="viewer@example.com")
+        user.role = "viewer"
+        return user
+
+    report_id = uuid.uuid4()
+    payload = {
+        "report_id": str(report_id),
+        "status": "actioned",
+        "admin_comment": "Reviewed",
+    }
+    mock_response = ReportResponse(
+        status=True,
+        message="Success",
+        data={
+            "id": str(report_id),
+            "reported_id": str(_MOCK_USER_ID),
+            "entity_type": "post",
+            "entity_id": str(uuid.uuid4()),
+            "reason": "Test reason",
+            "status": "actioned",
+            "created_at": "2026-07-16T00:00:00Z",
+            "updated_at": "2026-07-16T00:00:00Z",
+        },
+    )
+    app.dependency_overrides[get_current_moderator_or_viewer] = _mock_current_viewer
+    app.dependency_overrides[require_signed_moderator_or_viewer] = _mock_current_viewer
+    try:
+        with patch(
+            "apps.report.routes.review_report_admin_service",
+            AsyncMock(return_value=mock_response),
+        ):
+            response = client.patch("/api/v1/admin/reports", json=payload)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["status"] is True
+    finally:
+        app.dependency_overrides[get_current_moderator_or_viewer] = _mock_current_moderator
+        app.dependency_overrides[require_signed_moderator_or_viewer] = _mock_current_moderator
+
+
 def test_admin_routes_unauthorized():
     from common.exceptions import ApiError
 
@@ -202,7 +413,9 @@ def test_admin_routes_unauthorized():
         raise ApiError("Insufficient permissions")
 
     app.dependency_overrides[get_current_moderator] = _mock_unauthorized_moderator
+    app.dependency_overrides[require_signed_moderator] = _mock_unauthorized_moderator
     app.dependency_overrides[get_current_moderator_or_viewer] = _mock_unauthorized_moderator
+    app.dependency_overrides[require_signed_moderator_or_viewer] = _mock_unauthorized_moderator
     try:
         response = client.get(
             "/api/v1/admin/reports",
@@ -215,4 +428,6 @@ def test_admin_routes_unauthorized():
         assert "Insufficient permissions" in response.json()["message"]
     finally:
         app.dependency_overrides[get_current_moderator] = _mock_current_moderator
+        app.dependency_overrides[require_signed_moderator] = _mock_current_moderator
         app.dependency_overrides[get_current_moderator_or_viewer] = _mock_current_moderator
+        app.dependency_overrides[require_signed_moderator_or_viewer] = _mock_current_moderator

@@ -1,29 +1,41 @@
 from __future__ import annotations
 
+import logging
+import time
 from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased, selectinload
 
 from apps.connections.db_models import Block
-from apps.engagement.db_models import Repost
-from apps.feed.db_models import Post, PostAttachment
-from apps.feed.services.feed_cursor import decode_cursor, encode_cursor
+from apps.feed.repositories.feed_combined_hydration import (
+    hydrate_feed_posts_and_reposts_raw,
+)
 from apps.profiles.db_models import Profile
+
+logger = logging.getLogger(__name__)
+
+
+def _perf_ms(started_at: float) -> float:
+    return (time.perf_counter() - started_at) * 1000.0
 
 #  to check post visibility
 def _visible_author_sql(alias: str) -> str:
-    """SQL fragment excluding soft-deleted / suspended / banned / deleting users."""
+    """SQL fragment for authors whose content may appear publicly.
+
+    Grace-period ``deleting`` users keep content visible until permanent purge.
+    """
     return f"""
-        {alias}.is_deleted = false
-        AND {alias}.deleted_at IS NULL
-        AND {alias}.status::text NOT IN ('suspended', 'banned', 'deleting')
+        {alias}.status::text NOT IN ('suspended', 'banned')
+        AND (
+            ({alias}.is_deleted = false AND {alias}.deleted_at IS NULL)
+            OR {alias}.status::text = 'deleting'
+        )
     """
 
 #  to check account status
-def _not_blocked_sql(author_user_expr: str) -> str:
+def _not_blocked_sql(author_user_expr: str) -> str:  # nosec B608 -- column name interpolation, not user input
     return f"""
         NOT EXISTS (
             SELECT 1
@@ -37,7 +49,7 @@ def _not_blocked_sql(author_user_expr: str) -> str:
     """
 
 # to check for connected user
-def _connected_sql(author_user_expr: str) -> str:
+def _connected_sql(author_user_expr: str) -> str:  # nosec B608 -- column name interpolation, not user input
     return f"""
         EXISTS (
             SELECT 1
@@ -50,38 +62,48 @@ def _connected_sql(author_user_expr: str) -> str:
         )
     """
 
-# Scoring for similary university , major , minor
-def _relevance_sql(author_profile_alias: str) -> str:
-    """Compute relevance once: university=4, major=2, minor=1."""
+
+def _academic_match_sql(profile_alias: str) -> str:
+    """1 when viewer shares university, major, or minor with the profile; else 0."""
     return f"""
-        (
-            CASE
-                WHEN me.university_id IS NOT NULL
-                 AND {author_profile_alias}.university_id = me.university_id
-                THEN 4
-                ELSE 0
-            END
-            +
-            CASE
-                WHEN me.major IS NOT NULL
-                 AND btrim(me.major) <> ''
-                 AND {author_profile_alias}.major IS NOT NULL
-                 AND lower(btrim({author_profile_alias}.major)) = lower(btrim(me.major))
-                THEN 2
-                ELSE 0
-            END
-            +
-            CASE
-                WHEN me.minor IS NOT NULL
-                 AND btrim(me.minor) <> ''
-                 AND {author_profile_alias}.minor IS NOT NULL
-                 AND lower(btrim({author_profile_alias}.minor)) = lower(btrim(me.minor))
-                THEN 1
-                ELSE 0
-            END
-        )
+        CASE
+            WHEN (
+                (
+                    me.university_id IS NOT NULL
+                    AND {profile_alias}.university_id = me.university_id
+                )
+                OR (
+                    me.major IS NOT NULL
+                    AND btrim(me.major) <> ''
+                    AND {profile_alias}.major IS NOT NULL
+                    AND lower(btrim({profile_alias}.major)) = lower(btrim(me.major))
+                )
+                OR (
+                    me.minor IS NOT NULL
+                    AND btrim(me.minor) <> ''
+                    AND {profile_alias}.minor IS NOT NULL
+                    AND lower(btrim({profile_alias}.minor)) = lower(btrim(me.minor))
+                )
+            )
+            THEN 1
+            ELSE 0
+        END
     """
-# Ranking post
+
+
+def _feed_match_sql(profile_alias: str, *user_exprs: str) -> str:
+    """1 when academic match or the viewer is connected to any of the given users."""
+    connected = " OR ".join(_connected_sql(expr) for expr in user_exprs) if user_exprs else "false"
+    return f"""
+        CASE
+            WHEN {_academic_match_sql(profile_alias)} = 1
+              OR ({connected})
+            THEN 1
+            ELSE 0
+        END
+    """
+
+
 def _visibility_sql(author_profile_alias: str, author_user_expr: str) -> str:
     """Existing feed visibility: public always, private/connections_only if connected."""
     return f"""
@@ -95,6 +117,9 @@ def _visibility_sql(author_profile_alias: str, author_user_expr: str) -> str:
     """
 
 
+# Prefer academic matches (uni/major/minor) and connected users. If none match,
+# show all visible posts. Original posts match the author; reposts match the
+# reposter or original author.
 _FEED_EVENTS_SQL = f"""
 WITH ranked_posts AS (
     SELECT
@@ -102,7 +127,12 @@ WITH ranked_posts AS (
         CAST(NULL AS uuid) AS repost_id,
         p.created_at AS created_at,
         'post' AS event_type,
-        {_relevance_sql("author_profile")} AS relevance
+        (
+            p.like_count * 3
+            + p.comment_count *2 
+            + p.repost_count
+        ) AS engagement_score,
+        {_feed_match_sql("author_profile", "p.author_user_id")} AS is_match
     FROM posts p
     JOIN profiles author_profile
         ON author_profile.user_id = p.author_user_id
@@ -123,7 +153,12 @@ WITH ranked_posts AS (
         r.id AS repost_id,
         r.created_at AS created_at,
         'repost' AS event_type,
-        {_relevance_sql("author_profile")} AS relevance
+        (
+            p.like_count * 3
+            + p.comment_count * 2
+            + p.repost_count 
+        ) AS engagement_score, 
+        {_feed_match_sql("reposter_profile", "reposter_profile.user_id", "p.author_user_id")} AS is_match
     FROM reposts r
     JOIN profiles reposter_profile
         ON reposter_profile.id = r.profile_id
@@ -139,39 +174,50 @@ WITH ranked_posts AS (
         ON me.user_id = :current_user
     WHERE p.state::text IN ('published', 'reinstate')
       AND reposter_profile.user_id <> :current_user
+      AND p.author_user_id <> :current_user
+      AND r.is_deleted = false
       AND {_visible_author_sql("reposter_user")}
       AND {_visible_author_sql("author_user")}
       AND {_visibility_sql("reposter_profile", "reposter_profile.user_id")}
       AND {_visibility_sql("author_profile", "p.author_user_id")}
       AND {_not_blocked_sql("reposter_profile.user_id")}
       AND {_not_blocked_sql("p.author_user_id")}
+),
+feed_stats AS (
+    SELECT COALESCE(MAX(is_match), 0) AS max_match FROM ranked_posts
 )
 SELECT
-    post_id,
-    repost_id,
-    created_at,
-    event_type,
-    relevance
+    ranked_posts.post_id,
+    ranked_posts.repost_id,
+    ranked_posts.created_at,
+    ranked_posts.event_type,
+    ranked_posts.engagement_score
 FROM ranked_posts
+CROSS JOIN feed_stats
 WHERE
-    (
+    (feed_stats.max_match = 0 OR ranked_posts.is_match > 0)
+    AND (
         CAST(:has_cursor AS boolean) = false
-        OR relevance < :last_relevance
+        OR ranked_posts.engagement_score < :last_engagement_score
         OR (
-            relevance = :last_relevance
-            AND created_at < :last_created_at
+            ranked_posts.engagement_score = :last_engagement_score
+            AND ranked_posts.created_at < :last_created_at
         )
         OR (
-            relevance = :last_relevance
-            AND created_at = :last_created_at
-            AND post_id < :last_post_id
+            ranked_posts.engagement_score = :last_engagement_score
+            AND ranked_posts.created_at = :last_created_at
+            AND ranked_posts.post_id < :last_post_id
         )
     )
 ORDER BY
-    relevance DESC,
-    created_at DESC,
-    post_id DESC
+    ranked_posts.engagement_score DESC ,
+    ranked_posts.created_at DESC ,
+    ranked_posts.post_id DESC 
+ 
+
 """
+   # created_at DESC,
+    # post_id DESC
 
 # get user profile
 async def fetch_viewer_profile(db: AsyncSession, user_id: UUID) -> Profile | None:
@@ -200,12 +246,15 @@ async def fetch_blocked_user_ids(db: AsyncSession, user_id: UUID) -> set[UUID]:
 _FEED_COUNT_SQL = f"""
 WITH ranked_posts AS (
     SELECT
-        p.id AS post_id
+        p.id AS post_id,
+        {_feed_match_sql("author_profile", "p.author_user_id")} AS is_match
     FROM posts p
     JOIN profiles author_profile
         ON author_profile.user_id = p.author_user_id
     JOIN users author_user
         ON author_user.id = p.author_user_id
+    LEFT JOIN profiles me
+        ON me.user_id = :current_user
     WHERE p.state::text IN ('published', 'reinstate')
       AND p.author_user_id <> :current_user
       AND {_visible_author_sql("author_user")}
@@ -215,7 +264,8 @@ WITH ranked_posts AS (
     UNION ALL
 
     SELECT
-        p.id AS post_id
+        p.id AS post_id,
+        {_feed_match_sql("reposter_profile", "reposter_profile.user_id", "p.author_user_id")} AS is_match
     FROM reposts r
     JOIN profiles reposter_profile
         ON reposter_profile.id = r.profile_id
@@ -227,16 +277,26 @@ WITH ranked_posts AS (
         ON author_profile.user_id = p.author_user_id
     JOIN users author_user
         ON author_user.id = p.author_user_id
+    LEFT JOIN profiles me
+        ON me.user_id = :current_user
     WHERE p.state::text IN ('published', 'reinstate')
       AND reposter_profile.user_id <> :current_user
+      AND p.author_user_id <> :current_user
+      AND r.is_deleted = false
       AND {_visible_author_sql("reposter_user")}
       AND {_visible_author_sql("author_user")}
       AND {_visibility_sql("reposter_profile", "reposter_profile.user_id")}
       AND {_visibility_sql("author_profile", "p.author_user_id")}
       AND {_not_blocked_sql("reposter_profile.user_id")}
       AND {_not_blocked_sql("p.author_user_id")}
+),
+feed_stats AS (
+    SELECT COALESCE(MAX(is_match), 0) AS max_match FROM ranked_posts
 )
-SELECT COUNT(*) FROM ranked_posts
+SELECT COUNT(*)
+FROM ranked_posts
+CROSS JOIN feed_stats
+WHERE feed_stats.max_match = 0 OR ranked_posts.is_match > 0
 """
 
 # count the post
@@ -246,8 +306,8 @@ async def count_feed_posts(
     viewer_profile: Profile | None,
     connected_author_ids: set[UUID],
 ) -> int:
-    """Count feed events using the same ranked CTE visibility rules (no OFFSET)."""
-    del viewer_profile, connected_author_ids  # visibility is evaluated in SQL
+    """Count feed events using the same match/visibility rules as fetch (no OFFSET)."""
+    del viewer_profile, connected_author_ids  # visibility/matching evaluated in SQL
     result = await db.execute(
         text(_FEED_COUNT_SQL),
         {"current_user": current_user_id},
@@ -267,19 +327,29 @@ async def fetch_feed_posts(
     """
     Fetch feed events with keyset (cursor) pagination via a PostgreSQL CTE.
 
+    Matching (university / major / minor, or an active connection):
+    - Original post events match against the original author.
+    - Repost events match against the reposter or the original author.
+    - If any visible event matches, academic matches and connected users
+      are returned together, ranked by engagement.
+    - If nothing matches, all visible events are returned.
+
     Returns:
         (feed_items, next_cursor) where next_cursor is None on the last/empty page.
     """
-    del viewer_profile, connected_author_ids  # visibility/relevance evaluated in SQL
+    del viewer_profile, connected_author_ids  # visibility/matching evaluated in SQL
+    from apps.feed.services.feed_cursor import decode_cursor, encode_cursor
 
-    last_relevance = 0
+    total_started = time.perf_counter()
+
+    last_engagement_score: int = 0
     last_created_at: datetime = datetime.min
     last_post_id = UUID(int=0)
     has_cursor = False
 
     if cursor:
         decoded = decode_cursor(cursor)
-        last_relevance = decoded["relevance"]
+        last_engagement_score = decoded["engagement_score"]
         last_created_at = decoded["created_at"]
         last_post_id = decoded["id"]
         has_cursor = True
@@ -291,7 +361,7 @@ async def fetch_feed_posts(
     params: dict = {
         "current_user": current_user_id,
         "has_cursor": has_cursor,
-        "last_relevance": last_relevance,
+        "last_engagement_score": last_engagement_score,
         "last_created_at": last_created_at,
         "last_post_id": last_post_id,
     }
@@ -300,6 +370,10 @@ async def fetch_feed_posts(
 
     events = (await db.execute(text(sql), params)).mappings().all()
     if not events:
+        logger.info(
+            "[FEED_PERF] fetch_feed_posts_total=%.2fms events=0 hydrated_posts=0",
+            _perf_ms(total_started),
+        )
         return [], None
 
     has_more = False
@@ -310,26 +384,12 @@ async def fetch_feed_posts(
     post_ids = {row["post_id"] for row in events}
     repost_ids = {row["repost_id"] for row in events if row["repost_id"]}
 
-    post_author_profile = aliased(Profile, name="post_author_profile")
-    post_stmt = (
-        select(Post, post_author_profile)
-        .join(post_author_profile, post_author_profile.user_id == Post.author_user_id)
-        .where(Post.id.in_(post_ids))
-        .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
-    )
-    post_results = await db.execute(post_stmt)
-    posts_map = {post.id: (post, profile) for post, profile in post_results.all()}
+    # Phase 7: posts + reposts hydrated in one SQL round trip.
+    hydration = await hydrate_feed_posts_and_reposts_raw(db, post_ids, repost_ids)
+    posts_map = hydration.posts
+    reposts_map = hydration.reposts
 
-    reposts_map: dict = {}
-    if repost_ids:
-        repost_stmt = (
-            select(Repost, Profile)
-            .join(Profile, Profile.id == Repost.profile_id)
-            .where(Repost.id.in_(repost_ids))
-        )
-        repost_results = await db.execute(repost_stmt)
-        reposts_map = {repost.id: (repost, profile) for repost, profile in repost_results.all()}
-
+    # Rebuild in feed-event order; do not use hydration SQL row order.
     results: list[dict] = []
     for row in events:
         post_data = posts_map.get(row["post_id"])
@@ -350,7 +410,7 @@ async def fetch_feed_posts(
                     "repost_id": repost.id,
                     "reposted_by_profile": reposter_profile,
                     "reposted_at": repost.created_at,
-                    "_relevance": int(row["relevance"]),
+                    "_cursor_engagement_score": row["engagement_score"],
                     "_cursor_created_at": row["created_at"],
                     "_cursor_post_id": row["post_id"],
                 }
@@ -364,7 +424,7 @@ async def fetch_feed_posts(
                     "repost_id": None,
                     "reposted_by_profile": None,
                     "reposted_at": None,
-                    "_relevance": int(row["relevance"]),
+                    "_cursor_engagement_score": row["engagement_score"],
                     "_cursor_created_at": row["created_at"],
                     "_cursor_post_id": row["post_id"],
                 }
@@ -374,14 +434,23 @@ async def fetch_feed_posts(
     if has_more and results:
         last = results[-1]
         next_cursor = encode_cursor(
-            relevance=last["_relevance"],
+            engagement_score=last["_cursor_engagement_score"],
             created_at=last["_cursor_created_at"],
             post_id=last["_cursor_post_id"],
         )
 
     for item in results:
-        item.pop("_relevance", None)
+        item.pop("_cursor_engagement_score", None)
         item.pop("_cursor_created_at", None)
         item.pop("_cursor_post_id", None)
 
+    logger.info(
+        "[FEED_PERF] fetch_feed_posts_total=%.2fms events=%s hydrated_posts=%s "
+        "results=%s reposts=%s",
+        _perf_ms(total_started),
+        len(events),
+        len(posts_map),
+        len(results),
+        len(reposts_map),
+    )
     return results, next_cursor

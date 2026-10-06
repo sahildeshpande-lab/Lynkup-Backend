@@ -36,18 +36,31 @@ def apply_scheduled_deletion_fields(
     user.purge_after = timestamp + timedelta(days=days)
 
 
+_STAFF_ROLES = frozenset({"moderator", "viewer", "superadmin"})
+
+
+def _is_staff_user(user: User) -> bool:
+    role = getattr(user, "role", None) or "user"
+    return role in _STAFF_ROLES
+
+
 async def restore_deleting_account_if_eligible(
     user: User,
     db: AsyncSession,
     *,
     now: datetime | None = None,
 ) -> bool:
-    """Restore a grace-period account on login/social auth.
+    """Restore a grace-period *app user* on login/social auth.
+
+    Moderators, viewers, and superadmins stay locked out for the rest of the
+    deleting window — they cannot recover by logging in.
 
     Returns True when the account was restored, False when not eligible.
     Does not commit — caller owns the transaction.
     """
     timestamp = now or _now()
+    if _is_staff_user(user):
+        return False
     if user.status != UserStatus.deleting:
         return False
     if user.purge_after is None:
@@ -75,12 +88,17 @@ async def restore_deleting_account_if_eligible(
 
 
 async def run_deletion_request_side_effects(user: User, db: AsyncSession) -> None:
-    """Best-effort external side effects after soft-delete is committed."""
+    """Best-effort access side effects after scheduled deletion is committed.
+
+    Grace period must NOT permanently delete Firebase/Stream identity or mutate
+    PostgreSQL content. Only revoke sessions / deactivate Stream access so the
+    owner cannot keep using the product, while login recovery remains possible.
+    """
     from apps.accounts.services.device_otp_service import (
         deactivate_push_for_user_installations,
     )
     from apps.chat.service import deactivate_stream_user_best_effort
-    from core.auth.services import disable_firebase_user, revoke_firebase_tokens
+    from core.auth.services import revoke_firebase_tokens
 
     try:
         await deactivate_push_for_user_installations(db, user.id)
@@ -92,41 +110,30 @@ async def run_deletion_request_side_effects(user: User, db: AsyncSession) -> Non
         )
         try:
             await db.rollback()
-        except Exception:
+        except Exception:  # nosec B110 -- best-effort rollback cleanup
             pass
 
+    # Revoke refresh tokens only — do NOT disable/delete the Firebase user, or
+    # password/social re-auth for grace-period recovery becomes impossible.
     if user.firebase_uid and not str(user.firebase_uid).startswith("admin-"):
         try:
-            disable_firebase_user(user.firebase_uid)
+            revoke_firebase_tokens(user.firebase_uid)
         except Exception:
             logger.exception(
-                "[account-deletion] Failed to disable Firebase uid=%s",
+                "[account-deletion] Failed to revoke Firebase tokens uid=%s",
                 user.firebase_uid,
             )
-            try:
-                revoke_firebase_tokens(user.firebase_uid)
-            except Exception:
-                logger.exception(
-                    "[account-deletion] Failed to revoke Firebase tokens uid=%s",
-                    user.firebase_uid,
-                )
 
     await deactivate_stream_user_best_effort(user)
 
 
 async def run_recovery_side_effects(user: User, db: AsyncSession) -> None:
-    """Best-effort restore of Firebase + Stream after DB recovery."""
-    from apps.chat.service import reactivate_stream_user_best_effort
-    from core.auth.services import enable_firebase_user
+    """Best-effort restore of Stream after DB recovery.
 
-    if user.firebase_uid and not str(user.firebase_uid).startswith("admin-"):
-        try:
-            enable_firebase_user(user.firebase_uid)
-        except Exception:
-            logger.exception(
-                "[account-deletion] Failed to enable Firebase uid=%s",
-                user.firebase_uid,
-            )
+    Firebase identity was never disabled during the grace period — the client
+    re-authenticates normally. Stream access is reactivated here.
+    """
+    from apps.chat.service import reactivate_stream_user_best_effort
 
     await reactivate_stream_user_best_effort(user, db)
 
@@ -139,3 +146,17 @@ def is_purge_window_expired(user: User, *, now: datetime | None = None) -> bool:
     if purge_after.tzinfo is None:
         purge_after = purge_after.replace(tzinfo=timezone.utc)
     return purge_after <= timestamp
+
+
+async def remove_expired_deleting_user_for_resignup(
+    db: AsyncSession,
+    user_id: UUID,
+) -> None:
+    """Hard-delete a grace-expired user so their email can be used for a new signup."""
+    from sqlalchemy import text
+
+    await db.execute(
+        text("CALL purge_user_data(:user_id)"),
+        {"user_id": str(user_id)},
+    )
+    await db.flush()

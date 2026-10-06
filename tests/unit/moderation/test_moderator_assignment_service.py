@@ -17,28 +17,105 @@ from common.enums import PostState, UserStatus
 from common.exceptions import ApiError
 
 
+async def _clean_pytest_mod_data(session):
+    """Remove leftover pytest_mod_% users and all FK dependents.
+
+    Keep this aligned with feed/connections cleanups so CI does not fail
+    one foreign-key constraint at a time.
+    """
+    from sqlalchemy import text
+
+    mod_users = "SELECT id FROM users WHERE email LIKE 'pytest_mod_%'"
+    mod_posts = (
+        "SELECT id FROM posts WHERE author_user_id IN "
+        f"({mod_users}) OR moderator_id IN ({mod_users})"
+    )
+
+    await session.execute(text(
+        f"DELETE FROM post_attachments WHERE post_id IN ({mod_posts})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM post_reactions WHERE post_id IN ({mod_posts}) "
+        f"OR user_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM post_revisions WHERE post_id IN ({mod_posts}) "
+        f"OR editor_user_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM post_hashtags WHERE post_id IN ({mod_posts})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM post_topics WHERE post_id IN ({mod_posts})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM link_previews WHERE post_id IN ({mod_posts})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM posts WHERE author_user_id IN ({mod_users}) "
+        f"OR moderator_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM media_assets WHERE owner_user_id IN ({mod_users})"
+    ))
+    await session.execute(text("DELETE FROM moderation_assignment_state"))
+    await session.execute(text(
+        f"DELETE FROM moderation_history WHERE moderator_id IN ({mod_users}) "
+        f"OR entity_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM reports WHERE reported_id IN ({mod_users}) "
+        f"OR moderator_id IN ({mod_users}) OR entity_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM notifications WHERE recipient_user_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        "DELETE FROM notification_campaign_audience WHERE user_id IN "
+        f"({mod_users})"
+    ))
+    await session.execute(text(
+        "DELETE FROM notification_preferences WHERE user_id IN "
+        f"({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM profiles WHERE user_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM user_roles WHERE user_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM security_events WHERE user_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM consent_records WHERE user_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM refresh_tokens WHERE user_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM password_reset_tokens WHERE user_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM user_installations WHERE user_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM user_activity_logs WHERE user_id IN ({mod_users})"
+    ))
+    await session.execute(text(
+        f"DELETE FROM users WHERE id IN ({mod_users})"
+    ))
+    await session.commit()
+
+
 @pytest_asyncio.fixture
 async def db_ready():
     await init_db()
     async with async_session_factory() as session:
-        from sqlalchemy import text
-        await session.execute(text(
-            "DELETE FROM post_revisions WHERE post_id IN "
-            "(SELECT id FROM posts WHERE author_user_id IN "
-            "(SELECT id FROM users WHERE email LIKE 'pytest_mod_%'))"
-        ))
-        await session.execute(text(
-            "DELETE FROM posts WHERE author_user_id IN "
-            "(SELECT id FROM users WHERE email LIKE 'pytest_mod_%')"
-        ))
-        await session.execute(text("DELETE FROM moderation_assignment_state"))
-        await session.execute(text(
-            "DELETE FROM user_roles WHERE user_id IN "
-            "(SELECT id FROM users WHERE email LIKE 'pytest_mod_%')"
-        ))
-        await session.execute(text("DELETE FROM users WHERE email LIKE 'pytest_mod_%'"))
-        await session.commit()
+        await _clean_pytest_mod_data(session)
     yield
+    async with async_session_factory() as session:
+        await _clean_pytest_mod_data(session)
     await engine.dispose()
 
 

@@ -15,6 +15,13 @@ from core.lifespan import lifespan
 from core.logging_config import configure_logging
 from core.routes import build_router
 
+try:
+    from ddtrace import patch_all
+    patch_all()
+except Exception:
+    # do not raise error if you can not patch
+    pass
+
 configure_logging()
 
 AUTH_TAG = "1] User Registration, Authentication & Onboarding"
@@ -32,6 +39,9 @@ def _validation_message(exc: RequestValidationError) -> str:
     loc = first.get("loc", ())
     field = loc[-1] if loc else "request"
     msg = first.get("msg", "Validation failed")
+    # Public signup / social-auth only allow role "user".
+    if field in ("role", "user") and "Input should be 'user'" in str(msg):
+        return "Invalid role"
     if isinstance(field, str) and field not in ("body", "query", "path"):
         return f"Invalid {field}: {msg}"
     return str(msg)
@@ -78,12 +88,22 @@ def _api_error_status_code(message: str) -> int:
     lowered = message.lower()
     if "account doesn't exist" in lowered:
         return 401
+    if "account already exists" in lowered:
+        return 401
+    if "this user is not allowed" in lowered:
+        return 401
     if any(
         phrase in lowered
         for phrase in (
             "missing access token",
             "invalid access token",
             "invalid firebase",
+            "maximum number of accounts",
+            "device has been reached",
+            "account limit",
+            "request authentication failed",
+            "session expired",
+            "signing key registration",
         )
     ) or _is_account_status_message(message):
         return 401
@@ -94,11 +114,15 @@ def _api_error_status_code(message: str) -> int:
         )
     ):
         return 403
+    if "rate limit exceeded" in lowered:
+        return 429
     return 200
 
 
 def _is_account_status_message(message: str) -> bool:
     lowered = message.lower()
+    if "account is currently" in lowered:
+        return False
     return any(
         phrase in lowered
         for phrase in (
@@ -142,7 +166,7 @@ async def account_exists_exception_handler(_request, exc: AccountExistsException
         status_code=200,
         content=_error_json(
             "Account already exists. Please login using your registered method."
-        ),
+        )
     )
 
 
@@ -210,8 +234,8 @@ def main() -> None:
 
     uvicorn.run(
         "entrypoints.api:app",
-        host=os.getenv("HOST", "0.0.0.0"),
-        port=int(os.getenv("PORT", "8080")),
+        host=os.getenv("HOST", "0.0.0.0"),  # nosec B104 -- container deployment, host from env
+        port=int(os.getenv("PORT", "8000")),
         reload=_env_bool("RELOAD"),
     )
 

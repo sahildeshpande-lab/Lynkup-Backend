@@ -11,6 +11,7 @@ from pwdlib.hashers.bcrypt import BcryptHasher
 from apps.accounts.db_models import User
 from apps.profiles.db_models import Profile
 from common.enums import OnboardingStatus, UserStatus, inactive_account_message
+from common.exceptions import ApiError
 from core.auth.config import settings as auth_settings
 from core.email_service import send_otp_email, send_verification_success_email, build_email_verified_success_html
 from ..schemas import ApiResponse, LoginRequest, ResendOtpRequest, OtpVerifyRequest, UserBaseResponse
@@ -21,20 +22,28 @@ from .common_service import (
     _fetch_user_profile,
     _generate_otp,
     _now,
+    ensure_public_app_user,
+    firebase_email_matches_user,
     is_soft_deleted_user,
-    reactivate_soft_deleted_user,
+    otp_matches,
 )
 from .device_otp_service import (
     attach_otp_flags,
     begin_otp_challenge,
+    demote_device_trust_if_email_unverified,
     ensure_unverified_installation,
     evaluate_device_otp_requirement,
     mark_pending_active_device_verified,
     upsert_user_installation,
 )
 
-async def _issue_auth_session(user: User, db: AsyncSession) -> dict:
-    profile = await _fetch_user_profile(db, user)
+async def _issue_auth_session(
+    user: User,
+    db: AsyncSession,
+    profile: Profile | None = None,
+) -> dict:
+    if profile is None:
+        profile = await _fetch_user_profile(db, user)
     from apps.profiles.services import build_user_base_response
     user_data = await build_user_base_response(user, profile, db)
     await db.commit()
@@ -48,7 +57,7 @@ async def _issue_auth_session(user: User, db: AsyncSession) -> dict:
 async def build_firebase_session_response(user: User, db: AsyncSession) -> dict:
     profile = await _fetch_user_profile(db, user)
     from apps.profiles.services import build_user_base_response
-    user_data = await build_user_base_response(user, profile, db)
+    user_data = await build_user_base_response(user, profile, db , viewer_user_id=user.id)
     return {
         "user": user_data,
         "emailSent": False,
@@ -77,10 +86,15 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
         else:
             return ApiResponse(status=False, message=" Please complete signup", data=None)
 
+    # await ensure_public_app_user(db, user)
+    ensure_public_app_user(user)
+
     # Email/password login must match the account email on the Firebase token and DB.
     if user.email.lower() != login_email:
         return ApiResponse(status=False, message="Invalid credentials", data=None)
-    if firebase_email and firebase_email != login_email:
+    if not firebase_email_matches_user(firebase_user, user) or (
+        firebase_email and firebase_email != login_email
+    ):
         return ApiResponse(status=False, message="Invalid credentials", data=None)
 
     # Social accounts have no password_hash — they must use /auth/social (or reset password).
@@ -110,16 +124,31 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     if user.status in (UserStatus.suspended, UserStatus.banned):
         return ApiResponse(status=False, message=inactive_account_message(user.status), data=None)
 
-    if is_soft_deleted_user(user):
-        reactivate_soft_deleted_user(
-            user,
-            now=_now(),
-            firebase_uid=firebase_uid,
+    if user.status == UserStatus.deleting or user.deleted_at:
+        from apps.user_deletion.services.account_recovery_service import (
+            restore_deleting_account_if_eligible,
+            run_recovery_side_effects,
         )
-        db.add(user)
+
+        restored = await restore_deleting_account_if_eligible(user, db)
+        if not restored:
+            return ApiResponse(
+                status=False,
+                message=inactive_account_message(UserStatus.deleting),
+                data=None,
+            )
+        # Re-link when the client signed in with a new Firebase account (legacy
+        # soft-deletes that hard-deleted the Firebase user).
+        if firebase_uid and user.firebase_uid != firebase_uid:
+            user.firebase_uid = firebase_uid
+            db.add(user)
         await db.flush()
+        await run_recovery_side_effects(user, db)
 
     device_id = (payload.device_id or "").strip() or None
+    if device_id:
+        from apps.accounts.services.device_limit_service import validate_device_account_limit
+        await validate_device_account_limit(db, device_id, user_id=user.id)
 
     installation, is_new_device, needs_otp = await evaluate_device_otp_requirement(
         db,
@@ -139,23 +168,31 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
         )
 
         # Best-effort sync: never fail login if Firebase sync fails.
+        # begin_otp_challenge commits the installation + FCM token first.
+        profile = None
         try:
             from apps.notifications.services.topic_service import TopicService
 
             profile = await _fetch_user_profile(db, user)
             if profile is not None:
-                await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
+                await TopicService.refresh_user_topic_subscriptions(
+                    db,
+                    user.id,
+                    profile,
+                    fcm_token=payload.fcm_token,
+                )
         except Exception:
             logger.exception(
                 "Firebase topic sync failed during login (OTP flow) user_id=%s",
                 user.id,
             )
 
-        stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
-        user = (await db.execute(stmt_user)).scalar_one()
+        #  22222 
+        # stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
+        # user = (await db.execute(stmt_user)).scalar_one()
 
         data = attach_otp_flags(
-            await _issue_auth_session(user, db),
+            await _issue_auth_session(user, db , profile=profile),
             email_sent=email_sent,
             needs_otp=True,
             is_device_verified=False,
@@ -183,17 +220,25 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
             platform=payload.platform,
             fcm_token=payload.fcm_token,
             now=_now(),
+            installation=installation,
         )
 
     await db.commit()
 
     # Best-effort sync: never fail login if Firebase sync fails.
+    # Installation + FCM token are committed above before refresh.
+    profile = None
     try:
         from apps.notifications.services.topic_service import TopicService
 
         profile = await _fetch_user_profile(db, user)
         if profile is not None:
-            await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
+            await TopicService.refresh_user_topic_subscriptions(
+                db,
+                user.id,
+                profile,
+                fcm_token=payload.fcm_token,
+            )
     except Exception:
         logger.exception(
             "Firebase topic sync failed during login (no-OTP flow) user_id=%s",
@@ -203,103 +248,122 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
     try:
         from apps.chat.service import sync_stream_user_on_auth
 
-        await sync_stream_user_on_auth(user, db)
+        await sync_stream_user_on_auth(user, db , profile=profile)
     except Exception:
         logger.exception(
             "Stream user sync failed during login (no-OTP flow) user_id=%s",
             user.id,
         )
 
-    stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
-    user = (await db.execute(stmt_user)).scalar_one()
+    # 3333 
 
+    # stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
+    # signed_in_user_id = user.id
+    # refreshed = (await db.execute(stmt_user)).scalar_one_or_none()
+    # if refreshed is not None:
+    #     user = refreshed
+    signed_in_user_id = user.id
+
+    from common.enums import UserActivityLogType
+    from apps.analytics.services import add_user_activity_log_best_effort
+
+    await add_user_activity_log_best_effort(
+        db,
+        signed_in_user_id,
+        UserActivityLogType.SIGN_IN,
+    )
+
+    device_is_verified = bool(installation and installation.is_device_verified)
     return ApiResponse(
         status=True,
         message="Login successful",
         data=attach_otp_flags(
-            await _issue_auth_session(user, db),
+            await _issue_auth_session(user, db , profile=profile ),
             email_sent=False,
             needs_otp=False,
-            is_device_verified=True,
+            is_device_verified=device_is_verified,
         ),
     )
 
 async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSession):
     firebase_uid = firebase_user["uid"]
-    stmt = select(User).where(User.firebase_uid == firebase_uid)
+    stmt = select(User).where(User.firebase_uid == firebase_uid).with_for_update()
     user = (await db.execute(stmt)).scalar_one_or_none()
     if not user:
-        return ApiResponse(status=False, message="User not found", data=None)
+        return ApiResponse(status=False, message="User not found.", data=None)
 
     if user.email.lower() != payload.email.lower():
-        return ApiResponse(status=False, message="Email does not match user", data=None)
+        return ApiResponse(status=False, message="Email does not match user.", data=None)
 
-    if user.email_otp != payload.otp:
-        return ApiResponse(status=False, message="Incorrect OTP. Please try again", data=None)
+    if not otp_matches(user, payload.otp):
+        return ApiResponse(status=False, message="Incorrect OTP. Please try again.", data=None)
 
     if user.email_otp_created_at and (_now() - user.email_otp_created_at) > timedelta(minutes=auth_settings.otp_expire_minutes):
-        return ApiResponse(status=False, message="OTP has expired. Please request a new OTP", data=None)
+        return ApiResponse(status=False, message="OTP has expired. Please request a new OTP.", data=None)
 
-    if user.email_otp == payload.otp:
-        now = _now()
-        onboarding_completed = user.onboarding_status == OnboardingStatus.completed
-        user.email_verified_at = now
-        user.status = UserStatus.active
-        user.email_otp = None
-        user.email_otp_created_at = None
-        user.updated_at = now
-        db.add(user)
+    now = _now()
+    was_unverified = user.email_verified_at is None
+    was_pending = user.status != UserStatus.active
+    onboarding_completed = user.onboarding_status == OnboardingStatus.completed
+    user.email_verified_at = user.email_verified_at or now
+    user.status = UserStatus.active
+    user.email_otp = None
+    user.email_otp_created_at = None
+    user.updated_at = now
+    db.add(user)
 
-        # Trust latest pending install by last_active_at (from login device_id).
-        # Previously verified devices are not demoted — they still skip OTP.
-        installation = await mark_pending_active_device_verified(
-            db,
+    # Trust latest pending install by last_active_at (from login device_id).
+    installation = await mark_pending_active_device_verified(
+        db,
+        user.id,
+        now=now,
+    )
+    device_verified = installation is not None
+    await db.commit()
+
+    # Send the welcome confirmation only on first-ever email verification
+    # (pending → active), not on device re-trust after logout-all.
+    profile = None
+    if not onboarding_completed and was_unverified and was_pending:
+        stmt_profile = select(Profile).where(Profile.user_id == user.id)
+        profile = (await db.execute(stmt_profile)).scalar_one_or_none()
+        first_name = (profile.first_name or "").strip() if profile else None
+        await send_verification_success_email(user.email, first_name or None)
+
+
+    try:
+        from apps.notifications.services.topic_service import TopicService
+
+        if profile is None:
+            stmt_profile = select(Profile).where(Profile.user_id == user.id)
+            profile = (await db.execute(stmt_profile)).scalar_one_or_none()
+        if profile is not None:
+            await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
+    except Exception:
+        logger.exception(
+            "Firebase topic sync failed during OTP verification user_id=%s",
             user.id,
-            now=now,
         )
-        device_verified = installation is not None
-        await db.commit()
 
-        if not onboarding_completed:
-            stmt_profile = select(Profile).where(Profile.user_id == user.id)
-            profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-            full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip() if profile else None
-            await send_verification_success_email(user.email, full_name)
+    try:
+        from apps.chat.service import sync_stream_user_on_auth
 
-        try:
-            from apps.notifications.services.topic_service import TopicService
-
-            stmt_profile = select(Profile).where(Profile.user_id == user.id)
-            profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-            if profile is not None:
-                await TopicService.refresh_user_topic_subscriptions(db, user.id, profile)
-        except Exception:
-            logger.exception(
-                "Firebase topic sync failed during OTP verification user_id=%s",
-                user.id,
-            )
-
-        try:
-            from apps.chat.service import sync_stream_user_on_auth
-
-            await sync_stream_user_on_auth(user, db)
-        except Exception:
-            logger.exception(
-                "Stream user sync failed during OTP verification user_id=%s",
-                user.id,
-            )
-
-        stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
-        user = (await db.execute(stmt_user)).scalar_one()
-        data = attach_otp_flags(
-            await _issue_auth_session(user, db),
-            email_sent=False,
-            needs_otp=False,
-            is_device_verified=device_verified,
+        await sync_stream_user_on_auth(user, db)
+    except Exception:
+        logger.exception(
+            "Stream user sync failed during OTP verification user_id=%s",
+            user.id,
         )
-        return ApiResponse(status=True, message="OTP successfully verified", data=data)
 
-    return ApiResponse(status=False, message="Email not verified in Firebase yet", data=None)
+    stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
+    user = (await db.execute(stmt_user)).scalar_one()
+    data = attach_otp_flags(
+        await _issue_auth_session(user, db , profile=profile ),
+        email_sent=False,
+        needs_otp=False,
+        is_device_verified=device_verified,
+    )
+    return ApiResponse(status=True, message="OTP successfully verified.", data=data)
 
 async def verify_email(token: str, db: AsyncSession) -> HTMLResponse | ApiResponse:
     stmt = select(User).where(User.email_otp == token)
@@ -323,8 +387,8 @@ async def verify_email(token: str, db: AsyncSession) -> HTMLResponse | ApiRespon
 
     stmt_profile = select(Profile).where(Profile.user_id == user.id)
     profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-    full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip() if profile else None
-    html_content = build_email_verified_success_html(full_name)
+    first_name = (profile.first_name or "").strip() if profile else None
+    html_content = build_email_verified_success_html(first_name or None)
     return HTMLResponse(content=html_content, status_code=200)
 
 async def resend_otp(payload: ResendOtpRequest, firebase_user: dict, db: AsyncSession) -> ApiResponse:
@@ -347,20 +411,17 @@ async def resend_otp(payload: ResendOtpRequest, firebase_user: dict, db: AsyncSe
             platform=payload.platform,
             now=now,
         )
+        await demote_device_trust_if_email_unverified(db, user, device_id)
 
-    otp = _generate_otp()
+    otp = _generate_otp(user.email)
     user.email_otp = otp
     user.email_otp_created_at = now
     user.updated_at = now
     db.add(user)
     await db.commit()
     profile = await _fetch_user_profile(db, user)
-    full_name = (
-        f"{(profile.first_name or '').strip()} {(profile.last_name or '').strip()}".strip()
-        if profile
-        else None
-    ) or None
-    await send_otp_email(user.email, otp, "email_verification", full_name=full_name)
+    first_name = ((profile.first_name or "").strip() if profile else None) or None
+    await send_otp_email(user.email, otp, "email_verification", first_name=first_name)
     return ApiResponse(status=True, message="OTP sent successfully", data=None)
 
 def _build_user_base(refresh_token: str) -> UserBaseResponse:

@@ -17,6 +17,14 @@ from apps.accounts.services.device_otp_service import (
 from common.enums import UserStatus
 
 
+@pytest.fixture(autouse=True)
+def _allow_public_app_login(monkeypatch):
+    monkeypatch.setattr(
+        "apps.accounts.services.common_service.user_has_staff_role",
+        AsyncMock(return_value=False),
+    )
+
+
 def _user(*, email_verified_at=None, password_hash="hashed", email="user@example.com", registration_type="email"):
     return SimpleNamespace(
         id=uuid.uuid4(),
@@ -29,7 +37,9 @@ def _user(*, email_verified_at=None, password_hash="hashed", email="user@example
         email_verified_at=email_verified_at,
         email_otp=None,
         email_otp_created_at=None,
+        role="user",
         roles=[],
+        has_changed_email_after_graduation=False,
     )
 
 
@@ -107,6 +117,25 @@ async def test_evaluate_device_otp_requirement_when_verified_same_device(mock_db
 
 
 @pytest.mark.asyncio
+async def test_evaluate_device_otp_requirement_when_email_unverified_but_device_verified(mock_db):
+    user = _user(email_verified_at=None)
+    db = mock_db()
+
+    with patch(
+        "apps.accounts.services.device_otp_service.get_user_installation",
+        AsyncMock(return_value=_installation(is_active=True, is_device_verified=True)),
+    ):
+        _, is_new_device, needs_otp = await evaluate_device_otp_requirement(
+            db,
+            user,
+            "device-1",
+        )
+
+    assert is_new_device is False
+    assert needs_otp is True
+
+
+@pytest.mark.asyncio
 async def test_evaluate_device_otp_skips_otp_for_verified_device_after_logout(mock_db):
     """Verified devices skip OTP forever, even when deactivated by logout."""
     verified_at = datetime.now(timezone.utc)
@@ -130,13 +159,14 @@ async def test_evaluate_device_otp_skips_otp_for_verified_device_after_logout(mo
 
 
 def test_clear_session_email_verification():
-    user = _user(email_verified_at=datetime.now(timezone.utc))
+    verified_at = datetime.now(timezone.utc)
+    user = _user(email_verified_at=verified_at)
     user.email_otp = "1234"
     user.email_otp_created_at = datetime.now(timezone.utc)
 
     clear_session_email_verification(user)
 
-    assert user.email_verified_at is None
+    assert user.email_verified_at == verified_at
     assert user.email_otp is None
     assert user.email_otp_created_at is None
 
@@ -164,7 +194,55 @@ async def test_login_sends_otp_when_verification_required(mock_db):
 
     with (
         patch.object(auth_svc, "PASSWORD_HASHER") as hasher,
+        patch(
+            "apps.accounts.services.device_limit_service.validate_device_account_limit",
+            AsyncMock(),
+        ),
         patch.object(auth_svc, "evaluate_device_otp_requirement", AsyncMock(return_value=(_installation(is_device_verified=False), False, True))),
+        patch.object(auth_svc, "begin_otp_challenge", AsyncMock(return_value=True)) as begin_otp,
+        patch.object(auth_svc, "_issue_auth_session", AsyncMock(return_value={"user": {"isEmailVerified": False}})),
+        patch.object(auth_svc, "_fetch_user_profile", AsyncMock(return_value=None)),
+    ):
+        hasher.verify.return_value = True
+        db.execute = AsyncMock(
+            side_effect=[
+                SimpleNamespace(scalar_one_or_none=lambda: user),
+                SimpleNamespace(scalar_one=lambda: user),
+            ]
+        )
+
+        response = await auth_svc.login(payload, {"uid": user.firebase_uid, "email": user.email}, db)
+
+    begin_otp.assert_awaited_once()
+    assert response.status is True
+    assert response.data["needsOtp"] is True
+    assert response.data["emailSent"] is True
+    assert response.data["isDeviceVerified"] is False
+
+
+@pytest.mark.asyncio
+async def test_login_sends_otp_when_email_unverified_but_device_verified(mock_db):
+    user = _user(email_verified_at=None)
+    payload = SimpleNamespace(
+        email=user.email,
+        device_id="device-1",
+        password="Secret123",
+        platform=None,
+        fcm_token=None,
+    )
+    db = mock_db()
+
+    with (
+        patch.object(auth_svc, "PASSWORD_HASHER") as hasher,
+        patch(
+            "apps.accounts.services.device_limit_service.validate_device_account_limit",
+            AsyncMock(),
+        ),
+        patch.object(
+            auth_svc,
+            "evaluate_device_otp_requirement",
+            AsyncMock(return_value=(_installation(is_device_verified=True), False, True)),
+        ),
         patch.object(auth_svc, "begin_otp_challenge", AsyncMock(return_value=True)) as begin_otp,
         patch.object(auth_svc, "_issue_auth_session", AsyncMock(return_value={"user": {"isEmailVerified": False}})),
         patch.object(auth_svc, "_fetch_user_profile", AsyncMock(return_value=None)),
@@ -200,6 +278,10 @@ async def test_login_reuses_unexpired_otp_without_resending(mock_db):
 
     with (
         patch.object(auth_svc, "PASSWORD_HASHER") as hasher,
+        patch(
+            "apps.accounts.services.device_limit_service.validate_device_account_limit",
+            AsyncMock(),
+        ),
         patch.object(auth_svc, "evaluate_device_otp_requirement", AsyncMock(return_value=(_installation(is_device_verified=False), False, True))),
         patch.object(auth_svc, "begin_otp_challenge", AsyncMock(return_value=False)) as begin_otp,
         patch.object(auth_svc, "_issue_auth_session", AsyncMock(return_value={"user": {"isEmailVerified": True}})),
@@ -239,6 +321,10 @@ async def test_login_success_without_otp_when_verified_same_device(mock_db):
 
     with (
         patch.object(auth_svc, "PASSWORD_HASHER") as hasher,
+        patch(
+            "apps.accounts.services.device_limit_service.validate_device_account_limit",
+            AsyncMock(),
+        ),
         patch.object(auth_svc, "evaluate_device_otp_requirement", AsyncMock(return_value=(installation, False, False))),
         patch.object(auth_svc, "begin_otp_challenge", AsyncMock()) as begin_otp,
         patch.object(auth_svc, "upsert_user_installation", AsyncMock(return_value=installation)),
@@ -250,7 +336,7 @@ async def test_login_success_without_otp_when_verified_same_device(mock_db):
         db.execute = AsyncMock(
             side_effect=[
                 SimpleNamespace(scalar_one_or_none=lambda: user),
-                SimpleNamespace(scalar_one=lambda: user),
+                SimpleNamespace(scalar_one_or_none=lambda: user),
             ]
         )
 
@@ -274,6 +360,23 @@ async def test_login_rejects_wrong_password(mock_db):
         db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: user))
 
         response = await auth_svc.login(payload, {"uid": user.firebase_uid, "email": user.email}, db)
+
+    assert response.status is False
+    assert response.message == "Invalid credentials"
+
+
+@pytest.mark.asyncio
+async def test_login_rejects_stale_firebase_email(mock_db):
+    user = _user(email_verified_at=datetime.now(timezone.utc))
+    payload = SimpleNamespace(email=user.email, device_id="device-1", password="Secret123")
+    db = mock_db()
+
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: user))
+    response = await auth_svc.login(
+        payload,
+        {"uid": user.firebase_uid, "email": "old-google@example.com"},
+        db,
+    )
 
     assert response.status is False
     assert response.message == "Invalid credentials"
@@ -607,7 +710,7 @@ async def test_verify_otp_marks_device_and_clears_otp(mock_db):
 
 @pytest.mark.asyncio
 async def test_resend_otp_replaces_existing_code(mock_db):
-    user = _user()
+    user = _user(email_verified_at=datetime.now(timezone.utc))
     user.email_otp = "1111"
     user.email_otp_created_at = datetime.now(timezone.utc)
     payload = SimpleNamespace(email=user.email, device_id="device-1", platform=None)
@@ -617,6 +720,7 @@ async def test_resend_otp_replaces_existing_code(mock_db):
         patch.object(auth_svc, "_generate_otp", return_value="2222"),
         patch.object(auth_svc, "send_otp_email", AsyncMock()) as send_email,
         patch.object(auth_svc, "ensure_unverified_installation", AsyncMock()) as ensure_inst,
+        patch.object(auth_svc, "_fetch_user_profile", AsyncMock(return_value=None)),
     ):
         db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: user))
 

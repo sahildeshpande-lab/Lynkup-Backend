@@ -22,6 +22,7 @@ from apps.engagement.db_models import Bookmark, Comment, CommentReaction, PostRe
 from apps.feed.db_models import Post, PostAttachment
 from apps.notifications.db_models import Notification, NotificationType
 from apps.profiles.db_models import Profile
+from apps.profiles.graduation_date import format_graduation_date
 from core.images import config as image_config
 from core.images.storage_service import get_media_url
 
@@ -160,7 +161,7 @@ class DataExportBuilder:
                     "major": profile.major,
                     "minor": profile.minor,
                     "edu_level": profile.edu_level,
-                    "graduation_date": profile.graduation_date,
+                    "graduation_date": format_graduation_date(profile.graduation_date),
                     "country_id": profile.country_id,
                     "location_text": profile.location_text,
                     "profile_visibility": _enum_value(profile.profile_visibility),

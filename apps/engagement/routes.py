@@ -15,6 +15,7 @@ from apps.engagement.schemas import (
     CommentResponse,
     CommentReactionResponse,
     CreateCommentRequest,
+    EditCommentRequest,
     DeleteCommentRequest,
     LikedPostsListResponse,
     PostReactionResponse,
@@ -29,6 +30,7 @@ from apps.engagement.schemas import (
 )
 from apps.engagement.services import (
     create_post_comment,
+    edit_post_comment,
     delete_comment,
     get_post_comments,
     get_post_reactions,
@@ -208,6 +210,25 @@ async def create_comment_route(
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> CommentResponse:
     return await create_post_comment(db, current_user.id, payload)
+
+
+@router.patch(
+    "/posts/comments",
+    response_model=CommentResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Edit a comment",
+    description=(
+        "Edit the text of an existing comment. "
+        "Only the comment author can edit. "
+        "Sets the is_edited flag to true."
+    ),
+)
+async def edit_comment_route(
+    payload: EditCommentRequest,
+    current_user: Annotated[User, Depends(get_current_app_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> CommentResponse:
+    return await edit_post_comment(db, current_user.id, payload)
 
 
 @router.get(

@@ -22,7 +22,10 @@ class UserRole(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     user_id: UUID = Field(foreign_key="users.id")
     role_id: UUID = Field(foreign_key="roles.id")
-    assigned_at: datetime = Field(default_factory=datetime.utcnow)
+    assigned_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
     user: "User" = Relationship(
         sa_relationship=relationship("User", back_populates="roles")
@@ -58,9 +61,16 @@ class User(SQLModel, table=True):
     email_otp_created_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     status: UserStatus = Field(default=UserStatus.pending, index=True)
     email_verified_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
+    has_changed_email_after_graduation: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default=text("false")),
+    )
     registration_type: RegistrationType = Field(default=RegistrationType.email, sa_column=Column(String(20), nullable=False, server_default="email"))
     onboarding_status: OnboardingStatus = Field(default=OnboardingStatus.not_started, index=True)
-    created_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
+    )
     updated_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
     deleted_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     purge_after: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
@@ -148,7 +158,10 @@ class Role(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     name: str = Field(unique=True, index=True)
     description: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
     users: List[UserRole] = Relationship(
         sa_relationship=relationship("UserRole", back_populates="role", cascade="all, delete-orphan", lazy="selectin")

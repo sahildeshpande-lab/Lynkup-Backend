@@ -3,20 +3,22 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.accounts.db_models import User
 from core.database import get_session
 from core.security.auth import get_current_user
-from common.pagination import paginate_items
-from common.responses import success_response
+from common.pagination import paginate_items, paginate_or_all
+from common.responses import error_response, success_response
 from apps.connections.services import (
     block_user as block_user_service,
     follow_user as follow_user_service,
     get_pending_requests as get_pending_requests_service,
     get_connections_service,
+    get_mutual_recommendations,
     get_recommendations,
+    get_recommendations_categorized,
     remove_connection as remove_connection_service,
     respond_connection_request as respond_connection_request_service,
     send_connection_request,
@@ -33,6 +35,7 @@ from .schemas import (
     ConnectionRequestResponse,
     FollowResponse,
     BlockResponse,
+    MutualRecommendedUserResponse,
     RecommendedUserResponse,
 )
 
@@ -54,7 +57,13 @@ async def respond_connection_request(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
-    return await respond_connection_request_service(db, current_user.id, UUID(request.receiver_user_id), request.response)
+    try:
+        other_user_id = UUID(request.receiver_user_id)
+    except ValueError:
+        return error_response("Not a valid User", response_cls=ApiResponse)
+    return await respond_connection_request_service(
+        db, current_user.id, other_user_id, request.response
+    )
 
 
 @router.delete("/lynkupremove", response_model=ApiResponse)
@@ -109,12 +118,16 @@ async def get_connection_recommendations(
     page: int | None = Query(None, ge=1),
     pageSize: int | None = Query(None, ge=1, le=200),
 ):
-    candidates = await get_recommendations(db, current_user.id)
-    items = [RecommendedUserResponse(**item) for item in candidates]
+    rec_result = await get_recommendations_categorized(db, current_user.id)
+    items = [RecommendedUserResponse(**item) for item in rec_result["items"]]
+    # based_on_major_minor = [RecommendedUserResponse(**item) for item in rec_result["based_on_major_minor"]]
+    # without_major_minor = [RecommendedUserResponse(**item) for item in rec_result["without_major_minor"]]
 
     if page is None and pageSize is None:
         data = {
             "items": items,
+            # "based_on_major_minor": based_on_major_minor,
+            # "without_major_minor": without_major_minor,
             "page": 1,
             "pageSize": len(items),
             "totalItems": len(items),
@@ -125,8 +138,27 @@ async def get_connection_recommendations(
         ps = pageSize or 20
         paginated = paginate_items(items, page=p, page_size=ps)
         data = paginated.model_dump()
+        # data["based_on_major_minor"] = [b.model_dump() for b in based_on_major_minor]
+        # data["without_major_minor"] = [w.model_dump() for w in without_major_minor]
 
     return success_response("Connection recommendations fetched", data, response_cls=ApiResponse)
+
+
+@router.get("/connections/mutual-recommendations", response_model=ApiResponse)
+async def get_mutual_connection_recommendations(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    page: int | None = Query(None, ge=1),
+    pageSize: int | None = Query(None, ge=1, le=200),
+):
+    rec_items = await get_mutual_recommendations(db, current_user.id)
+    items = [MutualRecommendedUserResponse(**item) for item in rec_items]
+    paginated = paginate_or_all(items, page, pageSize)
+    return success_response(
+        "Mutual connection recommendations fetched",
+        paginated.model_dump(),
+        response_cls=ApiResponse,
+    )
 
 
 @router.get("/connections", response_model=ApiResponse)

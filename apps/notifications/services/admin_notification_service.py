@@ -14,6 +14,7 @@ from apps.notifications.repositories.admin_campaign_repository import (
     create_campaign as persist_campaign,
     deactivate_campaign,
     get_campaign_by_id,
+    get_campaign_for_dispatch,
     get_campaigns,
     update_campaign as persist_campaign_update,
     update_campaign_status,
@@ -35,6 +36,7 @@ from apps.notifications.schemas import (
     AdminCampaignListItem,
     AdminCampaignListResponse,
     CampaignTargetResponse,
+    CampaignTargetUserValue,
     CreateCampaignData,
     CreateCampaignRequest,
     CreateCampaignResponse,
@@ -59,6 +61,8 @@ from core.push import send_push_to_devices
 
 logger = logging.getLogger(__name__)
 
+NO_ELIGIBLE_USER_MESSAGE = "No eligible users"
+
 # Stored on campaign.deep_link_payload so dispatch_campaign(campaign_id) can run
 # later from a worker without a dedicated targets column (no schema change).
 _TARGETS_STORAGE_KEY = "targets"
@@ -66,30 +70,132 @@ _FIREBASE_TOPICS_KEY = "firebase_topics"
 _BROADCAST_FLAG_KEY = "broadcast"
 
 
+def _campaign_type_value(campaign_type: object) -> str:
+    return campaign_type.value if hasattr(campaign_type, "value") else str(campaign_type)
+
+
+def _campaign_activity_description(action: str, campaign_type: object) -> str:
+    raw = _campaign_type_value(campaign_type)
+    is_announcement = str(raw).upper() == NotificationCampaignType.announcement.value
+    if is_announcement:
+        phrases = {
+            "create": "sent the announcement",
+            "fail": "failed to send the announcement",
+            "update": "updated the announcement",
+            "delete": "deleted the announcement",
+        }
+    else:
+        phrases = {
+            "create": "sent a topic based notification",
+            "fail": "failed to send a topic based notification",
+            "update": "updated a topic based notification",
+            "delete": "deleted a topic based notification",
+        }
+    return phrases.get(action, "updated a notification campaign")
+
+
+def _targets_for_resolution(
+    targets: list[CreateCampaignTarget],
+) -> list[tuple[NotificationTargetType, list[str], bool, bool | None]]:
+    return [
+        (target.type, list(target.values), bool(target.to_all), target.is_alumni)
+        for target in targets
+    ]
+
+
+async def _resolve_payload_recipient_ids(
+    db: AsyncSession,
+    payload: CreateCampaignRequest,
+) -> list[UUID]:
+    if payload.campaign_type == NotificationCampaignType.announcement:
+        ids = await resolve_announcement_recipients(db)
+    else:
+        ids = await resolve_topic_recipients(
+            db,
+            targets=_targets_for_resolution(payload.targets),
+        )
+    return list(dict.fromkeys(ids))
+
+
+async def _log_campaign_dispatch_activity(
+    db: AsyncSession,
+    campaign: NotificationCampaign,
+    *,
+    status: NotificationCampaignStatus,
+    actor_role: str | None = None,
+) -> None:
+    """Record activity-log / admin-notification after send succeeds or fails."""
+    from apps.administration.services.admin_activity_log_service import create_admin_activity_log
+
+    action = "fail" if status == NotificationCampaignStatus.failed else "create"
+    await create_admin_activity_log(
+        db,
+        user_id=campaign.created_by_admin_id,
+        role=actor_role or "superadmin",
+        action=action,
+        module="notification_campaign",
+        record_id=campaign.id,
+        description=_campaign_activity_description(action, campaign.campaign_type),
+        metadata={
+            "old": None,
+            "new": {
+                "campaign_type": _campaign_type_value(campaign.campaign_type),
+                "status": status.value if hasattr(status, "value") else str(status),
+                "title": campaign.title,
+            },
+        },
+    )
+
+
+def _stored_target_dict(target: CreateCampaignTarget) -> dict[str, Any]:
+    stored: dict[str, Any] = {
+        "type": target.type.value,
+        "to_all": bool(target.to_all),
+        "values": list(target.values),
+    }
+    if target.is_alumni is not None:
+        stored["is_alumni"] = bool(target.is_alumni)
+    return stored
+
+
 def _build_targets_storage(
     targets: list[CreateCampaignTarget],
 ) -> dict[str, Any]:
     """Persist targets exactly as submitted (POST schema shape)."""
     return {
-        _TARGETS_STORAGE_KEY: [
-            {"type": target.type.value, "values": list(target.values)}
-            for target in targets
-        ]
+        _TARGETS_STORAGE_KEY: [_stored_target_dict(target) for target in targets]
     }
+
+
+def _parse_optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+        return None
+    return bool(value)
 
 
 def _parse_stored_targets(
     payload: dict[str, Any] | None,
-) -> list[tuple[NotificationTargetType, list[str]]]:
+) -> list[tuple[NotificationTargetType, list[str], bool, bool | None]]:
     if not payload:
         return []
     raw_targets = payload.get(_TARGETS_STORAGE_KEY) or []
-    parsed: list[tuple[NotificationTargetType, list[str]]] = []
+    parsed: list[tuple[NotificationTargetType, list[str], bool, bool | None]] = []
     for item in raw_targets:
         if not isinstance(item, dict):
             continue
         raw_type = item.get("type")
         raw_values = item.get("values") or []
+        to_all = bool(item.get("to_all", False))
+        is_alumni = _parse_optional_bool(item.get("is_alumni"))
         if not raw_type or not isinstance(raw_values, list):
             continue
         try:
@@ -98,8 +204,8 @@ def _parse_stored_targets(
             logger.warning("Skipping unknown campaign target type: %s", raw_type)
             continue
         values = [str(value).strip() for value in raw_values if value and str(value).strip()]
-        if values:
-            parsed.append((target_type, values))
+        if values or to_all:
+            parsed.append((target_type, values, to_all, is_alumni))
     return parsed
 
 
@@ -247,13 +353,62 @@ async def _resolve_target_values(
     return values
 
 
+async def _resolve_user_target_values(
+    db: AsyncSession,
+    values: list[str],
+) -> list[CampaignTargetUserValue]:
+    """Resolve stored user IDs into id/firstName/lastName objects."""
+    if not values:
+        return []
+
+    from apps.profiles.db_models import Profile
+
+    user_ids = [uid for uid in (_parse_uuid(v) for v in values) if uid is not None]
+    id_to_user: dict[str, CampaignTargetUserValue] = {}
+    if user_ids:
+        rows = (
+            await db.execute(
+                select(Profile.user_id, Profile.first_name, Profile.last_name).where(
+                    Profile.user_id.in_(user_ids)
+                )
+            )
+        ).all()
+        id_to_user = {
+            str(user_id).lower(): CampaignTargetUserValue(
+                id=str(user_id),
+                firstName=(first_name or "").strip(),
+                lastName=(last_name or "").strip(),
+            )
+            for user_id, first_name, last_name in rows
+        }
+
+    resolved: list[CampaignTargetUserValue] = []
+    for value in values:
+        key = str(value).strip().lower()
+        existing = id_to_user.get(key)
+        if existing is not None:
+            resolved.append(existing)
+            continue
+        parsed = _parse_uuid(value)
+        resolved.append(
+            CampaignTargetUserValue(
+                id=str(parsed) if parsed is not None else str(value).strip(),
+                firstName="",
+                lastName="",
+            )
+        )
+    return resolved
+
+
 async def _serialize_stored_targets(
     payload: dict[str, Any] | None,
     db: AsyncSession,
 ) -> list[CampaignTargetResponse]:
     """
-    Return stored campaign targets without recipient resolution or reshaping.
+    Return stored campaign targets with display enrichment.
 
+    USERS values become ``{id, firstName, lastName}`` objects; other types
+    remain strings (IDs resolved to labels when possible).
     Always returns a list (empty when none were stored).
     """
     if not payload:
@@ -268,7 +423,8 @@ async def _serialize_stored_targets(
             continue
         raw_type = item.get("type")
         raw_values = item.get("values")
-        if raw_type is None or not isinstance(raw_values, list):
+        to_all = bool(item.get("to_all", False))
+        if raw_type is None or (raw_values is not None and not isinstance(raw_values, list)):
             continue
         try:
             target_type = NotificationTargetType(raw_type)
@@ -276,15 +432,23 @@ async def _serialize_stored_targets(
             logger.warning("Skipping unknown stored campaign target type: %s", raw_type)
             continue
 
-        resolved_values = await _resolve_target_values(
-            db,
-            target_type=target_type,
-            values=[str(value) for value in raw_values],
-        )
+        raw_list = [str(value) for value in (raw_values or []) if value and str(value).strip()]
+        if not raw_list:
+            resolved_values: list[str | CampaignTargetUserValue] = []
+        elif target_type == NotificationTargetType.users:
+            resolved_values = await _resolve_user_target_values(db, raw_list)
+        else:
+            resolved_values = await _resolve_target_values(
+                db,
+                target_type=target_type,
+                values=raw_list,
+            )
         serialized.append(
             CampaignTargetResponse(
                 type=target_type,
+                to_all=to_all,
                 values=resolved_values,
+                is_alumni=_parse_optional_bool(item.get("is_alumni")),
             )
         )
     return serialized
@@ -295,6 +459,7 @@ async def create_campaign(
     *,
     admin_user_id: UUID,
     payload: CreateCampaignRequest,
+    actor_role: str | None = None,
 ) -> CreateCampaignResponse:
     """Validate and persist a DRAFT campaign only. Caller should invoke dispatch_campaign."""
     notification_type = await get_notification_type_by_name(
@@ -304,6 +469,12 @@ async def create_campaign(
     if notification_type is None:
         return error_response(
             "Notification type is not configured.",
+            response_cls=CreateCampaignResponse,
+        )
+
+    if not await _resolve_payload_recipient_ids(db, payload):
+        return error_response(
+            NO_ELIGIBLE_USER_MESSAGE,
             response_cls=CreateCampaignResponse,
         )
 
@@ -342,6 +513,8 @@ async def update_campaign(
     db: AsyncSession,
     *,
     payload: UpdateCampaignRequest,
+    actor_user_id: UUID | None = None,
+    actor_role: str | None = None,
 ) -> UpdateCampaignResponse:
     """Update an active campaign. Does not re-dispatch push notifications."""
     campaign = await get_campaign_by_id(db, payload.id, active_only=True)
@@ -350,6 +523,15 @@ async def update_campaign(
             "Notification campaign not found.",
             response_cls=UpdateCampaignResponse,
         )
+
+    old_state = {
+        "campaign_type": campaign.campaign_type.value
+        if hasattr(campaign.campaign_type, "value")
+        else str(campaign.campaign_type),
+        "title": campaign.title,
+        "status": campaign.status.value if hasattr(campaign.status, "value") else str(campaign.status),
+        "is_active": bool(campaign.is_active),
+    }
 
     notification_type = await get_notification_type_by_name(
         db,
@@ -382,6 +564,28 @@ async def update_campaign(
             message=message,
             targets_storage=targets_storage,
         )
+        from apps.administration.services.admin_activity_log_service import create_admin_activity_log
+
+        await create_admin_activity_log(
+            db,
+            user_id=actor_user_id or campaign.created_by_admin_id,
+            role=actor_role,
+            action="update",
+            module="notification_campaign",
+            record_id=campaign.id,
+            description=_campaign_activity_description("update", payload.campaign_type),
+            metadata={
+                "old": old_state,
+                "new": {
+                    "campaign_type": payload.campaign_type.value
+                    if hasattr(payload.campaign_type, "value")
+                    else str(payload.campaign_type),
+                    "title": title,
+                    "status": campaign.status.value if hasattr(campaign.status, "value") else str(campaign.status),
+                    "is_active": bool(campaign.is_active),
+                },
+            },
+        )
         await db.commit()
         await db.refresh(campaign)
     except IntegrityError:
@@ -402,6 +606,8 @@ async def delete_campaign(
     db: AsyncSession,
     *,
     campaign_id: UUID,
+    actor_user_id: UUID | None = None,
+    actor_role: str | None = None,
 ) -> DeleteCampaignResponse:
     """Soft-delete a campaign by setting is_active=false."""
     campaign = await get_campaign_by_id(db, campaign_id)
@@ -412,7 +618,30 @@ async def delete_campaign(
         )
 
     try:
+        old_state = {
+            "is_active": True,
+            "status": campaign.status.value if hasattr(campaign.status, "value") else str(campaign.status),
+            "title": campaign.title,
+        }
         await deactivate_campaign(db, campaign)
+        from apps.administration.services.admin_activity_log_service import create_admin_activity_log
+
+        await create_admin_activity_log(
+            db,
+            user_id=actor_user_id or campaign.created_by_admin_id,
+            role=actor_role,
+            action="delete",
+            module="notification_campaign",
+            record_id=campaign.id,
+            description=_campaign_activity_description("delete", campaign.campaign_type),
+            metadata={
+                "old": old_state,
+                "new": {
+                    "is_active": False,
+                    "status": campaign.status.value if hasattr(campaign.status, "value") else str(campaign.status),
+                },
+            },
+        )
         await db.commit()
         await db.refresh(campaign)
     except IntegrityError:
@@ -455,6 +684,8 @@ async def _sync_broadcast_notification(
 async def dispatch_campaign(
     db: AsyncSession,
     campaign_id: UUID,
+    *,
+    actor_role: str | None = None,
 ) -> None:
     """
     Single entry point for campaign processing.
@@ -467,10 +698,35 @@ async def dispatch_campaign(
     """
     logger.info("Campaign started campaign_id=%s", campaign_id)
 
-    campaign = await _get_campaign(db, campaign_id)
+    campaign = await get_campaign_for_dispatch(db, campaign_id)
     if campaign is None:
         logger.error("Campaign failed campaign_id=%s reason=not_found", campaign_id)
         raise ValueError("Notification campaign not found.")
+
+    if campaign.status != NotificationCampaignStatus.draft:
+        logger.info(
+            "Campaign dispatch skipped campaign_id=%s status=%s",
+            campaign_id,
+            campaign.status.value
+            if hasattr(campaign.status, "value")
+            else str(campaign.status),
+        )
+        return
+
+    existing_notification = await get_notification_by_campaign_id(db, campaign_id)
+    if existing_notification is not None:
+        logger.info(
+            "Campaign dispatch skipped campaign_id=%s reason=already_dispatched",
+            campaign_id,
+        )
+        await _update_campaign_status(
+            db,
+            campaign,
+            status=NotificationCampaignStatus.sent,
+            sent_at=campaign.sent_at or utc_now(),
+        )
+        await db.commit()
+        return
 
     try:
         if campaign.campaign_type == NotificationCampaignType.announcement:
@@ -484,6 +740,12 @@ async def dispatch_campaign(
             status=NotificationCampaignStatus.sent,
             sent_at=utc_now(),
         )
+        await _log_campaign_dispatch_activity(
+            db,
+            campaign,
+            status=NotificationCampaignStatus.sent,
+            actor_role=actor_role,
+        )
         await db.commit()
         logger.info("Campaign completed campaign_id=%s status=SENT", campaign_id)
     except Exception:
@@ -496,6 +758,12 @@ async def dispatch_campaign(
                     db,
                     campaign,
                     status=NotificationCampaignStatus.failed,
+                )
+                await _log_campaign_dispatch_activity(
+                    db,
+                    campaign,
+                    status=NotificationCampaignStatus.failed,
+                    actor_role=actor_role,
                 )
                 await db.commit()
         except Exception:
@@ -519,6 +787,8 @@ async def _dispatch_announcement(
         campaign.id,
         len(recipient_user_ids),
     )
+    if not recipient_user_ids:
+        raise ValueError(NO_ELIGIBLE_USER_MESSAGE)
 
     await create_campaign_audience(
         db,
@@ -613,6 +883,9 @@ async def _dispatch_topic(
             campaign.id,
         )
 
+    if not recipient_user_ids:
+        raise ValueError(NO_ELIGIBLE_USER_MESSAGE)
+
     notification = await create_broadcast_notification(
         db,
         owner_user_id=campaign.created_by_admin_id,
@@ -690,7 +963,7 @@ async def _send_token_push(
     if not push_targets:
         return {"successful_count": 0, "failed_count": 0, "failed_tokens": []}
 
-    payload = data or {
+    raw_payload = data or {
         "notification_type": (
             campaign.campaign_type.value
             if hasattr(campaign.campaign_type, "value")
@@ -698,6 +971,7 @@ async def _send_token_push(
         ),
         "campaign_id": str(campaign.id),
     }
+    payload = NotificationPayloadBuilder.for_fcm(raw_payload)
     return await send_push_to_devices(
         push_targets,
         campaign.title,

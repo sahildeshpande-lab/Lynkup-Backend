@@ -3,14 +3,19 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from apps.accounts.db_models import User
 from apps.report.db_models import Report
 from apps.profiles.db_models import Profile
-from common.enums import ReportEntityType, ReportStatus
+from common.enums import (
+    ReportEntityType,
+    ReportStatus,
+    ReportedEntityOrder,
+    ReportedEntitySort,
+)
 
 
 async def create_report(
@@ -38,11 +43,16 @@ async def create_report(
 async def get_report_by_id(
     db: AsyncSession,
     report_id: UUID,
+    include_deleted: bool = False,
 ) -> tuple[Report, User, Profile | None, User | None, Profile | None] | None:
     reporter_user = aliased(User, name="reporter_user")
     reporter_profile = aliased(Profile, name="reporter_profile")
     moderator_user = aliased(User, name="moderator_user")
     moderator_profile = aliased(Profile, name="moderator_profile")
+
+    filters = [Report.id == report_id]
+    if not include_deleted:
+        filters.append(Report.is_deleted.is_(False))
 
     stmt = (
         select(Report, reporter_user, reporter_profile, moderator_user, moderator_profile)
@@ -50,10 +60,11 @@ async def get_report_by_id(
         .outerjoin(reporter_profile, reporter_profile.user_id == Report.reported_id)
         .outerjoin(moderator_user, moderator_user.id == Report.moderator_id)
         .outerjoin(moderator_profile, moderator_profile.user_id == Report.moderator_id)
-        .where(Report.id == report_id)
+        .where(*filters)
     )
     result = (await db.execute(stmt)).first()
     return result
+
 
 
 async def get_duplicate_report(
@@ -68,6 +79,7 @@ async def get_duplicate_report(
         Report.reported_id == reported_id,
         Report.entity_type == entity_type,
         Report.entity_id == entity_id,
+        Report.is_deleted.is_(False),
     ]
     if entity_type == ReportEntityType.post:
         filters.append(Report.post_revision_id == post_revision_id)
@@ -242,6 +254,57 @@ async def sync_open_report_moderator_for_post(
     await db.execute(stmt)
 
 
+async def clear_entity_report_queue_counts(
+    db: AsyncSession,
+    *,
+    entity_type: ReportEntityType,
+    entity_id: UUID,
+) -> int:
+    """Reset moderation queue count to zero without deleting report history."""
+    stmt = (
+        update(Report)
+        .where(
+            Report.entity_type == entity_type,
+            Report.entity_id == entity_id,
+            Report.is_deleted.is_(False),
+            Report.counts_in_queue.is_(True),
+        )
+        .values(
+            counts_in_queue=False,
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    result = await db.execute(stmt)
+    return int(result.rowcount or 0)
+
+
+async def hard_delete_reports_assigned_to_moderator(
+    db: AsyncSession,
+    moderator_id: UUID,
+) -> int:
+    """Permanently delete reports assigned to a moderator account."""
+    result = await db.execute(
+        delete(Report).where(Report.moderator_id == moderator_id)
+    )
+    return int(result.rowcount or 0)
+
+
+async def hard_delete_reports_for_entity(
+    db: AsyncSession,
+    *,
+    entity_type: ReportEntityType,
+    entity_id: UUID,
+) -> int:
+    """Permanently delete all reports for a moderated entity."""
+    result = await db.execute(
+        delete(Report).where(
+            Report.entity_type == entity_type,
+            Report.entity_id == entity_id,
+        )
+    )
+    return int(result.rowcount or 0)
+
+
 async def update_report(
     db: AsyncSession,
     report_id: UUID,
@@ -256,10 +319,41 @@ async def update_report(
 
     report.status = status
     report.admin_comment = admin_comment
-    report.moderator_id = moderator_id
+    if report.moderator_id is None:
+        report.moderator_id = moderator_id
     report.updated_at = datetime.now(timezone.utc)
     db.add(report)
     return report
+
+
+async def update_reports_for_entity(
+    db: AsyncSession,
+    entity_type: ReportEntityType,
+    entity_id: UUID,
+    status: ReportStatus,
+    admin_comment: str | None,
+    moderator_id: UUID,
+) -> list[Report]:
+    """Update all under_review reports for a specific entity in one batch."""
+    stmt = (
+        select(Report)
+        .where(
+            Report.entity_type == entity_type,
+            Report.entity_id == entity_id,
+            Report.status == ReportStatus.under_review,
+            Report.is_deleted.is_(False),
+        )
+    )
+    reports = (await db.execute(stmt)).scalars().all()
+    now = datetime.now(timezone.utc)
+    for report in reports:
+        report.status = status
+        report.admin_comment = admin_comment
+        if report.moderator_id is None:
+            report.moderator_id = moderator_id
+        report.updated_at = now
+        db.add(report)
+    return list(reports)
 
 
 async def count_reports_for_entity(
@@ -272,6 +366,8 @@ async def count_reports_for_entity(
     filters = [
         Report.entity_type == entity_type,
         Report.entity_id == entity_id,
+        Report.is_deleted.is_(False),
+        Report.counts_in_queue.is_(True),
     ]
     if entity_type == ReportEntityType.post:
         filters.append(Report.post_revision_id == post_revision_id)
@@ -292,6 +388,8 @@ async def count_reports_by_entity_ids(
         .where(
             Report.entity_type == entity_type,
             Report.entity_id.in_(entity_ids),
+            Report.is_deleted.is_(False),
+            Report.counts_in_queue.is_(True),
         )
         .group_by(Report.entity_id)
     )
@@ -325,17 +423,137 @@ def _report_filter_conditions(
     entity_type: ReportEntityType | None = None,
     entity_id: UUID | None = None,
     moderator_id: UUID | None = None,
+    queue_only: bool = False,
 ) -> list:
-    conditions = []
+    conditions = [Report.is_deleted.is_(False)]
+    if queue_only:
+        conditions.append(Report.counts_in_queue.is_(True))
     if status is not None:
         conditions.append(Report.status == status)
     if entity_type is not None:
         conditions.append(Report.entity_type == entity_type)
+        if entity_type == ReportEntityType.post:
+            from apps.feed.db_models import Post
+            from common.enums import PostState
+
+            conditions.append(
+                Report.entity_id.in_(
+                    select(Post.id).where(Post.state != PostState.deleted)
+                )
+            )
+        elif entity_type == ReportEntityType.comment:
+            from apps.engagement.db_models import Comment
+
+            conditions.append(
+                Report.entity_id.in_(
+                    select(Comment.id).where(Comment.is_deleted.is_(False))
+                )
+            )
     if entity_id is not None:
         conditions.append(Report.entity_id == entity_id)
     if moderator_id is not None:
         conditions.append(Report.moderator_id == moderator_id)
     return conditions
+
+
+
+def _profile_name_clauses(profile, pattern):
+    return [
+        profile.first_name.ilike(pattern),
+        profile.last_name.ilike(pattern),
+        func.concat(profile.first_name, " ", profile.last_name).ilike(pattern),
+    ]
+
+
+def _reported_entity_search_clause(
+    entity_type: ReportEntityType | None,
+    search: str | None,
+):
+    """Match reported entities by name/content for the given entity_type."""
+    term = (search or "").strip()
+    if not term or entity_type is None:
+        return None
+    pattern = f"%{term}%"
+
+    if entity_type == ReportEntityType.post:
+        from apps.feed.db_models import Post
+
+        author_profile = aliased(Profile, name="reported_post_author")
+        return Report.entity_id.in_(
+            select(Post.id)
+            .outerjoin(author_profile, author_profile.user_id == Post.author_user_id)
+            .where(
+                or_(
+                    *_profile_name_clauses(author_profile, pattern),
+                    Post.content["caption"].astext.ilike(pattern),
+                    Post.content["content_html"].astext.ilike(pattern),
+                )
+            )
+        )
+
+    if entity_type == ReportEntityType.user:
+        from apps.profiles.db_models.university_db_model import University
+
+        return Report.entity_id.in_(
+            select(User.id)
+            .outerjoin(Profile, Profile.user_id == User.id)
+            .outerjoin(University, University.id == Profile.university_id)
+            .where(
+                or_(
+                    *_profile_name_clauses(Profile, pattern),
+                    University.name.ilike(pattern),
+                )
+            )
+        )
+
+    if entity_type == ReportEntityType.comment:
+        from apps.engagement.db_models import Comment
+
+        commenter_profile = aliased(Profile, name="reported_comment_author")
+        return Report.entity_id.in_(
+            select(Comment.id)
+            .outerjoin(commenter_profile, commenter_profile.user_id == Comment.user_id)
+            .where(
+                or_(
+                    *_profile_name_clauses(commenter_profile, pattern),
+                    Comment.comment_text.ilike(pattern),
+                )
+            )
+        )
+
+    return None
+
+
+def _reported_entities_order_by(
+    ranked,
+    sort: ReportedEntitySort | None = None,
+    order: ReportedEntityOrder | None = None,
+):
+    """ORDER BY for GET /admin/reports/details.
+
+    ``report_count`` (default): highest first, then latest report time.
+    ``created_at``: first report time for the entity.
+    ``updated_at``: last report update for the entity.
+    ``latest_reported_at``: newest report on the entity.
+    ``order`` defaults to ``desc``.
+    """
+    descending = order != ReportedEntityOrder.asc
+    if sort == ReportedEntitySort.created_at:
+        primary = ranked.c.created_at
+        extras = ()
+    elif sort == ReportedEntitySort.updated_at:
+        primary = ranked.c.updated_at
+        extras = ()
+    elif sort == ReportedEntitySort.latest_reported_at:
+        primary = ranked.c.latest_reported_at
+        extras = ()
+    else:
+        primary = ranked.c.report_count
+        extras = (ranked.c.latest_reported_at,)
+
+    if descending:
+        return (primary.desc(), *(col.desc() for col in extras), ranked.c.entity_id.desc())
+    return (primary.asc(), *(col.asc() for col in extras), ranked.c.entity_id.asc())
 
 
 async def get_reported_entities(
@@ -346,18 +564,26 @@ async def get_reported_entities(
     moderator_id: UUID | None = None,
     offset: int = 0,
     limit: int | None = None,
+    sort: ReportedEntitySort = ReportedEntitySort.report_count,
+    order: ReportedEntityOrder = ReportedEntityOrder.desc,
+    search: str | None = None,
 ) -> list[dict]:
     """
     Return one moderation-queue row per (entity_type, entity_id).
 
     Aggregates report_count / timestamps and takes status + moderator_id from
     the latest report in the filtered set (created_at DESC, id DESC).
+    Sort by report_count (default), created_at, updated_at, or latest_reported_at.
+    ``order`` defaults to desc.
     """
     conditions = _report_filter_conditions(
-        status=status,
         entity_type=entity_type,
         moderator_id=moderator_id,
+        queue_only=True,
     )
+    search_clause = _reported_entity_search_clause(entity_type, search)
+    if search_clause is not None:
+        conditions.append(search_clause)
 
     ranked = (
         select(
@@ -388,6 +614,10 @@ async def get_reported_entities(
         .subquery()
     )
 
+    outer_conditions = [ranked.c.rn == 1, ranked.c.report_count > 0]
+    if status is not None:
+        outer_conditions.append(ranked.c.status == status)
+
     stmt = (
         select(
             ranked.c.report_id,
@@ -401,8 +631,8 @@ async def get_reported_entities(
             ranked.c.created_at,
             ranked.c.updated_at,
         )
-        .where(ranked.c.rn == 1)
-        .order_by(ranked.c.latest_reported_at.desc(), ranked.c.entity_id.desc())
+        .where(*outer_conditions)
+        .order_by(*_reported_entities_order_by(ranked, sort, order))
         .offset(offset)
     )
     if limit is not None:
@@ -432,20 +662,40 @@ async def count_reported_entities(
     status: ReportStatus | None = None,
     entity_type: ReportEntityType | None = None,
     moderator_id: UUID | None = None,
+    search: str | None = None,
 ) -> int:
     """Count distinct reported entities matching the given filters."""
     conditions = _report_filter_conditions(
-        status=status,
         entity_type=entity_type,
         moderator_id=moderator_id,
+        queue_only=True,
     )
-    grouped = (
-        select(Report.entity_type, Report.entity_id)
+    search_clause = _reported_entity_search_clause(entity_type, search)
+    if search_clause is not None:
+        conditions.append(search_clause)
+
+    ranked = (
+        select(
+            Report.status.label("status"),
+            func.count(Report.id)
+            .over(partition_by=(Report.entity_type, Report.entity_id))
+            .label("report_count"),
+            func.row_number()
+            .over(
+                partition_by=(Report.entity_type, Report.entity_id),
+                order_by=(Report.created_at.desc(), Report.id.desc()),
+            )
+            .label("rn"),
+        )
         .where(*conditions)
-        .group_by(Report.entity_type, Report.entity_id)
         .subquery()
     )
-    stmt = select(func.count()).select_from(grouped)
+
+    outer_conditions = [ranked.c.rn == 1, ranked.c.report_count > 0]
+    if status is not None:
+        outer_conditions.append(ranked.c.status == status)
+
+    stmt = select(func.count()).select_from(ranked).where(*outer_conditions)
     return int((await db.execute(stmt)).scalar_one())
 
 
@@ -463,6 +713,7 @@ async def count_reported_entities_summary_by_status(
     conditions = _report_filter_conditions(
         entity_type=entity_type,
         moderator_id=moderator_id,
+        queue_only=True,
     )
 
     ranked = (

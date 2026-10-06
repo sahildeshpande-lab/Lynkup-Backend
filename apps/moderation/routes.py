@@ -12,7 +12,10 @@ from apps.moderation.services import (
     update_moderation_words,
 )
 from core.database.session import get_session
-from core.security.auth import get_current_user_moderator_or_superadmin
+from core.security.auth import (
+    get_current_superadmin,
+    get_current_user_moderator_or_superadmin,
+)
 
 router = APIRouter(tags=["Moderation"])
 
@@ -29,8 +32,14 @@ async def get_moderation_words_route(
 async def update_moderation_words_route(
     payload: UpdateModerationWordsRequest,
     db: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_superadmin),
 ) -> ApiResponse:
-    data = await update_moderation_words(payload, db)
+    data = await update_moderation_words(
+        payload,
+        db,
+        actor_user_id=current_user.id,
+        actor_role=getattr(current_user, "role", None),
+    )
     return ApiResponse(message="Words updated successfully", data=data)
 
 

@@ -7,8 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File,
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database.session import get_session
+from core.auth.dependencies import require_recent_auth
 from core.security.auth import get_bearer_token, get_current_user, get_current_app_user
 from apps.accounts.db_models import User
+from apps.accounts.schemas import ChangeEmailRequest
+from apps.accounts.services import change_email as change_email_service
 from .schemas import (
     ApiResponse,
     OnboardingRequest,
@@ -82,6 +85,16 @@ async def delete_me(
     return ApiResponse(message="user deletion scheduled", data=data)
 
 
+@router.patch("/users/me/email", response_model=ApiResponse)
+async def change_email(
+    payload: ChangeEmailRequest,
+    current_user: User = Depends(get_current_user),
+    _recent_auth: dict = Depends(require_recent_auth),
+    db: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    return await change_email_service(current_user, payload, db)
+
+
 
 @router.post("/users/onboarding", response_model=ApiResponse)
 async def complete_onboarding(
@@ -97,10 +110,13 @@ async def complete_onboarding(
         university_id=payload.university_id,
         major=payload.major,
         minor=payload.minor,
+        major_id=payload.major_id,
+        minor_id=payload.minor_id,
         education_level_id=payload.education_level_id,
         bio=payload.bio,
         academic_interests=payload.academic_interests,
         invitation_code=payload.invitation_code,
+        graduation_date=payload.graduationDate,
         db=db,
     )
     return ApiResponse(message="onboarding completed", data=data)

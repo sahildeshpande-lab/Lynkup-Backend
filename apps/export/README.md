@@ -80,13 +80,23 @@ and can be removed from your environment.
 
 ## Cleanup
 
+Manual / admin trigger:
+
+```http
+POST /api/v1/admin/exports/cleanup
+```
+
+Requires an admin JWT. Response includes ``cleaned`` (number of exports processed).
+
+Programmatic / external cron:
+
 ```python
 from apps.export.cleanup import cleanup_expired_exports
 
 await cleanup_expired_exports()
 ```
 
-Schedule via Linux Cron. Not auto-started by FastAPI.
+Not auto-started by FastAPI lifespan.
 
 Cleanup flow:
 1. Find exports where `status=completed` and `download_expires_at < now`.

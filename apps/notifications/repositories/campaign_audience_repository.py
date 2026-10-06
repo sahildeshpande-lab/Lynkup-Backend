@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
-from sqlalchemy import String, cast, func, or_, select, text
+from sqlalchemy import cast, func, or_, select, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,13 +65,22 @@ def _resolve_edu_level(value: str) -> str | None:
 
 
 def _profile_interest_contains(interest_id: int):
+    """
+    Match interest id in profile_interests_id JSON array.
+
+    Use explicit ``@>`` — ``coalesce(...).contains(...)`` can lose the JSONB
+    comparator and generate a non-``@>`` predicate, missing valid recipients.
+    """
+    iid = int(interest_id)
     interests_json = func.coalesce(
         cast(Profile.profile_interests_id, JSONB),
         cast(text("'[]'"), JSONB),
     )
+    as_int = cast(text(f"'[{iid}]'"), JSONB)
+    as_str = cast(text(f"'[\"{iid}\"]'"), JSONB)
     return or_(
-        interests_json.contains(func.jsonb_build_array(interest_id)),
-        interests_json.contains(func.jsonb_build_array(cast(interest_id, String))),
+        interests_json.op("@>")(as_int),
+        interests_json.op("@>")(as_str),
     )
 
 
@@ -203,14 +212,20 @@ async def list_campaign_audience_user_ids(
 
 
 async def resolve_announcement_recipients(db: AsyncSession) -> list[UUID]:
-    """All active, visible users for ANNOUNCEMENT campaigns."""
+    """All active, visible standard users (role 'user') for ANNOUNCEMENT campaigns."""
+    from apps.accounts.db_models import Role, UserRole
+
     stmt = (
         select(User.id)
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
         .where(
             *visible_user_filters(User),
             User.status == UserStatus.active,
+            Role.name == "user",
         )
-        .order_by(User.created_at.desc())
+        .distinct()
+        .order_by(User.id.desc())
     )
     return list((await db.execute(stmt)).scalars().all())
 
@@ -218,36 +233,56 @@ async def resolve_announcement_recipients(db: AsyncSession) -> list[UUID]:
 async def resolve_topic_recipients(
     db: AsyncSession,
     *,
-    targets: list[tuple[NotificationTargetType, list[str]]],
+    targets: list[tuple[NotificationTargetType, list[str]]]
+    | list[tuple[NotificationTargetType, list[str], bool]]
+    | list[tuple[NotificationTargetType, list[str], bool, bool | None]],
 ) -> list[UUID]:
     """
     Resolve recipients for TOPIC campaigns.
 
     - Within the same filter type, values are OR'd (any match).
+    - If to_all is True for a filter type, all active users for that filter type match.
     - Across different filter types, results are AND'd (must match every type).
+    - USERS + to_all + is_alumni=true restricts to profiles with is_alumni set.
 
     Examples:
     - University A + University B → users at A or B
+    - University (to_all=True) → all users with a university
     - University A + Major B → users at A with major B
     - University A + Major A + Major B → users at A with major A or B
+    - USERS (to_all=True, is_alumni=True) → all alumni
     """
     if not targets:
         return []
 
-    # Merge values for the same type so duplicate type entries still OR together.
+    # Merge values and to_all flags for the same type so duplicate type entries still OR together.
     merged_values: dict[NotificationTargetType, list[str]] = {}
+    to_all_flags: dict[NotificationTargetType, bool] = {}
+    alumni_flags: dict[NotificationTargetType, bool | None] = {}
     type_order: list[NotificationTargetType] = []
-    for target_type, target_values in targets:
-        cleaned = [
-            str(value).strip()
-            for value in target_values
-            if value and str(value).strip()
-        ]
-        if not cleaned:
-            continue
+
+    for item in targets:
+        target_type = item[0]
+        target_values = item[1]
+        to_all = bool(item[2]) if len(item) >= 3 else False
+        is_alumni = item[3] if len(item) >= 4 else None
+
         if target_type not in merged_values:
             merged_values[target_type] = []
+            to_all_flags[target_type] = False
+            alumni_flags[target_type] = None
             type_order.append(target_type)
+
+        if to_all:
+            to_all_flags[target_type] = True
+        if is_alumni is True:
+            alumni_flags[target_type] = True
+
+        cleaned = [
+            str(value).strip()
+            for value in (target_values or [])
+            if value and str(value).strip()
+        ]
         existing = merged_values[target_type]
         seen_values = {value.casefold() for value in existing}
         for value in cleaned:
@@ -263,24 +298,30 @@ async def resolve_topic_recipients(
     ordered_seed: list[UUID] = []
 
     for index, target_type in enumerate(type_order):
+        resolve_kwargs: dict = {}
+        if to_all_flags[target_type]:
+            resolve_kwargs["to_all"] = True
+        if alumni_flags[target_type] is not None:
+            resolve_kwargs["is_alumni"] = alumni_flags[target_type]
         recipients = await _resolve_single_target_recipients(
             db,
             target_type=target_type,
             target_values=merged_values[target_type],
+            **resolve_kwargs,
         )
         recipient_set = set(recipients)
         if index == 0:
             ordered_seed = recipients
             intersection = recipient_set
         else:
-            assert intersection is not None
+            assert intersection is not None  # nosec B101 -- internal invariant, not input validation
             intersection &= recipient_set
 
         # AND short-circuit: no users can satisfy remaining filters.
         if not intersection:
             return []
 
-    assert intersection is not None
+    assert intersection is not None  # nosec B101 -- internal invariant, not input validation
     return [user_id for user_id in ordered_seed if user_id in intersection]
 
 
@@ -356,12 +397,57 @@ async def get_active_push_targets_for_users(
     return targets
 
 
+def _alumni_filters(is_alumni: bool | None) -> list:
+    """Alumni-only when ``is_alumni`` is true; omitted or false applies no alumni filter."""
+    if is_alumni is not True:
+        return []
+    return [Profile.is_alumni.is_(True)]
+
+
 async def _resolve_single_target_recipients(
     db: AsyncSession,
     *,
     target_type: NotificationTargetType,
     target_values: list[str],
+    to_all: bool = False,
+    is_alumni: bool | None = None,
 ) -> list[UUID]:
+    alumni_extra = _alumni_filters(is_alumni)
+
+    if target_type == NotificationTargetType.users:
+        if to_all:
+            return await _base_visible_profile_user_ids(db, alumni_extra)
+        return await _resolve_explicit_users(db, target_values, alumni_extra)
+
+    if to_all:
+        if target_type == NotificationTargetType.university:
+            return await _base_visible_profile_user_ids(
+                db, [Profile.university_id.is_not(None), *alumni_extra]
+            )
+        if target_type == NotificationTargetType.major:
+            return await _base_visible_profile_user_ids(
+                db, [Profile.major.is_not(None), func.trim(Profile.major) != "", *alumni_extra]
+            )
+        if target_type == NotificationTargetType.minor:
+            return await _base_visible_profile_user_ids(
+                db, [Profile.minor.is_not(None), func.trim(Profile.minor) != "", *alumni_extra]
+            )
+        if target_type == NotificationTargetType.education_level:
+            return await _base_visible_profile_user_ids(
+                db, [Profile.edu_level.is_not(None), *alumni_extra]
+            )
+        if target_type == NotificationTargetType.country:
+            return await _base_visible_profile_user_ids(
+                db, [Profile.country_id.is_not(None), *alumni_extra]
+            )
+        if target_type == NotificationTargetType.interests:
+            return await _base_visible_profile_user_ids(
+                db, [Profile.profile_interests_id.is_not(None), *alumni_extra]
+            )
+        if target_type == NotificationTargetType.hashtags:
+            return await _base_visible_profile_user_ids(db, alumni_extra)
+        return []
+
     cleaned = [str(value).strip() for value in target_values if value and str(value).strip()]
     if not cleaned:
         return []
@@ -369,9 +455,9 @@ async def _resolve_single_target_recipients(
     if target_type == NotificationTargetType.university:
         return await _resolve_university_users(db, cleaned)
     if target_type == NotificationTargetType.major:
-        return await _resolve_profile_string_users(db, Profile.major, cleaned)
+        return await _resolve_major_users(db, cleaned)
     if target_type == NotificationTargetType.minor:
-        return await _resolve_profile_string_users(db, Profile.minor, cleaned)
+        return await _resolve_minor_users(db, cleaned)
     if target_type == NotificationTargetType.education_level:
         return await _resolve_education_level_users(db, cleaned)
     if target_type == NotificationTargetType.country:
@@ -381,6 +467,24 @@ async def _resolve_single_target_recipients(
     if target_type == NotificationTargetType.hashtags:
         return await _resolve_hashtag_users(db, cleaned)
     return []
+
+
+async def _resolve_explicit_users(
+    db: AsyncSession,
+    values: list[str],
+    extra_filters: list,
+) -> list[UUID]:
+    user_ids = [
+        parsed
+        for parsed in (_try_parse_uuid(value) for value in values)
+        if parsed is not None
+    ]
+    if not user_ids:
+        return []
+    return await _base_visible_profile_user_ids(
+        db,
+        [Profile.user_id.in_(user_ids), *extra_filters],
+    )
 
 
 async def _base_visible_profile_user_ids(db: AsyncSession, extra_filters: list) -> list[UUID]:
@@ -432,6 +536,60 @@ async def _resolve_profile_string_users(
     values: list[str],
 ) -> list[UUID]:
     clauses = [func.lower(func.trim(column)) == value.lower() for value in values]
+    return await _base_visible_profile_user_ids(db, [or_(*clauses)])
+
+
+async def _resolve_major_users(db: AsyncSession, values: list[str]) -> list[UUID]:
+    """Match profiles by ``major_id`` and/or major name."""
+    from apps.profiles.db_models.major_db_model import Major
+
+    id_values: list[int] = []
+    name_values: list[str] = []
+    for value in values:
+        if value.isdigit():
+            id_values.append(int(value))
+        else:
+            name_values.append(value)
+
+    clauses = []
+    if id_values:
+        clauses.append(Profile.major_id.in_(id_values))
+        name_stmt = select(Major.name).where(Major.id.in_(id_values))
+        resolved_names = list((await db.execute(name_stmt)).scalars().all())
+        name_values.extend(n for n in resolved_names if n and str(n).strip())
+
+    for name in name_values:
+        clauses.append(func.lower(func.trim(Profile.major)) == name.lower())
+
+    if not clauses:
+        return []
+    return await _base_visible_profile_user_ids(db, [or_(*clauses)])
+
+
+async def _resolve_minor_users(db: AsyncSession, values: list[str]) -> list[UUID]:
+    """Match profiles by ``minor_id`` and/or minor name."""
+    from apps.profiles.db_models.minor_db_model import Minor
+
+    id_values: list[int] = []
+    name_values: list[str] = []
+    for value in values:
+        if value.isdigit():
+            id_values.append(int(value))
+        else:
+            name_values.append(value)
+
+    clauses = []
+    if id_values:
+        clauses.append(Profile.minor_id.in_(id_values))
+        name_stmt = select(Minor.name).where(Minor.id.in_(id_values))
+        resolved_names = list((await db.execute(name_stmt)).scalars().all())
+        name_values.extend(n for n in resolved_names if n and str(n).strip())
+
+    for name in name_values:
+        clauses.append(func.lower(func.trim(Profile.minor)) == name.lower())
+
+    if not clauses:
+        return []
     return await _base_visible_profile_user_ids(db, [or_(*clauses)])
 
 

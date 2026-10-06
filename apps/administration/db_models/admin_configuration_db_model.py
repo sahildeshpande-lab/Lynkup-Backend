@@ -34,7 +34,7 @@ class AdminConfiguration(SQLModel, table=True):
             ),
             nullable=False,
             server_default=text("'feature_flag'"),
-            index=True,
+            index=False
         ),
     )
     value: dict[str, Any] | None = Field(

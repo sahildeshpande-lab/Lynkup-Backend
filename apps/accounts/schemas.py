@@ -6,7 +6,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from common.enums import ProfileVisibility
-from common.enums import Role, SocialProvider
+from common.enums import PublicAuthRole, Role, SocialProvider
 
 
 from common.schemas import ApiResponse
@@ -25,7 +25,7 @@ class SocialAuthRequest(BaseModel):
     email: Optional[EmailStr] = None
     firstName: Optional[str] = None
     lastName: Optional[str] = None
-    user: Role = "user"
+    user: PublicAuthRole = PublicAuthRole.user
     device_id: str | None = None
     fullName: Optional[str] = None
     platform: str | None = Field(
@@ -37,7 +37,8 @@ class SocialAuthRequest(BaseModel):
         default=None,
         description="Optional Firebase Cloud Messaging device token.",
     )
-    # Google / Apple avatar URL — stored as-is on profiles.profile_photo_url.
+    # Google / Apple avatar URL. Copied to S3 on first social login; later
+    # logins do not overwrite a stored S3 key (including user uploads).
     profile_photo_url: Optional[str] = None
 
     @field_validator("device_id")
@@ -67,7 +68,7 @@ class EmailSignupRequest(BaseModel):
     lastName: str
     email: EmailStr
     password: str = Field(min_length=8, max_length=20)
-    role: Role
+    role: PublicAuthRole = PublicAuthRole.user
     firebaseId: str
     device_id: str | None = None
     platform: str | None = Field(
@@ -253,7 +254,7 @@ class AuthUserResponse(BaseModel):
     educationLevel: str | None = None
     bio: str | None = None
     academicInterests: list[str] = Field(default_factory=list)
-    profileVisibility: ProfileVisibility = ProfileVisibility.public
+    profileVisibility: ProfileVisibility = ProfileVisibility.private
     completenessScore: int = 33
     notificationPreferences: NotificationPreferences = Field(default_factory=NotificationPreferences)
     isEmailVerified: bool = False
@@ -319,6 +320,8 @@ class AdminAuthSessionResponse(BaseModel):
     refreshToken: str
     user: UserBaseResponse
     emailSent: bool = False
+    # Present when login activates a pre-registered Web Admin RSA signing key.
+    keyId: str | None = None
 
 
 class AdminAuthResponse(ApiResponse):
@@ -354,6 +357,17 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_at: datetime | None = None
+
+class ChangeEmailRequest(BaseModel):
+    newEmail: EmailStr
+
+    @field_validator("newEmail")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        if not value or not value.strip():
+            raise ValueError("email cannot be blank")
+        return value.lower().strip()
+
 
 class UserChangePasswordRequest(BaseModel):
     firebaseId: str

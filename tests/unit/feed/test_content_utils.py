@@ -55,3 +55,19 @@ def test_post_content_payload_defaults_caption_to_none() -> None:
     payload = PostContentPayload(content_html="<p>Media description</p>")
 
     assert payload.caption is None
+
+
+def test_post_content_payload_allows_5000_char_caption() -> None:
+    payload = PostContentPayload(caption="x" * 5000)
+    assert payload.caption is not None
+    assert len(payload.caption) == 5000
+
+
+def test_post_content_payload_rejects_caption_over_5000() -> None:
+    with pytest.raises(ValueError, match="at most 5000"):
+        PostContentPayload(caption="x" * 5001)
+
+
+def test_validate_content_rejects_caption_over_5000() -> None:
+    with pytest.raises(ValueError, match="Caption exceeds maximum length of 5000"):
+        validate_content({"caption": "x" * 5001, "visibility": "public"})

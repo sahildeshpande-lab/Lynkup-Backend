@@ -5,6 +5,7 @@ from .report_repository import (
     count_reports_by_entity_ids,
     count_reports_by_entity_keys,
     count_reports_for_entity,
+    clear_entity_report_queue_counts,
     create_report,
     get_duplicate_report,
     get_previous_report_comments,
@@ -12,8 +13,9 @@ from .report_repository import (
     get_report_by_id,
     get_reported_entities,
     get_reports,
-    sync_open_report_moderator_for_post,
+    hard_delete_reports_assigned_to_moderator,
     update_report,
+    update_reports_for_entity,
 )
 
 __all__ = [
@@ -23,6 +25,7 @@ __all__ = [
     "count_reports_by_entity_ids",
     "count_reports_by_entity_keys",
     "count_reports_for_entity",
+    "clear_entity_report_queue_counts",
     "create_report",
     "get_duplicate_report",
     "get_previous_report_comments",
@@ -30,6 +33,9 @@ __all__ = [
     "get_report_by_id",
     "get_reported_entities",
     "get_reports",
+    "hard_delete_reports_assigned_to_moderator",
+    "hard_delete_reports_for_entity",
     "sync_open_report_moderator_for_post",
     "update_report",
+    "update_reports_for_entity",
 ]

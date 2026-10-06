@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from fastapi import Depends, HTTPException, Security, status, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from core.database.session import get_session
 from common.exceptions import ApiError
 
-from .config import settings as auth_settings
 from core.auth.services import verify_firebase_token
 
 
@@ -39,7 +36,7 @@ async def get_current_firebase_user(
     try:
         return verify_firebase_token(
             credentials.credentials,
-            check_revoked=False,
+            check_revoked=True,
         )
     except Exception as exc:
         raise HTTPException(
@@ -62,7 +59,7 @@ async def get_firebase_user_from_payload(
                 or body.get("firebaseId")
                 or body.get("firebase_id")
             )
-    except Exception:
+    except Exception:  # nosec B110 -- best-effort auth fallback
         pass
 
     if not token:
@@ -80,7 +77,7 @@ async def get_firebase_user_from_payload(
     try:
         decoded = verify_firebase_token(
             token,
-            check_revoked=False,
+            check_revoked=True,
         )
         return decoded
     except Exception as exc:
@@ -106,16 +103,9 @@ async def get_current_revoked_checked_firebase_user(
 async def require_recent_auth(
     firebase_user: dict = Security(get_current_revoked_checked_firebase_user),
 ) -> dict:
-    """Require a revoked-checked token whose Firebase auth_time is recent."""
+    """Require a revoked-checked Firebase ID token that includes auth_time."""
     auth_time = firebase_user.get("auth_time")
     if auth_time is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Recent Firebase authentication required",
-        )
-
-    now = int(datetime.now(timezone.utc).timestamp())
-    if now - int(auth_time) > auth_settings.recent_auth_max_age_seconds:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Recent Firebase authentication required",

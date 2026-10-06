@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, Integer, Enum, Boolean, Text
+from sqlalchemy import Column, DateTime, Integer, Enum, Boolean, String, Text, Index, desc
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel, Relationship
@@ -18,6 +18,14 @@ def utc_now() -> datetime:
 
 class Post(SQLModel, table=True):
     __tablename__ = "posts"
+    __table_args__ = (
+        Index(
+            "ix_posts_author_state_created",
+            "author_user_id",
+            "state",
+            desc("created_at"),
+        ),
+    )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True, index=True)
     author_user_id: UUID = Field(foreign_key="users.id", nullable=False, index=True)
@@ -56,6 +64,18 @@ class Post(SQLModel, table=True):
         default=None,
         sa_column=Column(JSONB, nullable=True),
     )
+    moderation_attempt_count: int = Field(
+        default=0,
+        sa_column=Column(Integer, nullable=False, server_default="0"),
+    )
+    moderation_lease_owner: str | None = Field(
+        default=None,
+        sa_column=Column(String(255), nullable=True),
+    )
+    moderation_lease_expires_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
     like_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
     repost_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
     share_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
@@ -70,7 +90,7 @@ class Post(SQLModel, table=True):
     )
     created_at: datetime = Field(
             default_factory=utc_now,
-            sa_column=Column(DateTime(timezone=True), nullable=False),
+            sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
         )
     updated_at: datetime = Field(
             default_factory=utc_now,

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import contains_eager, selectinload
 
 from apps.notifications.db_models import (
     Notification,
@@ -104,7 +104,10 @@ async def get_broadcast_notification_by_id(
             Notification.id == notification_id,
             Notification.campaign_id.is_not(None),
         )
-        .options(selectinload(Notification.notification_type))
+        .options(
+            selectinload(Notification.notification_type),
+            selectinload(Notification.campaign),
+        )
     )
     return (await db.execute(stmt)).scalar_one_or_none()
 
@@ -145,7 +148,12 @@ async def list_broadcast_notifications(
             NotificationType.name.in_(("ANNOUNCEMENT", "TOPIC")),
             NotificationCampaign.is_active.is_(True),
         )
-        .options(selectinload(Notification.notification_type))
+        .options(
+            selectinload(Notification.notification_type),
+            # Join already loads campaign columns; populate relationship to avoid
+            # async lazy-load (MissingGreenlet) in registration filtering.
+            contains_eager(Notification.campaign),
+        )
         .order_by(Notification.created_at.desc())
     )
     return list((await db.execute(stmt)).scalars().all())
@@ -367,11 +375,15 @@ def _merge_category_preferences(
     stored: dict[str, Any] | None,
 ) -> dict[str, bool]:
     """Overlay stored user values onto active category defaults."""
-    merged = dict(defaults)
+    from apps.notifications.email_preferences import EXTRA_CATEGORY_PREFERENCE_DEFAULTS
+
+    merged = {**defaults, **EXTRA_CATEGORY_PREFERENCE_DEFAULTS}
     if stored:
         for key in list(merged.keys()):
             if key in stored:
                 merged[key] = bool(stored[key])
+            elif key.lower() in stored:
+                merged[key] = bool(stored[key.lower()])
     return merged
 
 
@@ -390,7 +402,17 @@ async def filter_users_eligible_for_push(
     if not user_ids:
         return []
 
-    category_key = category.strip().upper()
+    from apps.notifications.email_preferences import (
+        CATEGORY_PREF_WEEKLY_LYNKUP_REQUEST_REMINDER,
+    )
+
+    raw = category.strip()
+    if raw.upper() == "CONNECTION_REMINDER":
+        category_key = CATEGORY_PREF_WEEKLY_LYNKUP_REQUEST_REMINDER
+    elif raw.lower() == CATEGORY_PREF_WEEKLY_LYNKUP_REQUEST_REMINDER:
+        category_key = CATEGORY_PREF_WEEKLY_LYNKUP_REQUEST_REMINDER
+    else:
+        category_key = raw.upper()
     defaults = await get_default_category_preferences(db)
 
     stmt = select(NotificationPreference).where(
@@ -410,7 +432,8 @@ async def filter_users_eligible_for_push(
 
         pref = preferences.get(user_id)
         if pref is None:
-            if defaults.get(category_key, True):
+            merged_defaults = _merge_category_preferences(defaults, None)
+            if merged_defaults.get(category_key, True):
                 eligible.append(user_id)
             continue
         if not pref.push_enabled:
@@ -422,6 +445,41 @@ async def filter_users_eligible_for_push(
     return eligible
 
 
+async def filter_users_eligible_for_email_preference(
+    db: AsyncSession,
+    user_ids: list[UUID],
+    *,
+    preference: str,
+) -> list[UUID]:
+    """
+    Return user IDs that have the given email preference enabled.
+
+    Missing preference rows / keys default to enabled (backward compatible).
+    """
+    from apps.notifications.email_preferences import is_email_preference_enabled
+
+    if not user_ids:
+        return []
+
+    stmt = select(NotificationPreference).where(
+        NotificationPreference.user_id.in_(user_ids)
+    )
+    preferences = {
+        pref.user_id: pref
+        for pref in (await db.execute(stmt)).scalars().all()
+    }
+
+    eligible: list[UUID] = []
+    seen: set[UUID] = set()
+    for user_id in user_ids:
+        if user_id in seen:
+            continue
+        seen.add(user_id)
+        if is_email_preference_enabled(preferences.get(user_id), preference):
+            eligible.append(user_id)
+    return eligible
+
+
 async def create_preferences(
     db: AsyncSession,
     *,
@@ -429,7 +487,10 @@ async def create_preferences(
     push_enabled: bool = True,
     in_app_enabled: bool = True,
     category_preferences: dict[str, Any] | None = None,
+    email_preferences: dict[str, Any] | None = None,
 ) -> NotificationPreference:
+    from apps.notifications.email_preferences import default_email_preferences
+
     preference = NotificationPreference(
         user_id=user_id,
         push_enabled=push_enabled,
@@ -438,6 +499,11 @@ async def create_preferences(
             category_preferences
             if category_preferences is not None
             else await get_default_category_preferences(db)
+        ),
+        email_preferences=(
+            email_preferences
+            if email_preferences is not None
+            else default_email_preferences()
         ),
     )
     db.add(preference)
@@ -453,6 +519,7 @@ async def update_preferences(
     push_enabled: bool | None = None,
     in_app_enabled: bool | None = None,
     category_preferences: dict[str, Any] | None = None,
+    email_preferences: dict[str, Any] | None = None,
 ) -> NotificationPreference:
     if push_enabled is not None:
         preference.push_enabled = push_enabled
@@ -460,8 +527,38 @@ async def update_preferences(
         preference.in_app_enabled = in_app_enabled
     if category_preferences is not None:
         preference.category_preferences = category_preferences
+    if email_preferences is not None:
+        preference.email_preferences = email_preferences
     preference.updated_at = utc_now()
     db.add(preference)
     await db.flush()
     await db.refresh(preference)
     return preference
+
+
+async def has_recent_post_recognition_notification(
+    db: AsyncSession,
+    *,
+    recipient_user_id: UUID,
+    milestone: int,
+    within_seconds: int,
+) -> bool:
+    """Return True when the user already received this milestone notification recently."""
+    if within_seconds <= 0:
+        return False
+
+    cutoff_dt = utc_now() - timedelta(seconds=within_seconds)
+
+    stmt = (
+        select(Notification.id)
+        .join(NotificationType, NotificationType.id == Notification.notification_type_id)
+        .where(
+            Notification.recipient_user_id == recipient_user_id,
+            Notification.campaign_id.is_(None),
+            NotificationType.name == "POST_RECOGNITION",
+            Notification.created_at >= cutoff_dt,
+            Notification.deep_link_payload["milestone"].astext == str(milestone),
+        )
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none() is not None

@@ -5,7 +5,8 @@ import uuid
 import jwt
 from io import BytesIO
 from datetime import datetime, date, timezone, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 from fastapi import UploadFile, HTTPException
 from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -85,6 +86,7 @@ async def test_profiles_get_and_update_me(monkeypatch) -> None:
             return "mocked_path/photo.png"
         monkeypatch.setattr("apps.profiles.services.upload_image_to_s3", mock_upload)
         monkeypatch.setattr("core.auth.services.revoke_firebase_tokens", lambda *args: None)
+        monkeypatch.setattr("core.auth.services.delete_firebase_user", lambda *args: None)
 
         async with async_session_factory() as session:
             user = User(
@@ -123,7 +125,7 @@ async def test_profiles_get_and_update_me(monkeypatch) -> None:
             db_user = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
             res_del = await delete_user_me(db_user, session)
             assert res_del["deleted"] is True
-            assert res_del["status"] == "deleting"
+            assert res_del["status"] == "Deleting"
             assert "user" in res_del
             assert res_del["user"]["is_deleted"] is True
             assert db_user.is_deleted is True
@@ -183,6 +185,7 @@ async def test_profiles_complete_onboarding(monkeypatch) -> None:
             )
             assert res["user"]["id"] == str(user.id)
             assert res["user"]["major"] == "Physics"
+            assert res["user"]["minor"] == "Math"
             assert res["user"]["country"] == str(country.id)
             assert res["user"]["country_details"]["country_name"] == "United States"
             assert res["user"]["educationLevel"] == EducationLevel.masters.value
@@ -324,6 +327,73 @@ async def test_update_completeness_weights() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_user_profile_by_admin_service_updates_email(monkeypatch) -> None:
+    from apps.profiles.services import update_user_profile_by_admin_service
+    from apps.profiles.schemas import UpdateProfileRequest
+
+    email_updates: list[tuple] = []
+
+    async def _mock_apply_user_email_change(user, new_email, db, *, revoke_sessions=True):
+        email_updates.append((user.id, new_email, revoke_sessions))
+        user.email = new_email.lower().strip()
+        return None
+
+    monkeypatch.setattr(
+        "apps.accounts.services.email_service.apply_user_email_change",
+        _mock_apply_user_email_change,
+    )
+    monkeypatch.setattr(
+        "apps.profiles.services.profile_service.get_my_profile_service",
+        AsyncMock(return_value={"user": {"email": "new.admin@example.com"}}),
+    )
+    monkeypatch.setattr(
+        "apps.profiles.services.profile_service.calculate_completeness_score",
+        AsyncMock(return_value=50),
+    )
+    monkeypatch.setattr(
+        "apps.recommendations.services.post_keyword_service.refresh_profile_extracted_keywords_best_effort",
+        AsyncMock(),
+    )
+
+    user = MagicMock()
+    user.id = uuid4()
+    user.email = "old.admin@example.com"
+    user.firebase_uid = "firebase-uid-admin"
+    user.role = "user"
+
+    profile = MagicMock()
+    profile.user_id = user.id
+    profile.first_name = "Old"
+    profile.last_name = "Name"
+    profile.completeness_score = 0
+    profile.country_id = None
+    profile.university_id = None
+    profile.profile_photo_url = None
+    profile.banner_photo_url = None
+
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(
+        side_effect=[
+            MagicMock(scalar_one_or_none=MagicMock(return_value=user)),
+            MagicMock(scalar_one_or_none=MagicMock(return_value=profile)),
+        ]
+    )
+    mock_db.refresh = AsyncMock()
+
+    payload = UpdateProfileRequest(email="new.admin@example.com", firstName="New")
+    result = await update_user_profile_by_admin_service(
+        user_id=user.id,
+        payload=payload,
+        db=mock_db,
+    )
+
+    assert email_updates == [(user.id, "new.admin@example.com", True)]
+    assert user.email == "new.admin@example.com"
+    assert result["user"]["email"] == "new.admin@example.com"
+    mock_db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_update_user_profile_by_admin_service(monkeypatch) -> None:
     from apps.profiles.services import update_user_profile_by_admin_service
     from apps.profiles.schemas import UpdateProfileRequest
@@ -439,4 +509,124 @@ async def test_get_my_profile_service_relationship_flags() -> None:
 
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_update_profile_remove_minor(monkeypatch) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+    from apps.profiles.services.profile_service import update_user_profile_by_admin_service
+
+    user = User(id=uuid.uuid4(), email="user@example.com", role="user")
+    profile = Profile(
+        user_id=user.id,
+        first_name="Test",
+        last_name="User",
+        minor="Mathematics",
+        minor_id=1,
+    )
+
+    weights = CompletenessWeight()
+    class _MockSession:
+        def __init__(self):
+            self.added = []
+        async def execute(self, stmt):
+            result = MagicMock()
+            sql_str = str(stmt).lower()
+            if "count(" in sql_str or "count *" in sql_str or "profilestats" in sql_str or "connection_count" in sql_str:
+                result.scalar_one_or_none.return_value = 0
+                result.scalar_one.return_value = 0
+                result.scalars.return_value.first.return_value = 0
+            elif "from profiles" in sql_str:
+                result.scalar_one_or_none.return_value = profile
+                result.scalar_one.return_value = profile
+                result.scalars.return_value.first.return_value = profile
+            elif "completeness" in sql_str:
+                result.scalar_one_or_none.return_value = weights
+                result.scalar_one.return_value = weights
+                result.scalars.return_value.first.return_value = weights
+            elif "user" in sql_str:
+                result.scalar_one_or_none.return_value = user
+                result.scalar_one.return_value = user
+                result.scalars.return_value.first.return_value = user
+            else:
+                result.scalar_one_or_none.return_value = None
+                result.scalar_one.return_value = None
+                result.scalars.return_value.first.return_value = None
+            result.scalars.return_value.all.return_value = []
+            result.all.return_value = []
+            result.first.return_value = None
+            return result
+        def add(self, obj):
+            self.added.append(obj)
+        async def commit(self):
+            pass
+        async def refresh(self, obj):
+            pass
+        async def flush(self):
+            pass
+
+    session = _MockSession()
+    payload = UpdateProfileRequest.model_validate({"minor": None})
+
+    # Test update_my_profile_service
+    await update_my_profile_service(user=user, payload=payload, db=session)
+    assert profile.minor is None
+    assert profile.minor_id is None
+
+    # Reset and test update_user_profile_by_admin_service
+    profile.minor = "Mathematics"
+    profile.minor_id = 1
+    session_admin = _MockSession()
+    await update_user_profile_by_admin_service(user_id=user.id, payload=payload, db=session_admin)
+    assert profile.minor is None
+    assert profile.minor_id is None
+
+
+@pytest.mark.asyncio
+async def test_get_my_profile_learning_spotlight_recommended_true(monkeypatch, mock_db) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from apps.profiles.services.profile_service import get_my_profile_service
+
+    user = SimpleNamespace(id=uuid4())
+    profile = SimpleNamespace(
+        user_id=user.id,
+        learning_spotlight={"version": 2, "papers": [{"paper_id": "p1"}]},
+    )
+    db = mock_db()
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: profile))
+
+    monkeypatch.setattr(
+        "apps.profiles.services.profile_service.build_user_base_response",
+        AsyncMock(return_value={"email": "jane@example.com"}),
+    )
+
+    result = await get_my_profile_service(user, db)
+
+    assert result["user"]["is_learning_spotlight_recommended"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_my_profile_learning_spotlight_recommended_false_when_null(
+    monkeypatch, mock_db
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from apps.profiles.services.profile_service import get_my_profile_service
+
+    user = SimpleNamespace(id=uuid4())
+    profile = SimpleNamespace(user_id=user.id, learning_spotlight=None)
+    db = mock_db()
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: profile))
+
+    monkeypatch.setattr(
+        "apps.profiles.services.profile_service.build_user_base_response",
+        AsyncMock(return_value={"email": "jane@example.com"}),
+    )
+
+    result = await get_my_profile_service(user, db)
+
+    assert result["user"]["is_learning_spotlight_recommended"] is False
 

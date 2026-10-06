@@ -22,11 +22,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_IS_ENABLED = True
 DEFAULT_GENERATION_FREQUENCY_DAYS = 14
 DEFAULT_MAX_RECOMMENDATIONS = 10
+DEFAULT_IS_PUSHNOTIFICATION_ENABLED = True
 
 _TRACKED_SETTINGS_FIELDS = (
     "is_enabled",
     "generation_frequency_days",
     "max_recommendations",
+    "cycle_start_date",
+    "cycle_configuration",
+    "learning_spotlight_papers_count",
+    "is_pushnotification_enabled",
 )
 
 
@@ -39,8 +44,13 @@ def _in_memory_defaults() -> LearningRecommendationSettings:
     now = _utc_now()
     return LearningRecommendationSettings(
         is_enabled=DEFAULT_IS_ENABLED,
+        is_running=False,
         generation_frequency_days=DEFAULT_GENERATION_FREQUENCY_DAYS,
         max_recommendations=DEFAULT_MAX_RECOMMENDATIONS,
+        cycle_start_date=None,
+        cycle_configuration=None,
+        learning_spotlight_papers_count=1,
+        is_pushnotification_enabled=DEFAULT_IS_PUSHNOTIFICATION_ENABLED,
         updated_by=None,
         created_at=now,
         updated_at=now,
@@ -51,11 +61,28 @@ def _settings_snapshot(
     source: LearningRecommendationSettings | LearningRecommendationSettingsLog | dict[str, Any],
 ) -> dict[str, Any]:
     if isinstance(source, dict):
-        return {field: source[field] for field in _TRACKED_SETTINGS_FIELDS}
+        snapshot = {field: source[field] for field in _TRACKED_SETTINGS_FIELDS if field in source}
+        snapshot.setdefault("cycle_start_date", source.get("cycle_start_date"))
+        snapshot.setdefault("cycle_configuration", source.get("cycle_configuration"))
+        snapshot.setdefault("learning_spotlight_papers_count", source.get("learning_spotlight_papers_count", 1))
+        snapshot.setdefault(
+            "is_pushnotification_enabled",
+            source.get("is_pushnotification_enabled", DEFAULT_IS_PUSHNOTIFICATION_ENABLED),
+        )
+        return snapshot
     return {
         "is_enabled": source.is_enabled,
         "generation_frequency_days": source.generation_frequency_days,
         "max_recommendations": source.max_recommendations,
+        # Settings-log rows do not store cycle_start_date / cycle_configuration; treat as absent.
+        "cycle_start_date": getattr(source, "cycle_start_date", None),
+        "cycle_configuration": getattr(source, "cycle_configuration", None),
+        "learning_spotlight_papers_count": getattr(source, "learning_spotlight_papers_count", 1),
+        "is_pushnotification_enabled": getattr(
+            source,
+            "is_pushnotification_enabled",
+            DEFAULT_IS_PUSHNOTIFICATION_ENABLED,
+        ),
     }
 
 
@@ -65,7 +92,13 @@ def _initial_settings_snapshot() -> dict[str, Any]:
         "is_enabled": DEFAULT_IS_ENABLED,
         "generation_frequency_days": DEFAULT_GENERATION_FREQUENCY_DAYS,
         "max_recommendations": DEFAULT_MAX_RECOMMENDATIONS,
+        "cycle_start_date": None,
+        "cycle_configuration": None,
+        "learning_spotlight_papers_count": 1,
+        "is_pushnotification_enabled": DEFAULT_IS_PUSHNOTIFICATION_ENABLED,
     }
+
+
 
 
 def _build_changes(
@@ -87,7 +120,48 @@ def _build_changes(
     return changes
 
 
+async def _sync_recommendation_feature_flag(
+    session: AsyncSession,
+    is_enabled: bool,
+) -> None:
+    """Keep the 'recommendation' feature flag in admin_configurations synchronized."""
+    try:
+        from apps.administration.db_models import AdminConfiguration
+        from apps.administration.db_models.admin_configuration_db_model import utc_now
+        from common.enums import AdminConfigurationType
+
+        stmt = select(AdminConfiguration).where(
+            AdminConfiguration.key == "recommendation",
+            AdminConfiguration.configuration_type == AdminConfigurationType.FEATURE_FLAG,
+        )
+        result = await session.execute(stmt)
+        flag = result.scalar_one_or_none()
+        now = utc_now()
+        if flag is not None:
+            flag.is_enabled = is_enabled
+            flag.updated_at = now
+            session.add(flag)
+        else:
+            flag = AdminConfiguration(
+                key="recommendation",
+                name="Recommendation System",
+                description="Learning Recommendations & Spotlight feature flag",
+                configuration_type=AdminConfigurationType.FEATURE_FLAG,
+                is_enabled=is_enabled,
+                value=None,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(flag)
+    except Exception as exc:
+        logger.warning(
+            "[recommendation-settings] Could not sync recommendation feature flag: %s",
+            exc,
+        )
+
+
 class RecommendationSettingsService:
+
     """Manage the singleton learning recommendation configuration row.
 
     Persisting or creating settings is admin-only. Cron/readers may read
@@ -100,11 +174,14 @@ class RecommendationSettingsService:
     async def _load_singleton(
         self,
         session: AsyncSession,
+        *,
+        for_update: bool = False,
     ) -> LearningRecommendationSettings | None:
         """Load the first settings row, deleting any accidental extras."""
-        rows = (
-            await session.execute(select(LearningRecommendationSettings))
-        ).scalars().all()
+        stmt = select(LearningRecommendationSettings)
+        if for_update:
+            stmt = stmt.with_for_update()
+        rows = (await session.execute(stmt)).scalars().all()
         if not rows:
             return None
 
@@ -126,16 +203,21 @@ class RecommendationSettingsService:
         now = _utc_now()
         settings = LearningRecommendationSettings(
             is_enabled=DEFAULT_IS_ENABLED,
+            is_running=False,
             generation_frequency_days=DEFAULT_GENERATION_FREQUENCY_DAYS,
             max_recommendations=DEFAULT_MAX_RECOMMENDATIONS,
+            cycle_start_date=None,
+            is_pushnotification_enabled=DEFAULT_IS_PUSHNOTIFICATION_ENABLED,
             updated_by=admin_user_id,
             created_at=now,
             updated_at=now,
         )
         session.add(settings)
+        await _sync_recommendation_feature_flag(session, DEFAULT_IS_ENABLED)
         await session.commit()
         await session.refresh(settings)
         return settings
+
 
     async def get_persisted_settings(
         self,
@@ -148,6 +230,60 @@ class RecommendationSettingsService:
         """True only when an admin has persisted settings with ``is_enabled=True``."""
         settings = await self.get_persisted_settings(session)
         return settings is not None and settings.is_enabled
+
+    async def is_push_notification_enabled(self, session: AsyncSession) -> bool:
+        """True when admin settings allow Learning Spotlight push notifications."""
+        settings = await self.get_persisted_settings(session)
+        if settings is None:
+            return DEFAULT_IS_PUSHNOTIFICATION_ENABLED
+        return getattr(
+            settings,
+            "is_pushnotification_enabled",
+            DEFAULT_IS_PUSHNOTIFICATION_ENABLED,
+        )
+
+    async def try_claim_manual_spotlight_run(
+        self,
+        session: AsyncSession,
+    ) -> bool:
+        """Atomically reserve a manual Learning Spotlight run (``is_running=True``).
+
+        Returns True when the caller may queue Celery work. Returns False when a
+        run is already in progress (or queued). When settings were never
+        configured, returns True without mutating state.
+        """
+        settings = await self._load_singleton(session, for_update=True)
+        if settings is None:
+            return True
+        if settings.is_running:
+            await session.rollback()
+            return False
+        settings.is_running = True
+        session.add(settings)
+        await session.commit()
+        return True
+
+    async def set_is_running(
+        self,
+        session: AsyncSession,
+        *,
+        is_running: bool,
+    ) -> None:
+        """Persist the admin-visible Learning Spotlight run flag.
+
+        Does not write settings history. Missing settings are left unchanged
+        so the cron never creates the admin singleton.
+        """
+        settings = await self.get_persisted_settings(session)
+        if settings is None:
+            logger.warning(
+                "Cannot persist learning_recommendation_settings.is_running=%s; no settings row",
+                is_running,
+            )
+            return
+        settings.is_running = is_running
+        session.add(settings)
+        await session.commit()
 
     async def get_settings(
         self,
@@ -304,6 +440,10 @@ class RecommendationSettingsService:
         is_enabled: bool | None = None,
         generation_frequency_days: int | None = None,
         max_recommendations: int | None = None,
+        cycle_configuration: dict[str, Any] | None = None,
+        learning_spotlight_papers_count: int | None = None,
+        is_pushnotification_enabled: bool | None = None,
+        actor_role: str | None = None,
     ) -> LearningRecommendationSettings:
         """Update only provided fields (admin-only). Creates defaults if missing.
 
@@ -315,6 +455,7 @@ class RecommendationSettingsService:
             admin_user_id=admin_user_id,
             create_if_missing=True,
         )
+        previous_snapshot = _settings_snapshot(settings)
 
         if generation_frequency_days is not None:
             if generation_frequency_days < 1 or generation_frequency_days > 365:
@@ -322,15 +463,33 @@ class RecommendationSettingsService:
         if max_recommendations is not None:
             if max_recommendations < 1 or max_recommendations > 50:
                 raise ValueError("max_recommendations must be between 1 and 50")
-
+        if learning_spotlight_papers_count is not None:
+            if learning_spotlight_papers_count < 1:
+                raise ValueError("learning_spotlight_papers_count must be at least 1")
         if is_enabled is not None:
             settings.is_enabled = is_enabled
+            await _sync_recommendation_feature_flag(session, is_enabled)
+
         if generation_frequency_days is not None:
             settings.generation_frequency_days = generation_frequency_days
         if max_recommendations is not None:
             settings.max_recommendations = max_recommendations
+        if cycle_configuration is not None:
+            from apps.learningspotlight.services.cycle_service import validate_cycle_configuration
+
+            validated_types = validate_cycle_configuration(cycle_configuration)
+            settings.cycle_configuration = {"cycle": [t.value for t in validated_types]}
+        if learning_spotlight_papers_count is not None:
+            settings.learning_spotlight_papers_count = learning_spotlight_papers_count
+        if is_pushnotification_enabled is not None:
+            settings.is_pushnotification_enabled = is_pushnotification_enabled
 
         now = _utc_now()
+        # Learning Spotlight: first enable with no anchor starts the global cycle today.
+        # Do not accept cycle_start_date from clients; do not reset on disable/re-enable.
+        if is_enabled is True and settings.cycle_start_date is None:
+            settings.cycle_start_date = now.date()
+
         settings.updated_by = admin_user_id
         settings.updated_at = now
         session.add(settings)
@@ -342,6 +501,27 @@ class RecommendationSettingsService:
                 updated_by=admin_user_id,
                 created_at=now,
             )
+        )
+        from apps.administration.services.admin_activity_log_service import (
+            create_admin_activity_log,
+            format_field_changes,
+        )
+
+        new_snapshot = _settings_snapshot(settings)
+        changes = format_field_changes(previous_snapshot, new_snapshot) or "settings"
+        if changes.startswith(("enabled the", "disabled the")):
+            log_desc = changes
+        else:
+            log_desc = f"updated Semantic Scholar to {changes}"
+        await create_admin_activity_log(
+            session,
+            user_id=admin_user_id,
+            role=actor_role,
+            action="update",
+            module="recommendation_settings",
+            record_id=settings.id,
+            description=log_desc,
+            metadata={"old": previous_snapshot, "new": new_snapshot},
         )
         await session.commit()
         await session.refresh(settings)
@@ -386,13 +566,71 @@ class RecommendationSettingsService:
         return should_generate
 
 
+DEFAULT_CYCLE_CONFIG: dict[str, Any] = {
+    "cycle": [
+        "leading_thinker",
+        "country_perspective",
+        "influential_research",
+        "latest_research",
+        "beyond_your_field",
+    ]
+}
+
+
 def settings_to_dict(settings: LearningRecommendationSettings) -> dict[str, Any]:
     """Serialize settings for API responses (PATCH keeps UUID for updated_by)."""
+    raw_cfg = getattr(settings, "cycle_configuration", None)
+    if raw_cfg is None:
+        raw_cfg = DEFAULT_CYCLE_CONFIG
+
+    active_cycle = raw_cfg.get("cycle") if isinstance(raw_cfg, dict) else None
+    if not active_cycle:
+        active_cycle = DEFAULT_CYCLE_CONFIG["cycle"]
+
+    next_cycle = raw_cfg.get("next_cycle") if isinstance(raw_cfg, dict) else None
+    next_cycle_cfg = {"cycle": next_cycle} if next_cycle else None
+
+    current_cycle_name: str | None = None
+    current_cycle_day: int | None = None
+    cycle_start = getattr(settings, "cycle_start_date", None)
+    if cycle_start is not None:
+        try:
+            from apps.learningspotlight.services.cycle_service import (
+                get_cycle_day,
+                get_spotlight_type,
+            )
+
+            current_cycle_day = get_cycle_day(cycle_start)
+            spotlight_type = get_spotlight_type(current_cycle_day, {"cycle": active_cycle})
+            current_cycle_name = (
+                spotlight_type.value
+                if hasattr(spotlight_type, "value")
+                else str(spotlight_type)
+            )
+        except Exception:
+            current_cycle_name = None
+            current_cycle_day = None
+
     return {
         "is_enabled": settings.is_enabled,
+        "is_running": getattr(settings, "is_running", False),
         "generation_frequency_days": settings.generation_frequency_days,
         "max_recommendations": settings.max_recommendations,
+        "cycle_start_date": settings.cycle_start_date,
+        "cycle_configuration": {"cycle": active_cycle},
+        "next_cycle_configuration": next_cycle_cfg,
+        "current_cycle": current_cycle_name,
+        "current_cycle_day": current_cycle_day,
+        "learning_spotlight_papers_count": getattr(settings, "learning_spotlight_papers_count", 1),
+        "is_pushnotification_enabled": getattr(
+            settings,
+            "is_pushnotification_enabled",
+            DEFAULT_IS_PUSHNOTIFICATION_ENABLED,
+        ),
         "updated_by": settings.updated_by,
         "updated_at": settings.updated_at,
         "created_at": settings.created_at,
     }
+
+
+

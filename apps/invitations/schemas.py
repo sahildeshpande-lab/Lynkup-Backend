@@ -5,18 +5,27 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from apps.invitations.config import INVITATION_CODE_MAX_LENGTH
 from common.schemas import ApiResponse
 
-# ABC1234 — 3 uppercase letters + remaining digits
+# ABC1234 — generated invitation codes only (POST /invitations).
 INVITATION_CODE_PATTERN = r"^[A-Za-z]{3}[0-9]{4}$"
 
 
 class ValidateInvitationRequest(BaseModel):
-    code: str = Field(..., min_length=7, max_length=7, pattern=INVITATION_CODE_PATTERN)
+    code: str = Field(..., min_length=1, max_length=INVITATION_CODE_MAX_LENGTH)
+
+
+class AssociateInvitationRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=INVITATION_CODE_MAX_LENGTH)
 
 
 class SoftDeleteInvitationRequest(BaseModel):
-    code: str = Field(..., min_length=7, max_length=7, pattern=INVITATION_CODE_PATTERN)
+    code: str = Field(..., min_length=1, max_length=INVITATION_CODE_MAX_LENGTH)
+
+
+class RedeemInvitationRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=INVITATION_CODE_MAX_LENGTH)
 
 
 class InvitationCreateData(BaseModel):
@@ -29,22 +38,41 @@ class InvitationCreateResponse(ApiResponse):
     data: InvitationCreateData | None = None
 
 
+class InvitationAssociateData(BaseModel):
+    id: UUID
+    code: str
+    status: str
+    redeemed_by_user_id: UUID
+
+
+class InvitationAssociateResponse(ApiResponse):
+    data: InvitationAssociateData | None = None
+
+
 class InvitationValidateData(BaseModel):
-    user_id: UUID
-    first_name: str | None = None
-    last_name: str | None = None
-    profile_photo_url: str | None = None
-    university: str | None = None
-    bio: str | None = None
+    code: str
+    status: str
 
 
 class InvitationValidateResponse(ApiResponse):
     data: InvitationValidateData | None = None
 
 
+class InvitationRedeemData(BaseModel):
+    code: str
+    inviter_user_id: UUID | None = None
+    redeemed_by_user_id: UUID
+    redemption_count: int
+    is_converted: bool
+
+
+class InvitationRedeemResponse(ApiResponse):
+    data: InvitationRedeemData | None = None
+
+
 class AdminInvitationItem(BaseModel):
     code: str
-    user_id: UUID
+    user_id: UUID | None
     first_name: str | None = None
     last_name: str | None = None
     username: str | None = None

@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, String, JSON
+from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Index, String, JSON
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -27,11 +27,17 @@ class Profile(SQLModel, table=True):
     profile_interests_id: list[int] | None = Field(default=None, sa_column=Column(JSON, nullable=True, server_default='[]'))
     major: str | None = Field(default=None, sa_column=Column(String(255)))
     minor: str | None = Field(default=None, sa_column=Column(String(255)))
+    major_id: int | None = Field(default=None, foreign_key="majors.id", index=True)
+    minor_id: int | None = Field(default=None, foreign_key="minors.id", index=True)
     edu_level: str | None = Field(default=None, sa_column=Column(String(32), nullable=True, index=True))
     graduation_date: date | None = Field(default=None, sa_column=Column(Date))
+    is_alumni: bool | None = Field(
+        default=None,
+        sa_column=Column(Boolean, nullable=True),
+    )
     country_id: UUID | None = Field(default=None, foreign_key="countries.id", index=True)
     location_text: str | None = Field(default=None, sa_column=Column(String(255)))
-    profile_visibility: ProfileVisibility = Field(default=ProfileVisibility.public, index=True)
+    profile_visibility: ProfileVisibility = Field(default=ProfileVisibility.private, index=True)
     online_presence_visible: bool = Field(default=True, nullable=False)
     completeness_score: int = Field(default=0, nullable=False)
     posts_count: int = Field(default=0, nullable=False)
@@ -49,12 +55,33 @@ class Profile(SQLModel, table=True):
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
 
-    # Learning recommendation persistence (cron snapshot storage).
+    # Learning recommendation persistence (cron snapshot storage) — V1.
     learning_recommendations: dict | None = Field(
         default=None,
         sa_column=Column(JSONB, nullable=True),
     )
     recommendations_updated_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+    # Learning Spotlight (V2) — one current personalized paper snapshot.
+    learning_spotlight: dict | None = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
+    learning_spotlight_updated_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+    # User-level digest cadence for pending inbound connection-request reminders.
+    connection_reminder_sent_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+    graduation_completion_email_sent_at: datetime | None = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )

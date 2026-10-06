@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Index, Integer, SmallInteger, Text
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Index, Integer, SmallInteger, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel, Relationship
@@ -33,6 +33,10 @@ class Comment(SQLModel, table=True):
         default=False,
         sa_column=Column(Boolean, nullable=False, server_default="false"),
     )
+    is_edited: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default="false"),
+    )
     like_count: int = Field(
         default=0,
         sa_column=Column(Integer, nullable=False, server_default="0"),
@@ -49,6 +53,21 @@ class Comment(SQLModel, table=True):
     moderation_words_found: list[str] | None = Field(
         default=None,
         sa_column=Column(JSONB, nullable=True),
+    )
+    # Celery auto-moderation claim: how many times this comment was leased for scanning.
+    moderation_attempt_count: int = Field(
+        default=0,
+        sa_column=Column(Integer, nullable=False, server_default="0"),
+    )
+    # Celery auto-moderation claim: worker that currently owns the scan lease.
+    moderation_lease_owner: str | None = Field(
+        default=None,
+        sa_column=Column(String(255), nullable=True),
+    )
+    # Celery auto-moderation claim: when the current scan lease expires.
+    moderation_lease_expires_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
     )
     created_at: datetime = Field(
         default_factory=utc_now,

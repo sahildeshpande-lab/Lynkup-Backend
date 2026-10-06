@@ -138,11 +138,12 @@ def _escape_like_exact(value: str) -> str:
 
 
 def _word_boundary_match(column, term: str):
-    """Case-insensitive whole-word/phrase match (Postgres ``\\y`` boundaries).
+    """Case-insensitive prefix match at a word/phrase start.
 
-    Prevents substring hits such as query ``ai`` matching ``Argentina``.
+    ``managem`` matches ``management``. A leading Postgres ``\\y`` still
+    prevents substring hits such as query ``ai`` matching ``Argentina``.
     """
-    pattern = rf"\y{re.escape(term)}\y"
+    pattern = rf"\y{re.escape(term)}"
     return column.op("~*")(pattern)
 
 
@@ -325,6 +326,20 @@ def _program_field_match_clause(column, value: str | None):
     return column.ilike(f"%{escaped}%", escape="\\")
 
 
+def _program_fields_match_clause(column, value: str | list[str] | None):
+    """Match authors whose major/minor is ANY of the selected values (OR)."""
+    clauses = []
+    for term in _split_filter_values(value):
+        clause = _program_field_match_clause(column, term)
+        if clause is not None:
+            clauses.append(clause)
+    if not clauses:
+        return None
+    if len(clauses) == 1:
+        return clauses[0]
+    return or_(*clauses)
+
+
 def _build_search_filters(
     *,
     current_user_id: UUID,
@@ -333,12 +348,19 @@ def _build_search_filters(
     hashtag: str | list[str] | None,
     academic_interest: str | list[str] | None,
     university_name: str | list[str] | None,
-    major: str | None,
-    minor: str | None,
+    major: str | list[str] | None,
+    minor: str | list[str] | None,
     country: str | list[str] | None,
     edu_level: str | list[str] | None,
     author_profile,
     author_user,
+    hashtag_to_all: bool = False,
+    academic_interest_to_all: bool = False,
+    university_to_all: bool = False,
+    major_to_all: bool = False,
+    minor_to_all: bool = False,
+    country_to_all: bool = False,
+    edu_level_to_all: bool = False,
 ):
     filters = [
         Post.state.in_(FEED_VISIBLE_POST_STATES),
@@ -402,54 +424,61 @@ def _build_search_filters(
             query_clauses.append(minor_clause)
         filters.append(or_(*query_clauses))
 
-    hashtag_values = _split_filter_values(hashtag, split_whitespace=True)
-    hashtag_clause = _hashtag_match_clause(hashtag_values)
-    if hashtag_clause is not None:
-        filters.append(
-            exists(
-                select(1)
-                .select_from(PostHashtag)
-                .join(Hashtag, Hashtag.id == PostHashtag.hashtag_id)
-                .where(
-                    PostHashtag.post_id == Post.id,
-                    hashtag_clause,
+    if not hashtag_to_all:
+        hashtag_values = _split_filter_values(hashtag, split_whitespace=True)
+        hashtag_clause = _hashtag_match_clause(hashtag_values)
+        if hashtag_clause is not None:
+            filters.append(
+                exists(
+                    select(1)
+                    .select_from(PostHashtag)
+                    .join(Hashtag, Hashtag.id == PostHashtag.hashtag_id)
+                    .where(
+                        PostHashtag.post_id == Post.id,
+                        hashtag_clause,
+                    )
                 )
             )
-        )
 
     # Author-profile academic interests (OR across selected interests).
-    interest_clause = _academic_interest_match_clause(
-        author_profile, _split_filter_values(academic_interest)
-    )
-    if interest_clause is not None:
-        filters.append(interest_clause)
+    if not academic_interest_to_all:
+        interest_clause = _academic_interest_match_clause(
+            author_profile, _split_filter_values(academic_interest)
+        )
+        if interest_clause is not None:
+            filters.append(interest_clause)
 
-    university_clause = _university_match_clause(
-        _split_filter_values(university_name),
-        university_id_column=author_profile.university_id,
-    )
-    if university_clause is not None:
-        filters.append(university_clause)
+    if not university_to_all:
+        university_clause = _university_match_clause(
+            _split_filter_values(university_name),
+            university_id_column=author_profile.university_id,
+        )
+        if university_clause is not None:
+            filters.append(university_clause)
 
-    major_clause = _program_field_match_clause(author_profile.major, major)
-    if major_clause is not None:
-        filters.append(major_clause)
+    if not major_to_all:
+        major_clause = _program_fields_match_clause(author_profile.major, major)
+        if major_clause is not None:
+            filters.append(major_clause)
 
-    minor_clause = _program_field_match_clause(author_profile.minor, minor)
-    if minor_clause is not None:
-        filters.append(minor_clause)
+    if not minor_to_all:
+        minor_clause = _program_fields_match_clause(author_profile.minor, minor)
+        if minor_clause is not None:
+            filters.append(minor_clause)
 
     # Author-profile country (OR across selected countries).
-    country_clause = _country_match_clause(
-        _split_filter_values(country),
-        country_id_column=author_profile.country_id,
-    )
-    if country_clause is not None:
-        filters.append(country_clause)
+    if not country_to_all:
+        country_clause = _country_match_clause(
+            _split_filter_values(country),
+            country_id_column=author_profile.country_id,
+        )
+        if country_clause is not None:
+            filters.append(country_clause)
 
-    edu_clause = _edu_level_match_clause(author_profile, _split_filter_values(edu_level))
-    if edu_clause is not None:
-        filters.append(edu_clause)
+    if not edu_level_to_all:
+        edu_clause = _edu_level_match_clause(author_profile, _split_filter_values(edu_level))
+        if edu_clause is not None:
+            filters.append(edu_clause)
 
     return filters
 
@@ -470,12 +499,19 @@ async def count_search_posts(
     *,
     query: str | None = None,
     hashtag: str | list[str] | None = None,
+    hashtag_to_all: bool = False,
     academic_interest: str | list[str] | None = None,
+    academic_interest_to_all: bool = False,
     university_name: str | list[str] | None = None,
-    major: str | None = None,
-    minor: str | None = None,
+    university_to_all: bool = False,
+    major: str | list[str] | None = None,
+    major_to_all: bool = False,
+    minor: str | list[str] | None = None,
+    minor_to_all: bool = False,
     country: str | list[str] | None = None,
+    country_to_all: bool = False,
     edu_level: str | list[str] | None = None,
+    edu_level_to_all: bool = False,
 ) -> int:
     author_profile = aliased(Profile, name="author_profile")
     author_user = aliased(User, name="author_user")
@@ -493,6 +529,13 @@ async def count_search_posts(
         edu_level=edu_level,
         author_profile=author_profile,
         author_user=author_user,
+        hashtag_to_all=hashtag_to_all,
+        academic_interest_to_all=academic_interest_to_all,
+        university_to_all=university_to_all,
+        major_to_all=major_to_all,
+        minor_to_all=minor_to_all,
+        country_to_all=country_to_all,
+        edu_level_to_all=edu_level_to_all,
     )
 
     stmt = (
@@ -513,12 +556,19 @@ async def search_posts_with_details(
     *,
     query: str | None = None,
     hashtag: str | list[str] | None = None,
+    hashtag_to_all: bool = False,
     academic_interest: str | list[str] | None = None,
+    academic_interest_to_all: bool = False,
     university_name: str | list[str] | None = None,
-    major: str | None = None,
-    minor: str | None = None,
+    university_to_all: bool = False,
+    major: str | list[str] | None = None,
+    major_to_all: bool = False,
+    minor: str | list[str] | None = None,
+    minor_to_all: bool = False,
     country: str | list[str] | None = None,
+    country_to_all: bool = False,
     edu_level: str | list[str] | None = None,
+    edu_level_to_all: bool = False,
     offset: int = 0,
     limit: int | None = None,
 ) -> list[tuple[Post, Profile | None, User | None, Profile | None]]:
@@ -540,6 +590,13 @@ async def search_posts_with_details(
         edu_level=edu_level,
         author_profile=author_profile,
         author_user=author_user,
+        hashtag_to_all=hashtag_to_all,
+        academic_interest_to_all=academic_interest_to_all,
+        university_to_all=university_to_all,
+        major_to_all=major_to_all,
+        minor_to_all=minor_to_all,
+        country_to_all=country_to_all,
+        edu_level_to_all=edu_level_to_all,
     )
 
     post_ids_stmt = (

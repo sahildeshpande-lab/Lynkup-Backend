@@ -32,7 +32,7 @@ async def test_repost_post_creates_repost_and_increments_counter(mock_db):
         patch.object(svc, "get_user_repost", AsyncMock(return_value=None)),
         patch.object(svc, "create_repost", AsyncMock(return_value=_repost())) as create_repost,
         patch.object(svc, "update_post_repost_count", AsyncMock(return_value=4)) as update_count,
-        patch.object(svc, "increment_posts_count_for_user", AsyncMock()) as inc_posts,
+        patch.object(svc, "recalculate_posts_count_for_user", AsyncMock()) as recalc_posts,
     ):
         response = await svc.toggle_repost(db, user_id, post.id, is_reposted=True)
 
@@ -43,7 +43,7 @@ async def test_repost_post_creates_repost_and_increments_counter(mock_db):
     assert response.data.repost_count == 4
     create_repost.assert_awaited_once_with(db, profile_id, user_id, post.id)
     update_count.assert_awaited_once_with(db, post.id, 1)
-    inc_posts.assert_awaited_once_with(db, user_id)
+    recalc_posts.assert_awaited_once_with(db, user_id)
     db.commit.assert_awaited_once()
 
 
@@ -87,7 +87,7 @@ async def test_remove_repost_deletes_repost_and_decrements_counter(mock_db):
         patch.object(svc, "get_user_repost", AsyncMock(return_value=existing_repost)),
         patch.object(svc, "delete_repost", AsyncMock()) as delete_repost,
         patch.object(svc, "update_post_repost_count", AsyncMock(return_value=2)) as update_count,
-        patch.object(svc, "decrement_posts_count_for_user", AsyncMock()) as dec_posts,
+        patch.object(svc, "recalculate_posts_count_for_user", AsyncMock()) as recalc_posts,
     ):
         response = await svc.toggle_repost(db, user_id, post.id, is_reposted=False)
 
@@ -98,7 +98,7 @@ async def test_remove_repost_deletes_repost_and_decrements_counter(mock_db):
     assert response.data.repost_count == 2
     delete_repost.assert_awaited_once_with(db, existing_repost)
     update_count.assert_awaited_once_with(db, post.id, -1)
-    dec_posts.assert_awaited_once_with(db, user_id)
+    recalc_posts.assert_awaited_once_with(db, user_id)
     db.commit.assert_awaited_once()
 
 
@@ -187,3 +187,52 @@ async def test_repost_own_post_fails(mock_db):
     get_profile.assert_not_called()
     create_repost.assert_not_called()
     db.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_remove_repost_succeeds_even_when_post_is_hidden_or_draft(mock_db):
+    post = _post(repost_count=1, state=PostState.deleted)
+    user_id = uuid.uuid4()
+    profile_id = uuid.uuid4()
+    existing_repost = _repost()
+    db = mock_db()
+
+    with (
+        patch.object(svc, "get_post_for_update", AsyncMock(return_value=post)),
+        patch.object(svc, "get_profile_id_for_user", AsyncMock(return_value=profile_id)),
+        patch.object(svc, "get_user_repost", AsyncMock(return_value=existing_repost)),
+        patch.object(svc, "delete_repost", AsyncMock()) as delete_repost,
+        patch.object(svc, "update_post_repost_count", AsyncMock(return_value=0)) as update_count,
+        patch.object(svc, "recalculate_posts_count_for_user", AsyncMock()) as recalc_posts,
+    ):
+        response = await svc.toggle_repost(db, user_id, post.id, is_reposted=False)
+
+    assert response.status is True
+    assert response.message == "Repost removed successfully"
+    assert response.data.is_reposted is False
+    delete_repost.assert_awaited_once_with(db, existing_repost)
+
+
+@pytest.mark.asyncio
+async def test_remove_repost_succeeds_when_post_is_deleted_from_db(mock_db):
+    post_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    profile_id = uuid.uuid4()
+    existing_repost = _repost()
+    db = mock_db()
+
+    with (
+        patch.object(svc, "get_post_for_update", AsyncMock(return_value=None)),
+        patch.object(svc, "get_profile_id_for_user", AsyncMock(return_value=profile_id)),
+        patch.object(svc, "get_user_repost", AsyncMock(return_value=existing_repost)),
+        patch.object(svc, "delete_repost", AsyncMock()) as delete_repost,
+        patch.object(svc, "update_post_repost_count", AsyncMock()) as update_count,
+        patch.object(svc, "recalculate_posts_count_for_user", AsyncMock()) as recalc_posts,
+    ):
+        response = await svc.toggle_repost(db, user_id, post_id, is_reposted=False)
+
+    assert response.status is True
+    assert response.message == "Repost removed successfully"
+    assert response.data.is_reposted is False
+    delete_repost.assert_awaited_once_with(db, existing_repost)
+

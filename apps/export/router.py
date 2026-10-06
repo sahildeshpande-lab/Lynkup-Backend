@@ -1,24 +1,30 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.accounts.db_models import User
 from apps.export.schemas import ExportRequestAcceptedData, ExportStatusData
 from apps.export.service import DataExportService, get_data_export_service
+from apps.export.tasks import enqueue_export_processing
 from common.schemas import ApiResponse
 from core.auth.dependencies import require_recent_auth
 from core.database.session import get_session
+from apps.administration.dependencies import require_signed_admin
 from core.security.auth import get_current_user
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/me/export", tags=["Data Export"])
+admin_router = APIRouter(prefix="/admin/exports", tags=["Data Export"])
 
 
 @router.post("", response_model=ApiResponse)
 async def request_data_export(
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     _recent_auth: dict = Depends(require_recent_auth),
     db: AsyncSession = Depends(get_session),
@@ -26,23 +32,31 @@ async def request_data_export(
 ) -> ApiResponse:
     """Request a personal data export.
 
-    Requires recent Firebase authentication (``require_recent_auth``).
+    Requires a revoked-checked Firebase ID token (``require_recent_auth``).
 
-    When generation completes the background task:
+    After the queued export row is committed, processing is published to the
+    Celery ``background`` queue. When generation completes the worker:
+
     1. Builds an AES-256 password-protected ZIP.
     2. Uploads it to DigitalOcean Spaces at ``exports/<user_id>/<export_id>.zip``.
-    3. Generates a 7-day presigned Spaces URL.
+    3. Generates a 7-day presigned Spaces origin URL (HTTPS, virtual-hosted).
     4. Queues an email containing the presigned URL and 6-character ZIP password
        directly to the user.
 
     There is no backend download endpoint.  The email link goes directly to the
-    DigitalOcean Spaces presigned URL.
+    DigitalOcean Spaces origin presigned URL.
     """
     data: ExportRequestAcceptedData = await service.request_export(
         user=current_user,
         db=db,
     )
-    background_tasks.add_task(service.process_export, data.export_id)
+    try:
+        await asyncio.to_thread(enqueue_export_processing, data.export_id)
+    except Exception:
+        logger.exception(
+            "Failed to publish export %s to Celery; record remains queued",
+            data.export_id,
+        )
     return ApiResponse(
         message="Data export request accepted.",
         data=data.model_dump(mode="json"),
@@ -66,3 +80,25 @@ async def get_data_export_status(
         data=data.model_dump(mode="json"),
     )
 
+
+@admin_router.post("/cleanup", response_model=ApiResponse, status_code=202)
+async def cleanup_expired_data_exports(
+    current_user: User = Depends(require_signed_admin),
+    db: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """Queue expired export cleanup for a Celery worker."""
+    from core.celery_worker.config import CeleryTaskQueue
+    from core.jobs.publishing import publish_admin_task
+    from apps.administration.services.admin_activity_log_service import create_admin_activity_log
+
+    task_id = await publish_admin_task("kampulynk.export.cleanup", CeleryTaskQueue.EXPORTS_QUEUE)
+    await create_admin_activity_log(
+        db, user_id=current_user.id, role=current_user.role, action="queue",
+        module="export", record_id=None,
+        description="queued expired export cleanup",
+        metadata={"task_id": task_id}, commit=True,
+    )
+    return ApiResponse(
+        message="Expired export cleanup queued.",
+        data={"task_id": task_id, "status": "queued"},
+    )

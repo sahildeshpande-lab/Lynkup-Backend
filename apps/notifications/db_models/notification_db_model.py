@@ -63,6 +63,17 @@ class NotificationCategory(SQLModel, table=True):
     )
 
 
+def _default_email_preferences() -> dict[str, Any]:
+    from apps.notifications.email_preferences import default_email_preferences
+
+    return default_email_preferences()
+
+
+_EMAIL_PREFERENCES_SERVER_DEFAULT = text(
+    "'{\"bulk_email\": true}'::jsonb"
+)
+
+
 class NotificationPreference(SQLModel, table=True):
     __tablename__ = "notification_preferences"
 
@@ -79,6 +90,14 @@ class NotificationPreference(SQLModel, table=True):
     category_preferences: dict[str, Any] = Field(
         default_factory=dict,
         sa_column=Column(JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    )
+    email_preferences: dict[str, Any] = Field(
+        default_factory=_default_email_preferences,
+        sa_column=Column(
+            JSONB,
+            nullable=False,
+            server_default=_EMAIL_PREFERENCES_SERVER_DEFAULT,
+        ),
     )
     created_at: datetime = Field(
         default_factory=utc_now,

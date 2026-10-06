@@ -201,6 +201,12 @@ class CreateCommentRequest(BaseModel):
     )
 
 
+class EditCommentRequest(BaseModel):
+    post_id: UUID
+    comment_id: UUID
+    comment_text: str = Field(min_length=1, max_length=5000)
+
+
 class DeleteCommentRequest(BaseModel):
     post_id: UUID
     comment_id: UUID
@@ -212,12 +218,14 @@ class CommentData(BaseModel):
     parent_comment_id: UUID | None = None
     level: int
     is_deleted: bool
+    is_edited: bool = False
     like_count: int
     reply_count: int
     comment_text: str
     author: CommentAuthor
     user_reaction: str | None = None
-    can_delete_comment: bool = False
+    can_edit: bool = False
+    can_delete: bool = False
     created_at: datetime
     updated_at: datetime
     replies: list["CommentData"] = Field(default_factory=list)

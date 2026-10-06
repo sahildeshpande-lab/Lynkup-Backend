@@ -83,6 +83,16 @@ def test_image_settings_and_url_helpers(monkeypatch):
     assert storage_service.get_media_url("https://cdn/x.png") == "https://cdn/x.png"
     assert storage_service.get_media_url("") == ""
 
+    monkeypatch.setattr(
+        image_config.settings,
+        "S3_CDN_ENDPOINT",
+        "https://kampulynk-dev-spaces.sfo3.cdn.digitaloceanspaces.com/",
+    )
+    assert storage_service.get_media_url("posts/e7a70e72-32a4-45a3-9c10-3462ca4c51d0.jpeg") == (
+        "https://kampulynk-dev-spaces.sfo3.cdn.digitaloceanspaces.com"
+        "/posts/e7a70e72-32a4-45a3-9c10-3462ca4c51d0.jpeg"
+    )
+
     monkeypatch.setattr(image_config.settings, "S3_FILE_ENDPOINT", None)
     monkeypatch.setattr(image_config.settings, "S3_CDN_ENDPOINT", None)
     assert storage_service.get_media_url("/profiles/me.png") == "/profiles/me.png"
@@ -120,14 +130,14 @@ def test_image_validation_extensions_and_uploads(monkeypatch):
     import anyio
 
     banner, profile, post = anyio.run(run_uploads)
-    assert banner["data"]["key"] == "banners/banner-id.png"
-    assert profile["data"]["key"] == "profiles/user-id.jpg"
+    assert banner["data"]["key"].startswith("banners/banner-id/")
+    assert banner["data"]["key"].endswith(".png")
+    assert profile["data"]["key"].startswith("profiles/user-id/")
+    assert profile["data"]["key"].endswith(".jpg")
     assert post["data"]["key"] == "posts/post-id.pdf"
-    assert [item["key"] for item in uploads] == [
-        "banners/banner-id.png",
-        "profiles/user-id.jpg",
-        "posts/post-id.pdf",
-    ]
+    assert [item["key"] for item in uploads][2] == "posts/post-id.pdf"
+    assert uploads[0]["key"].startswith("banners/banner-id/")
+    assert uploads[1]["key"].startswith("profiles/user-id/")
 
 
 def test_image_config_download_upload_delete_paths(monkeypatch):
@@ -136,6 +146,7 @@ def test_image_config_download_upload_delete_paths(monkeypatch):
     monkeypatch.setattr(image_config.settings, "base_url_img", "https://img.example.test/")
     monkeypatch.setattr(image_config.settings, "base_url", None)
     monkeypatch.setattr(image_config.settings, "S3_FILE_ENDPOINT", None)
+    monkeypatch.setattr(image_config.settings, "S3_CDN_ENDPOINT", None)
 
     assert image_config.build_image_key("avatar.png") == "images/avatar.png"
     assert image_config.normalize_image_name(" avatar.png ") == "avatar.png"
@@ -154,6 +165,7 @@ def test_image_config_download_upload_delete_paths(monkeypatch):
 
     monkeypatch.setattr(image_config.settings, "S3_BUCKET", "bucket")
     monkeypatch.setattr(image_config.settings, "S3_FILE_ENDPOINT", None)
+    monkeypatch.setattr(image_config.settings, "S3_CDN_ENDPOINT", None)
     monkeypatch.setattr(
         image_config.s3_client,
         "generate_presigned_url",
@@ -161,6 +173,15 @@ def test_image_config_download_upload_delete_paths(monkeypatch):
     )
     assert image_config.generate_upload_url("avatar.png", 9) == "put_object:avatar.png:9"
     assert image_config.generate_download_url("avatar.png", 7) == "get_object:avatar.png:7"
+
+    monkeypatch.setattr(
+        image_config.settings,
+        "S3_CDN_ENDPOINT",
+        "https://kampulynk-dev-spaces.sfo3.cdn.digitaloceanspaces.com",
+    )
+    assert image_config.generate_download_url("posts/avatar.png") == (
+        "https://kampulynk-dev-spaces.sfo3.cdn.digitaloceanspaces.com/posts/avatar.png"
+    )
 
     error = ClientError({"Error": {"Code": "404"}}, "HeadObject")
     monkeypatch.setattr(image_config.s3_client, "head_object", lambda **kwargs: (_ for _ in ()).throw(error))
@@ -189,6 +210,8 @@ def test_storage_service_delete_and_upload_file_s3_branches(monkeypatch):
     assert calls[0] == ("delete", {"Bucket": "bucket", "Key": "profiles/a.png"})
     assert calls[1][0] == "put"
     assert calls[1][1]["ACL"] == "public-read"
+    assert calls[1][1]["ContentType"] == "image/png"
+    assert "ContentEncoding" not in calls[1][1]
 
     storage_service.delete_file("")
     assert len(calls) == 2
@@ -257,6 +280,50 @@ async def test_upload_image_to_s3_error_paths(monkeypatch):
     assert await image_config.upload_image_to_s3("data:image/png;base64,%%%") == "data:image/png;base64,%%%"
 
 
+@pytest.mark.asyncio
+async def test_copy_remote_image_to_s3_returns_storage_key(monkeypatch):
+    import httpx
+    import uuid as uuid_module
+
+    saved = []
+    monkeypatch.setattr(
+        image_config,
+        "save_image",
+        lambda file_name, content, content_type: saved.append((file_name, content, content_type)),
+    )
+    monkeypatch.setattr(uuid_module, "uuid4", lambda: "fixed-id")
+
+    class FakeResponse:
+        status_code = 200
+        content = b"image-bytes"
+        headers = {"content-type": "image/jpeg"}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, timeout):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    key = await image_config.copy_remote_image_to_s3(
+        "https://lh3.googleusercontent.com/a/photo",
+        prefix="profiles",
+    )
+    assert key == "profiles/fixed-id.jpg"
+    assert saved[-1][0] == "profiles/fixed-id.jpg"
+    assert saved[-1][1] == b"image-bytes"
+
+    assert await image_config.copy_remote_image_to_s3("") == ""
+    assert await image_config.copy_remote_image_to_s3("not-a-url") == ""
+
+
 def test_image_config_local_storage_paths(monkeypatch):
     import tempfile
     from pathlib import Path
@@ -268,6 +335,7 @@ def test_image_config_local_storage_paths(monkeypatch):
         monkeypatch.setattr(image_config.settings, "base_url", None)
         monkeypatch.setattr(image_config.settings, "base_url_img", None)
         monkeypatch.setattr(image_config.settings, "S3_FILE_ENDPOINT", None)
+        monkeypatch.setattr(image_config.settings, "S3_CDN_ENDPOINT", None)
 
         fake_module = tmp_path / "core" / "images" / "config.py"
         fake_module.parent.mkdir(parents=True)

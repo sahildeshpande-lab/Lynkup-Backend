@@ -41,7 +41,7 @@ def upgrade() -> None:
     )
 
     op.execute(
-        sa.text(
+        sa.text(  # nosec B608 -- constant UUID, not user input
             f"""
             INSERT INTO moderation_assignment_state (id, last_assigned_moderator_id, updated_at)
             VALUES ('{SINGLETON_STATE_ID}'::uuid, NULL, NOW())

@@ -13,9 +13,25 @@ from . import block_service as _service_module_2
 from .block_service import block_user, unblock_user
 
 from . import recommendation_service as _service_module_3
-from .recommendation_service import get_interest_overlap, get_user_connections, get_mutual_connections_count, validate_visibility, calculate_recommendation_score, dismiss_recommendation, get_recommendations
+from .recommendation_service import get_interest_overlap, get_user_connections, get_mutual_connections_count, validate_visibility, calculate_recommendation_score, dismiss_recommendation, get_recommendations, get_recommendations_categorized, build_recommendation_profile_payload
 
-_SERVICE_MODULES = (_service_module_0, _service_module_1, _service_module_2, _service_module_3,)
+from . import mutual_connection_service as _service_module_5
+from .mutual_connection_service import get_mutual_recommendations
+
+from . import connection_reminder_service as _service_module_4
+from .connection_reminder_service import (
+    ConnectionReminderService,
+    process_connection_reminders,
+)
+
+_SERVICE_MODULES = (
+    _service_module_0,
+    _service_module_1,
+    _service_module_2,
+    _service_module_3,
+    _service_module_4,
+    _service_module_5,
+)
 
 
 class _ServicesModule(ModuleType):
@@ -53,4 +69,9 @@ __all__ = [
     "calculate_recommendation_score",
     "dismiss_recommendation",
     "get_recommendations",
+    "get_recommendations_categorized",
+    "build_recommendation_profile_payload",
+    "get_mutual_recommendations",
+    "ConnectionReminderService",
+    "process_connection_reminders",
 ]

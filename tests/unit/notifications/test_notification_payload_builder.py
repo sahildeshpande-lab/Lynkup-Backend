@@ -107,6 +107,40 @@ def test_for_fcm_serializes_nested_deep_link() -> None:
     assert fcm_data["notification_type"] == "CONNECTION_REQUEST"
 
 
+def test_build_post_recognition_payload() -> None:
+    notification_id = uuid4()
+    post_id = uuid4()
+
+    payload = NotificationPayloadBuilder.build(
+        notification_type="POST_RECOGNITION",
+        notification_id=notification_id,
+        extra={"post_id": str(post_id), "milestone": 10},
+    )
+
+    assert payload["notification_type"] == "POST_RECOGNITION"
+    assert payload["post_id"] == str(post_id)
+    assert payload["milestone"] == 10
+    assert payload["deep_link"] == {"screen": "post", "post_id": str(post_id)}
+
+
+def test_build_learning_spotlight_recommended_payload() -> None:
+    notification_id = uuid4()
+
+    payload = NotificationPayloadBuilder.build(
+        notification_type="LEARNING_SPOTLIGHT_RECOMMENDED",
+        notification_id=notification_id,
+        extra={"spotlight_type": "leading_thinker", "cycle_day": 1},
+    )
+
+    assert payload == {
+        "notification_type": "LEARNING_SPOTLIGHT_RECOMMENDED",
+        "notification_id": str(notification_id),
+        "spotlight_type": "leading_thinker",
+        "cycle_day": 1,
+        "deep_link": {"screen": "learning_spotlight"},
+    }
+
+
 def test_build_post_flagged_payload() -> None:
     notification_id = uuid4()
     post_id = uuid4()
@@ -169,3 +203,29 @@ def test_build_post_rejected_payload() -> None:
         "post_id": str(post_id),
     }
     assert fcm_data["post_id"] == str(post_id)
+
+
+def test_build_connection_reminder_payload() -> None:
+    notification_id = uuid4()
+    sender_id = uuid4()
+
+    payload = NotificationPayloadBuilder.build(
+        notification_type="CONNECTION_REMINDER",
+        notification_id=notification_id,
+        sender_user_id=sender_id,
+        extra={"pending_count": 3},
+    )
+
+    assert payload == {
+        "notification_type": "CONNECTION_REMINDER",
+        "notification_id": str(notification_id),
+        "sender_user_id": str(sender_id),
+        "pending_count": 3,
+        "deep_link": {"screen": "explore"},
+    }
+
+    fcm_data = NotificationPayloadBuilder.for_fcm(payload)
+    assert json.loads(fcm_data["deep_link"]) == {"screen": "explore"}
+    assert fcm_data["notification_type"] == "CONNECTION_REMINDER"
+    assert fcm_data["pending_count"] == "3"
+

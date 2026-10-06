@@ -58,7 +58,7 @@ async def test_build_device_auth_session_syncs_topics_on_successful_login(mock_d
     upsert.assert_awaited_once()
     assert upsert.await_args.kwargs["platform"] == "android"
     assert upsert.await_args.kwargs["fcm_token"] == "fcm-token-1"
-    refresh_topics.assert_awaited_once_with(db, user.id, profile)
+    refresh_topics.assert_awaited_once_with(db, user.id, profile, fcm_token="fcm-token-1")
     db.commit.assert_awaited()
 
 
@@ -92,4 +92,4 @@ async def test_build_device_auth_session_syncs_topics_after_otp_challenge(mock_d
 
     assert message == "Verification email sent. Please verify your OTP."
     assert session_data["needsOtp"] is True
-    refresh_topics.assert_awaited_once_with(db, user.id, profile)
+    refresh_topics.assert_awaited_once_with(db, user.id, profile, fcm_token="fcm-token-2")

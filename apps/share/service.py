@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from uuid import UUID
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from apps.accounts.db_models import User
+from apps.engagement.db_models import ShareEvent
 from apps.feed.db_models import Post, PostAttachment
 from apps.feed.services.post_service import format_post_detail
 from apps.profiles.db_models import Profile
@@ -16,20 +15,28 @@ from common.exceptions import ApiError
 from common.user_visibility import is_hidden_account_status, visible_user_filters
 
 
-async def get_shareable_post(db: AsyncSession, post_id: UUID) -> SharePostData:
+async def get_shareable_post(db: AsyncSession, code: str) -> SharePostData:
     """Return a public share payload for a feed-visible published post.
 
-    Unavailable posts (missing, non-public state/content, or hidden author)
-    all surface as ``Post not found`` to avoid leaking why.
+    Resolves the Branch share ``code`` stored on ``share_events``. Invite
+    codes and unknown codes surface as ``Post not found``. Unavailable posts
+    (missing, non-public state/content, or hidden author) use the same
+    message to avoid leaking why.
     """
+    normalized = (code or "").strip()
+    if not normalized:
+        raise ApiError("Post not found")
+
     stmt = (
         select(Post, User, Profile)
+        .join(ShareEvent, ShareEvent.post_id == Post.id)
         .join(User, User.id == Post.author_user_id)
         .outerjoin(Profile, Profile.user_id == Post.author_user_id)
-        .where(Post.id == post_id)
+        .where(ShareEvent.branch_code == normalized)
         .where(Post.state.in_(FEED_VISIBLE_POST_STATES))
         .where(*visible_user_filters(User))
         .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
+        .limit(1)
     )
     row = (await db.execute(stmt)).one_or_none()
     if row is None:
@@ -59,7 +66,7 @@ async def get_shareable_post(db: AsyncSession, post_id: UUID) -> SharePostData:
         author_id=detail["author_user_id"],
         author_name=detail.get("author_name"),
         profilePhoto_url=detail.get("profilePhoto_url"),
-        profile_visibility=detail.get("profile_visibility", "public"),
+        profile_visibility=detail.get("profile_visibility", "private"),
         content={
             "caption": content.get("caption"),
             "content_html": content.get("content_html"),

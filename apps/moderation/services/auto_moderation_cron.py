@@ -1,8 +1,10 @@
-"""In-process auto-moderation cron loop (FastAPI lifespan pattern)."""
+"""Auto-moderation scan helper used by tests and leftover compatibility callers.
+
+Periodic execution is owned by Celery Beat (`kampulynk.moderation.tick`).
+"""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from apps.moderation.config import settings as auto_moderation_settings
@@ -11,30 +13,19 @@ from apps.moderation.services.auto_moderation_service import run_auto_moderation
 logger = logging.getLogger(__name__)
 
 
-async def cron_auto_moderation() -> None:
-    """Periodically scan posts/comments against the configured blacklist."""
+async def process_auto_moderation() -> None:
+    """One scheduler tick: scan posts/comments against the configured blacklist."""
     if not auto_moderation_settings.enabled:
-        logger.info(
-            "Auto-moderation cron not started (AUTO_MODERATION_ENABLED=false)."
-        )
         return
 
-    interval = auto_moderation_settings.cron_interval_seconds
     batch_size = auto_moderation_settings.batch_size
-    logger.info(
-        "Starting auto-moderation cron (interval=%ss, batch_size=%s)...",
-        interval,
-        batch_size,
-    )
+    logger.info("[auto-moderation] Tick started batch_size=%s", batch_size)
     try:
-        while True:
-            try:
-                await run_auto_moderation_scan(batch_size=batch_size)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Auto-moderation cron cycle failed")
-            await asyncio.sleep(interval)
-    except asyncio.CancelledError:
-        logger.info("Auto-moderation cron task cancelled.")
-        raise
+        await run_auto_moderation_scan(batch_size=batch_size)
+    except Exception:
+        logger.exception("Auto-moderation cron cycle failed")
+
+
+async def cron_auto_moderation() -> None:
+    """Backward-compatible alias for ``process_auto_moderation``."""
+    await process_auto_moderation()

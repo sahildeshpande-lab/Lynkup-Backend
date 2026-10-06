@@ -3,9 +3,13 @@ from .post_repository import (
     count_posts_by_state,
     count_reviewed_posts_for_moderator,
     count_reviewed_posts_summary_by_state,
+    count_user_posts_summary_by_state,
+    count_user_posts_timeline,
     fetch_posts_by_state,
     fetch_posts_by_state_with_details,
     fetch_reviewed_posts_for_moderator,
+    fetch_user_posts_timeline_events,
+    hydrate_user_posts_timeline,
     user_exists,
 )
 
@@ -14,10 +18,14 @@ __all__ = [
     "count_posts_by_state",
     "count_reviewed_posts_for_moderator",
     "count_reviewed_posts_summary_by_state",
+    "count_user_posts_summary_by_state",
+    "count_user_posts_timeline",
     "fetch_feed_posts",
     "fetch_posts_by_state",
     "fetch_posts_by_state_with_details",
     "fetch_reviewed_posts_for_moderator",
+    "fetch_user_posts_timeline_events",
+    "hydrate_user_posts_timeline",
     "fetch_viewer_profile",
     "user_exists",
 ]

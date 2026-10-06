@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, Enum as SqlEnum, Index, Text, text
+from sqlalchemy import Boolean, Column, DateTime, Enum as SqlEnum, Index, Text, text
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -37,7 +37,7 @@ class Report(SQLModel, table=True):
         default=None,
         foreign_key="post_revisions.id",
         nullable=True,
-        index=True,
+        index=False,
     )
     reason: str = Field(sa_column=Column(Text, nullable=False))
     status: ReportStatus = Field(
@@ -54,6 +54,14 @@ class Report(SQLModel, table=True):
         nullable=True,
     )
     admin_comment: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    is_deleted: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default="false"),
+    )
+    counts_in_queue: bool = Field(
+        default=True,
+        sa_column=Column(Boolean, nullable=False, server_default="true"),
+    )
     created_at: datetime = Field(
         default_factory=utc_now,
         sa_column=Column(DateTime(timezone=True), nullable=False),

@@ -11,6 +11,7 @@ from apps.feed.db_models import Post
 from apps.accounts.db_models import User
 from apps.profiles.db_models import Profile
 from apps.profiles.db_models.university_db_model import University
+from common.enums import PostState
 from common.user_visibility import visible_user_filters
 
 
@@ -21,8 +22,10 @@ def utc_now() -> datetime:
 async def post_exists(db: AsyncSession, post_id: UUID) -> bool:
     stmt = (
         select(Post.id)
-        .join(User, User.id == Post.author_user_id)
-        .where(Post.id == post_id, *visible_user_filters(User))
+        .where(
+            Post.id == post_id,
+            Post.state.notin_([PostState.deleted, PostState.rejected]),
+        )
     )
     return (await db.execute(stmt)).scalar_one_or_none() is not None
 
@@ -161,9 +164,49 @@ async def increment_reply_count(db: AsyncSession, comment_id: UUID) -> int:
     return int((await db.execute(stmt)).scalar_one())
 
 
-async def mark_comment_deleted(db: AsyncSession, comment: Comment, *, now: datetime | None = None) -> Comment:
+async def mark_comment_deleted(
+    db: AsyncSession,
+    comment: Comment,
+    *,
+    now: datetime | None = None,
+) -> Comment:
     timestamp = now or utc_now()
     comment.is_deleted = True
+    comment.updated_at = timestamp
+    db.add(comment)
+
+    # Cascading soft-delete to all child comments / replies at all descendant levels
+    parent_ids = [comment.id]
+    while parent_ids:
+        stmt = (
+            select(Comment)
+            .where(
+                Comment.parent_comment_id.in_(parent_ids),
+                Comment.is_deleted == False,  # noqa: E712
+            )
+        )
+        children = list((await db.execute(stmt)).scalars().all())
+        if not children:
+            break
+        for child in children:
+            child.is_deleted = True
+            child.updated_at = timestamp
+            db.add(child)
+        parent_ids = [child.id for child in children]
+
+    return comment
+
+
+async def update_comment_text(
+    db: AsyncSession,
+    comment: Comment,
+    new_text: str,
+    *,
+    now: datetime | None = None,
+) -> Comment:
+    timestamp = now or utc_now()
+    comment.comment_text = new_text
+    comment.is_edited = True
     comment.updated_at = timestamp
     db.add(comment)
     return comment

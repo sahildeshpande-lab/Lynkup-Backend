@@ -8,7 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from apps.accounts.db_models import User, UserInstallation
-from apps.accounts.services.common_service import _fetch_user_profile, _generate_otp, _now
+from apps.accounts.services.common_service import (
+    _fetch_user_profile,
+    _generate_otp,
+    _now,
+    can_reuse_stored_otp,
+)
 from apps.profiles.db_models import Profile
 from common.enums import UserStatus
 from core.auth.config import settings as auth_settings
@@ -17,17 +22,22 @@ from core.email_service import send_otp_email
 logger = logging.getLogger(__name__)
 
 
-def _profile_full_name(profile: Profile | None) -> str | None:
+def _profile_first_name(profile: Profile | None) -> str | None:
     if profile is None:
         return None
-    full_name = f"{(profile.first_name or '').strip()} {(profile.last_name or '').strip()}".strip()
-    return full_name or None
+    first_name = (profile.first_name or "").strip()
+    return first_name or None
+
+
+def clear_session_otp_state(user: User) -> None:
+    """Clear in-flight OTP codes without revoking confirmed email verification."""
+    user.email_otp = None
+    user.email_otp_created_at = None
 
 
 def clear_session_email_verification(user: User) -> None:
-    user.email_verified_at = None
-    user.email_otp = None
-    user.email_otp_created_at = None
+    """Backward-compatible alias; prefer ``clear_session_otp_state``."""
+    clear_session_otp_state(user)
 
 
 def has_unexpired_otp(user: User) -> bool:
@@ -178,6 +188,7 @@ async def upsert_user_installation(
     platform: str | None = None,
     fcm_token: str | None = None,
     now: datetime | None = None,
+    installation: UserInstallation | None = None,
 ) -> UserInstallation:
     """Create or refresh a user_installation row.
 
@@ -195,7 +206,8 @@ async def upsert_user_installation(
             keep_user_id=user_id,
         )
 
-    installation = await get_user_installation(db, user_id, device_id)
+    if installation is None:
+        installation = await get_user_installation(db, user_id, device_id)
     if installation is None:
         installation = UserInstallation(
             user_id=user_id,
@@ -366,10 +378,10 @@ async def evaluate_device_otp_requirement(
 ) -> tuple[UserInstallation | None, bool, bool]:
     """Decide whether this sign-in needs an OTP challenge.
 
-    Once ``is_device_verified=True`` for ``(user_id, device_id)``, OTP is never
-    required again for that device — including after logout (``is_active`` may
-    be false; successful login reactivates it). Merely having an installation
-    row is not enough to bypass OTP.
+    OTP is skipped only when **both** the account email is verified
+    (``user.email_verified_at``) **and** the device is trusted
+    (``UserInstallation.is_device_verified``). If either is missing, OTP is
+    required — including after email change on a previously trusted device.
 
     When ``device_id`` is omitted, the device cannot be trusted and OTP is required.
     """
@@ -378,9 +390,32 @@ async def evaluate_device_otp_requirement(
 
     installation = await get_user_installation(db, user.id, device_id)
     is_new_device = installation is None
-    is_trusted = installation is not None and bool(installation.is_device_verified)
-    needs_otp = not is_trusted
+    email_verified = user.email_verified_at is not None
+    device_verified = installation is not None and bool(installation.is_device_verified)
+    needs_otp = not (email_verified and device_verified)
     return installation, is_new_device, needs_otp
+
+
+async def demote_device_trust_if_email_unverified(
+    db: AsyncSession,
+    user: User,
+    device_id: str,
+) -> None:
+    """Clear device trust while email verification is pending.
+
+    Ensures ``/verify-otp`` can re-trust the device after email-only challenges
+    (e.g. post-graduation email change on a previously trusted device).
+    """
+    if user.email_verified_at is not None:
+        return
+
+    installation = await get_user_installation(db, user.id, device_id)
+    if installation is None or not getattr(installation, "is_device_verified", False):
+        return
+
+    installation.is_device_verified = False
+    installation.verified_at = None
+    db.add(installation)
 
 
 async def begin_otp_challenge(
@@ -403,7 +438,7 @@ async def begin_otp_challenge(
     """
     del installation, is_new_device  # retained for call-site compatibility
     now = _now()
-    await db.refresh(user)
+    # await db.refresh(user)
 
     already_active = user.status == UserStatus.active
     # Never downgrade an active account back to pending.
@@ -422,12 +457,13 @@ async def begin_otp_challenge(
             fcm_token=fcm_token,
             now=now,
         )
+        await demote_device_trust_if_email_unverified(db, user, device_id)
 
-    if has_unexpired_otp(user):
+    if has_unexpired_otp(user) and can_reuse_stored_otp(user):
         await db.commit()
         return False
 
-    otp = _generate_otp()
+    otp = _generate_otp(user.email)
     user.email_otp = otp
     user.email_otp_created_at = now
     user.updated_at = now
@@ -439,7 +475,7 @@ async def begin_otp_challenge(
         user.email,
         otp,
         "email_verification",
-        full_name=_profile_full_name(profile),
+        first_name=_profile_first_name(profile),
     )
     return True
 
@@ -463,7 +499,7 @@ async def send_otp_challenge(
 
     already_active = user.status == UserStatus.active
 
-    otp = _generate_otp()
+    otp = _generate_otp(user.email)
     user.email_otp = otp
     user.email_otp_created_at = now
     if not already_active:
@@ -480,6 +516,7 @@ async def send_otp_challenge(
         fcm_token=fcm_token,
         now=now,
     )
+    await demote_device_trust_if_email_unverified(db, user, device_id)
 
     await db.commit()
     profile = await _fetch_user_profile(db, user)
@@ -487,7 +524,7 @@ async def send_otp_challenge(
         user.email,
         otp,
         "email_verification",
-        full_name=_profile_full_name(profile),
+        first_name=_profile_first_name(profile),
     )
     return otp
 

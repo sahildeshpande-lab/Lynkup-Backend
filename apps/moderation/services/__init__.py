@@ -10,7 +10,7 @@ from .auto_moderation_service import (
     scan_comments,
     scan_posts,
 )
-from .auto_moderation_cron import cron_auto_moderation
+from .auto_moderation_cron import cron_auto_moderation, process_auto_moderation
 
 __all__ = [
     "get_moderation_words",
@@ -24,4 +24,5 @@ __all__ = [
     "scan_comments",
     "scan_posts",
     "cron_auto_moderation",
+    "process_auto_moderation",
 ]

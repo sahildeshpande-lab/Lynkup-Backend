@@ -67,18 +67,67 @@ def validate_visibility(profile: Profile | None) -> bool:
     return vis == ProfileVisibility.public
 
 
+def build_recommendation_profile_payload(
+    candidate: Profile,
+    uni_id,
+    university_name: str | None,
+    university_website: str | None,
+) -> dict:
+    """Shared profile fields used by people-recommendation responses."""
+    return {
+        "user_id": candidate.user_id,
+        "first_name": candidate.first_name,
+        "last_name": candidate.last_name,
+        "university": university_name,
+        "university_details": {
+            "id": str(uni_id) if uni_id else (str(candidate.university_id) if candidate.university_id else None),
+            "university_name": university_name,
+            "university_website": university_website,
+        },
+        "major": candidate.major,
+        "minor": candidate.minor,
+        "edu_level": candidate.edu_level,
+        "profilePhoto_url": (
+            generate_profile_image_url(candidate.profile_photo_url)
+            if candidate.profile_photo_url
+            else None
+        ),
+        "is_deleted": False,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
+
+def _has_major_match(p1: Profile, p2: Profile) -> bool:
+    p1_major_id = getattr(p1, "major_id", None)
+    p2_major_id = getattr(p2, "major_id", None)
+    if p1_major_id is not None and p2_major_id is not None and p1_major_id == p2_major_id:
+        return True
+    if p1.major and p2.major and str(p1.major).strip().lower() == str(p2.major).strip().lower():
+        return True
+    return False
+
+
+def _has_minor_match(p1: Profile, p2: Profile) -> bool:
+    p1_minor_id = getattr(p1, "minor_id", None)
+    p2_minor_id = getattr(p2, "minor_id", None)
+    if p1_minor_id is not None and p2_minor_id is not None and p1_minor_id == p2_minor_id:
+        return True
+    if p1.minor and p2.minor and str(p1.minor).strip().lower() == str(p2.minor).strip().lower():
+        return True
+    return False
+
 
 def _build_match_reasons(p1: Profile, p2: Profile, mutual_connections_count: int) -> list[str]:
     """Return human-readable match reasons for a candidate."""
     reasons: list[str] = []
 
-    if p1.major and p2.major and p1.major.strip().lower() == p2.major.strip().lower():
+    if _has_major_match(p1, p2):
         reasons.append("Same major")
 
-    if p1.minor and p2.minor and p1.minor.strip().lower() == p2.minor.strip().lower():
+    if _has_minor_match(p1, p2):
         reasons.append("Same minor")
 
     if p1.university_id and p2.university_id and p1.university_id == p2.university_id:
@@ -104,10 +153,10 @@ def calculate_recommendation_score(
 ) -> float:
     score = 0.0
 
-    if p1.major and p2.major and p1.major.strip().lower() == p2.major.strip().lower():
+    if _has_major_match(p1, p2):
         score += 30.0
 
-    if p1.minor and p2.minor and p1.minor.strip().lower() == p2.minor.strip().lower():
+    if _has_minor_match(p1, p2):
         score += 15.0
 
     if p1.university_id and p2.university_id and p1.university_id == p2.university_id:
@@ -120,9 +169,8 @@ def calculate_recommendation_score(
     if p1.edu_level and p2.edu_level and p1.edu_level == p2.edu_level:
         score += 10.0
 
-    if mutual_connections_count > 0:
-        # Friends-of-friends are a primary recommendation signal.
-        score += min(25.0 * mutual_connections_count, 50.0)
+    mutual_score = min(mutual_connections_count * 10.0, 20.0)
+    score += mutual_score
 
     return min(100.0, score)
 
@@ -181,24 +229,14 @@ async def dismiss_recommendation(db: AsyncSession, user_id: UUID, dismissed_id: 
     pass
 
 
-async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
+async def get_recommendations_categorized(
+    db: AsyncSession, user_id: UUID
+) -> dict[str, list[dict]]:
     """
-    Return a scored, de-duplicated list of connection recommendations.
-
-    Scoring weights:
-      - Same major       : +30 pts   (global suggestion trigger)
-      - Mutual connection: +25 pts each (capped at +50)
-      - Same university  : +20 pts
-      - Shared interests : +20 pts
-      - Same minor       : +15 pts   (global suggestion trigger)
-      - Same edu level   : +10 pts
-
-    Candidates are excluded if they are already connected, have a pending
-    request, or are blocked in either direction.
-
-    Only candidates with score > 0 are returned, ensuring that mutual
-    connections (friends of friends) and profile matches are surfaced while
-    completely unrelated users are omitted.
+    Return connection recommendations split into:
+      - 'items': full scored list
+      - 'based_on_major_minor': up to 8 users matching on major/minor
+      - 'without_major_minor': up to 8 users recommended without major/minor match
     """
     # 1. Load the current user's profile
     stmt = select(Profile).where(Profile.user_id == user_id)
@@ -206,7 +244,11 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
     current_profile = result.scalars().first()
 
     if not current_profile:
-        return []
+        return {
+            "items": [],
+            "based_on_major_minor": [],
+            "without_major_minor": [],
+        }
 
     # 2. Build adjacency for mutual-connection counts (single query)
     connection_adjacency = await _build_connection_adjacency(db)
@@ -218,7 +260,7 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
     from apps.profiles.db_models.university_db_model import University
 
     profiles_stmt = (
-        select(Profile, University.name)
+        select(Profile, University.id, University.name, University.website)
         .join(User, User.id == Profile.user_id)
         .join(UserRole, UserRole.user_id == User.id)
         .join(Role, Role.id == UserRole.role_id)
@@ -239,53 +281,104 @@ async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
     profiles_res = await db.execute(profiles_stmt)
     candidates_with_uni = profiles_res.all()
 
-    # 5. Score and collect match reasons
-    scored_candidates = []
+    # 5. Score and partition candidates
+    all_scored_candidates: list[dict] = []
+    major_minor_candidates: list[dict] = []
+    university_candidates: list[dict] = []
+    without_major_minor_candidates: list[dict] = []
+    fallback_without_major_minor: list[dict] = []
 
-    for candidate, university_name in candidates_with_uni:
+    for candidate, uni_id, university_name, university_website in candidates_with_uni:
         mutuals = get_mutual_connections_count_from_adjacency(
             connection_adjacency, user_id, candidate.user_id
         )
         score = calculate_recommendation_score(current_profile, candidate, mutuals)
-
-        # Mutual friends-of-friends and profile matches always have score > 0.
-        # Skip candidates with zero score — they share nothing in common.
-        if score <= 0:
-            continue
-
         match_reasons = _build_match_reasons(current_profile, candidate, mutuals)
 
-        scored_candidates.append(
-            {
-                "user_id": candidate.user_id,
-                "score": score,
-                "match_reason": ", ".join(match_reasons) if match_reasons else None,
-                "mutual_connections_count": mutuals,
-                "first_name": candidate.first_name,
-                "last_name": candidate.last_name,
-                "university": university_name,
-                "major": candidate.major,
-                "minor": candidate.minor,
-                "edu_level": candidate.edu_level,
-                "profilePhoto_url": (
-                    generate_profile_image_url(candidate.profile_photo_url)
-                    if candidate.profile_photo_url
-                    else None
-                ),
-                "is_deleted": False,
-            }
+        candidate_data = build_recommendation_profile_payload(
+            candidate, uni_id, university_name, university_website
+        )
+        candidate_data["score"] = score
+        candidate_data["match_reason"] = ", ".join(match_reasons) if match_reasons else None
+        candidate_data["mutual_connections_count"] = mutuals
+
+        has_mm = _has_major_match(current_profile, candidate) or _has_minor_match(current_profile, candidate)
+        has_uni = bool(
+            current_profile.university_id
+            and candidate.university_id
+            and current_profile.university_id == candidate.university_id
         )
 
-    # 6. Sort by descending score
-    scored_candidates.sort(key=lambda x: x["score"], reverse=True)
+        if score > 0:
+            all_scored_candidates.append(candidate_data)
+            if has_mm:
+                major_minor_candidates.append(candidate_data)
+            else:
+                without_major_minor_candidates.append(candidate_data)
+            if has_uni:
+                university_candidates.append(candidate_data)
+        else:
+            if not has_mm:
+                fallback_without_major_minor.append(candidate_data)
+
+    # 6. Sort lists by descending score
+    all_scored_candidates.sort(key=lambda x: x["score"], reverse=True)
+    major_minor_candidates.sort(key=lambda x: x["score"], reverse=True)
+    university_candidates.sort(key=lambda x: x["score"], reverse=True)
+    without_major_minor_candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    if len(without_major_minor_candidates) < 8 and fallback_without_major_minor:
+        without_major_minor_candidates.extend(fallback_without_major_minor[: 8 - len(without_major_minor_candidates)])
+
+    # Build based_on_major_minor: 4 based on major/minor + 4 based on university
+    mm_selected = major_minor_candidates[:4]
+    selected_mm_ids = {c["user_id"] for c in mm_selected}
+
+    uni_selected = [c for c in university_candidates if c["user_id"] not in selected_mm_ids][:4]
+    top_major_minor = mm_selected + uni_selected
+    selected_combined_ids = {c["user_id"] for c in top_major_minor}
+
+    # If either group had fewer than 4, fill up to 8 from remaining candidates
+    if len(top_major_minor) < 8:
+        for c in major_minor_candidates:
+            if c["user_id"] not in selected_combined_ids:
+                top_major_minor.append(c)
+                selected_combined_ids.add(c["user_id"])
+                if len(top_major_minor) >= 8:
+                    break
+    if len(top_major_minor) < 8:
+        for c in university_candidates:
+            if c["user_id"] not in selected_combined_ids:
+                top_major_minor.append(c)
+                selected_combined_ids.add(c["user_id"])
+                if len(top_major_minor) >= 8:
+                    break
+
+    top_without_major_minor = without_major_minor_candidates[:8]
 
     # 7. Enrich with relationship flags
-    target_user_ids = [c["user_id"] for c in scored_candidates]
+    all_target_ids = list(
+        {c["user_id"] for c in all_scored_candidates + top_major_minor + top_without_major_minor}
+    )
     from apps.connections.services import get_relationship_flags
-    flags_map = await get_relationship_flags(db, user_id, target_user_ids)
+    flags_map = await get_relationship_flags(db, user_id, all_target_ids)
 
     from apps.connections.services.connection_service import apply_relationship_flags
-    for c in scored_candidates:
+    for c in all_scored_candidates:
+        apply_relationship_flags(c, flags_map, c["user_id"])
+    for c in top_major_minor:
+        apply_relationship_flags(c, flags_map, c["user_id"])
+    for c in top_without_major_minor:
         apply_relationship_flags(c, flags_map, c["user_id"])
 
-    return scored_candidates
+    return {
+        "items": all_scored_candidates,
+        "based_on_major_minor": top_major_minor,
+        "without_major_minor": top_without_major_minor,
+    }
+
+
+async def get_recommendations(db: AsyncSession, user_id: UUID) -> list[dict]:
+    """Return a scored, de-duplicated list of connection recommendations."""
+    result = await get_recommendations_categorized(db, user_id)
+    return result["items"]

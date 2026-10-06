@@ -23,7 +23,8 @@ import httpx
 
 from apps.accounts.db_models import RefreshToken, SecurityEvent, SecurityEventType, TransactionalEmailLog, User , UserInstallation  , PasswordResetToken
 from apps.profiles.db_models import Profile
-from common.enums import OnboardingStatus, RegistrationType, UserStatus
+from common.enums import OnboardingStatus, RegistrationType, UserStatus, format_user_status
+from common.exceptions import ApiError
 from core.auth.config import settings as auth_settings
 from core.email_service import send_otp_email, send_verification_success_email, build_email_verified_success_html , send_reset_password_email
  
@@ -181,7 +182,7 @@ def _build_auth_user_response(user: User, profile: Profile | None) -> AuthUserRe
         lastName=last_name,
         email=user.email,
         role=user.role,
-        status=user.status.value if hasattr(user.status, "value") else str(user.status),
+        status=format_user_status(user.status),
         isEmailVerified=(user.email_verified_at is not None),
         email_verified_at=user.email_verified_at,
         email_otp_created_at=user.email_otp_created_at,
@@ -348,17 +349,26 @@ async def complete_firebase_registration(firebase_user: dict, db: AsyncSession) 
 
 
 
-async def _issue_auth_session(user: User, db: AsyncSession) -> dict:
-    profile = await _fetch_user_profile(db, user)
-    from apps.profiles.services import build_user_base_response
-    user_data = await build_user_base_response(user, profile, db)
-    await db.commit()
-    return {
-        "user": user_data,
-        "emailSent": False,
-    }
+# async def _issue_auth_session(user: User, db: AsyncSession) -> dict:
+#     profile = await _fetch_user_profile(db, user)
+#     from apps.profiles.services import build_user_base_response
+#     user_data = await build_user_base_response(user, profile, db)
+#     await db.commit()
+#     return {
+#         "user": user_data,
+#         "emailSent": False,
+#     }
 
 
+async def _issue_auth_session(
+    user: User,
+    db: AsyncSession,
+    profile: Profile | None = None,
+) -> dict:
+    if profile is None:
+        profile = await _fetch_user_profile(db, user)
+
+        
 async def build_firebase_session_response(user: User, db: AsyncSession) -> dict:
     profile = await _fetch_user_profile(db, user)
     from apps.profiles.services import build_user_base_response
@@ -420,10 +430,10 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
         else str(payload.loginType)
     ).lower()
     if requested_provider in ("google", "google.com"):
-        expected_token_provider = "google.com"
+        expected_token_provider = "google.com"  # nosec B105 -- OAuth provider identifier, not a password
         provider_name = "google"
     elif requested_provider in ("apple", "apple.com"):
-        expected_token_provider = "apple.com"
+        expected_token_provider = "apple.com"  # nosec B105 -- OAuth provider identifier, not a password
         provider_name = "apple"
     else:
         raise HTTPException(
@@ -494,7 +504,7 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()
 
-        session_data = await _issue_auth_session(user, db)
+        session_data = await _issue_auth_session(user, db , profile=profile,)
         return session_data, False
 
     user = User(
@@ -552,7 +562,7 @@ async def social_auth(payload: SocialAuthRequest, db: AsyncSession) -> tuple[dic
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
 
-    session_data = await _issue_auth_session(user, db)
+    session_data = await _issue_auth_session(user, db , profile=profile)
     return session_data, True
 
 
@@ -560,6 +570,11 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     if firebase_user.get("uid") is None or (firebase_user.get("email") or "").lower() != payload.email.lower():
         return ApiResponse(status=False, message="Invalid Firebase credentials", data=None)
     email = payload.email.lower()
+
+    device_id = (payload.device_id or "").strip() or None
+    if device_id:
+        from apps.accounts.services.device_limit_service import validate_device_account_limit
+        await validate_device_account_limit(db, device_id)
 
     stmt=select(User).where(User.firebase_uid == firebase_user["uid"])
     exisiting_user = (await db.execute(stmt)).scalar_one_or_none()
@@ -626,8 +641,8 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
                 existing_user_email.email_otp_created_at = now
                 db.add(existing_user_email)
                 await db.commit()
-                full_name = f"{(payload.firstName or '').strip()} {(payload.lastName or '').strip()}".strip() or None
-                await send_otp_email(email, otp, "email_verification", full_name=full_name)
+                first_name = (payload.firstName or "").strip() or None
+                await send_otp_email(email, otp, "email_verification", first_name=first_name)
             else:
                 await db.commit()
 
@@ -638,7 +653,7 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
             stmt_user = select(User).options(selectinload(User.roles)).where(User.id == existing_user_email.id)
             user = (await db.execute(stmt_user)).scalar_one()
 
-            data = await _issue_auth_session(user, db)
+            data = await _issue_auth_session(user, db ,profile=profile)
             if isinstance(data, dict):
                 data["emailSent"] = not bool(existing_user_email.email_verified_at)
             return ApiResponse(status=True, message="Signup successful", data=data)
@@ -711,14 +726,14 @@ async def signup(payload: EmailSignupRequest, firebase_user: dict, db: AsyncSess
     user.updated_at = now
     db.add(user)
     await db.commit()
-    full_name = f"{(payload.firstName or '').strip()} {(payload.lastName or '').strip()}".strip() or None
-    await send_otp_email(email, otp, "email_verification", full_name=full_name)
+    first_name = (payload.firstName or "").strip() or None
+    await send_otp_email(email, otp, "email_verification", first_name=first_name)
     await db.refresh(user)
     await db.refresh(profile)
     stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
     user = (await db.execute(stmt_user)).scalar_one()
 
-    data = await _issue_auth_session(user, db)
+    data = await _issue_auth_session(user, db , profile=profile)
     if isinstance(data, dict):
         data["emailSent"] = True
     return ApiResponse(status=True, message="Signup successful", data=data)
@@ -743,6 +758,11 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
 
     if not isinstance(user.password_hash, str) or not PASSWORD_HASHER.verify(payload.password, user.password_hash):
         return ApiResponse(status=False, message="Password not matched ", data=None)
+
+    device_id = (payload.device_id or "").strip() or None
+    if device_id:
+        from apps.accounts.services.device_limit_service import validate_device_account_limit
+        await validate_device_account_limit(db, device_id, user_id=user.id)
 
     from apps.accounts.db_models import UserInstallation
     stmt_install = select(UserInstallation).where(
@@ -784,18 +804,14 @@ async def login(payload: LoginRequest, firebase_user: dict, db: AsyncSession) ->
 
         await db.commit()
         profile = await _fetch_user_profile(db, user)
-        full_name = (
-            f"{(profile.first_name or '').strip()} {(profile.last_name or '').strip()}".strip()
-            if profile
-            else None
-        ) or None
-        await send_otp_email(user.email, otp, "email_verification", full_name=full_name)
+        first_name = ((profile.first_name or "").strip() if profile else None) or None
+        await send_otp_email(user.email, otp, "email_verification", first_name=first_name)
 
         # Load roles eagerly to avoid MissingGreenlet when accessing user.role
         stmt_user = select(User).options(selectinload(User.roles)).where(User.id == user.id)
         user = (await db.execute(stmt_user)).scalar_one()
 
-        data = await _issue_auth_session(user, db)
+        data = await _issue_auth_session(user, db , profile=profile)
         if isinstance(data, dict):
             data["emailSent"] = True
         return ApiResponse(status=True, message="Verification email sent. Please verify your OTP.", data=data)
@@ -837,20 +853,22 @@ async def verify_otp(payload: OtpVerifyRequest, firebase_user: dict, db: AsyncSe
         return ApiResponse(status=False, message="OTP has expired. Please request a new OTP", data=None)
 
     if user.email_otp == payload.otp:
+        was_unverified = user.email_verified_at is None
         onboarding_completed = user.onboarding_status == OnboardingStatus.completed
-        user.email_verified_at = _now()
+        user.email_verified_at = user.email_verified_at or _now()
         user.status = UserStatus.active
         user.email_otp = _generate_otp()
         user.email_otp_created_at = _now()
         db.add(user)
         await db.commit()
 
-        if not onboarding_completed:
+        if not onboarding_completed and was_unverified:
             stmt_profile = select(Profile).where(Profile.user_id == user.id)
             profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-            full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip() if profile else None
-            await send_verification_success_email(user.email, full_name)
+            first_name = (profile.first_name or "").strip() if profile else None
+            await send_verification_success_email(user.email, first_name or None)
         return ApiResponse(status=True, message="Email verified successfully", data=None)
+
 
     return ApiResponse(status=False, message="Email not verified in Firebase yet", data=None)
 
@@ -877,8 +895,8 @@ async def verify_email(token: str, db: AsyncSession) -> HTMLResponse | ApiRespon
 
     stmt_profile = select(Profile).where(Profile.user_id == user.id)
     profile = (await db.execute(stmt_profile)).scalar_one_or_none()
-    full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip() if profile else None
-    html_content = build_email_verified_success_html(full_name)
+    first_name = (profile.first_name or "").strip() if profile else None
+    html_content = build_email_verified_success_html(first_name or None)
     return HTMLResponse(content=html_content, status_code=200)
 
 
@@ -902,12 +920,8 @@ async def resend_otp(payload: ResendOtpRequest, firebase_user: dict, db: AsyncSe
     db.add(user)
     await db.commit()
     profile = await _fetch_user_profile(db, user)
-    full_name = (
-        f"{(profile.first_name or '').strip()} {(profile.last_name or '').strip()}".strip()
-        if profile
-        else None
-    ) or None
-    await send_otp_email(user.email, otp, "email_verification", full_name=full_name)
+    first_name = ((profile.first_name or "").strip() if profile else None) or None
+    await send_otp_email(user.email, otp, "email_verification", first_name=first_name)
     return ApiResponse(status=True, message="OTP sent successfully", data=None)
 
 
@@ -961,7 +975,7 @@ async def refresh_token(payload: RefreshTokenRequest, db: AsyncSession) -> dict:
     await _revoke_refresh_token_row(db, token_row)
     await _store_refresh_token(db, user, new_refresh_token)
     await db.commit()
-    return {"access_token": access_token, "refresh_token": new_refresh_token, "token_type": "bearer"}
+    return {"access_token": access_token, "refresh_token": new_refresh_token, "token_type": "bearer"}  # nosec B105 -- token type constant, not a password
 
 from firebase_admin import auth
 
@@ -1137,7 +1151,7 @@ async def forgot_password( payload: ForgotPasswordRequest,db: AsyncSession ) -> 
     if existing_token:
         return ApiResponse(
             status=False,
-            message=f"Recently email for resest password as been send please try after {auth_settings.password_reset_token_expire_minutes} mins  ",
+            message=f"Recently email for resest password as been send please try after {auth_settings.password_reset_token_expire_minutes} minutes  ",
             data=None
         )
 
@@ -1334,7 +1348,7 @@ async def forgot_password( payload: ForgotPasswordRequest,db: AsyncSession ) -> 
     if existing_token:
         return ApiResponse(
             status=False,
-            message=f"Recently email for resest password as been send please try after {auth_settings.password_reset_token_expire_minutes} mins  ",
+            message=f"Recently email for resest password as been send please try after {auth_settings.password_reset_token_expire_minutes} minutes  ",
             data=None
         )
 
@@ -1486,6 +1500,36 @@ async def reset_password(payload: ResetPasswordRequest,  db: AsyncSession    ) -
         reset_token.used_at = now
         db.add(reset_token)
 
+    # Revoke Firebase tokens so all other sessions/devices are invalidated
+    if user.firebase_uid:
+        try:
+            from core.auth.services import revoke_firebase_tokens
+            revoke_firebase_tokens(user.firebase_uid)
+        except Exception as exc:
+            logger.warning("Failed to revoke Firebase tokens for user %s: %s", user.id, exc)
+
+    # Revoke backend DB refresh tokens
+    try:
+        rows = (
+            await db.execute(
+                select(RefreshToken).where(
+                    RefreshToken.user_id == user.id,
+                    RefreshToken.revoked_at == None,  # noqa: E711
+                )
+            )
+        ).scalars().all()
+        for row in rows:
+            await _revoke_refresh_token_row(db, row)
+    except Exception as exc:
+        logger.warning("Failed to revoke DB refresh tokens for user %s: %s", user.id, exc)
+
+    # Revoke Stream tokens best effort
+    try:
+        from apps.chat.service import revoke_stream_user_tokens_best_effort
+        await revoke_stream_user_tokens_best_effort(user)
+    except Exception as exc:
+        logger.warning("Failed to revoke Stream tokens for user %s: %s", user.id, exc)
+
     await db.commit()
 
     return ApiResponse(
@@ -1497,7 +1541,7 @@ async def change_password(payload: UserChangePasswordRequest, db: AsyncSession) 
     from firebase_admin import auth
     
     try:
-        decoded_token = auth.verify_id_token(payload.firebaseId)
+        decoded_token = auth.verify_id_token(payload.firebaseId, check_revoked=True)
     except Exception as e:
         logger.error(f"Failed to verify firebase token: {e}")
         raise HTTPException(
@@ -1547,10 +1591,60 @@ async def change_password(payload: UserChangePasswordRequest, db: AsyncSession) 
             data=None
         )
 
+    # Revoke every existing session (other devices). Firebase has no
+    # per-device revoke without device_id, so we kill all tokens then
+    # immediately re-issue a session for the calling client only.
+    if user.firebase_uid:
+        try:
+            from core.auth.services import revoke_firebase_tokens
+            revoke_firebase_tokens(user.firebase_uid)
+        except Exception as exc:
+            logger.warning("Failed to revoke Firebase tokens for user %s: %s", user.id, exc)
+
+    try:
+        rows = (
+            await db.execute(
+                select(RefreshToken).where(
+                    RefreshToken.user_id == user.id,
+                    RefreshToken.revoked_at == None,  # noqa: E711
+                )
+            )
+        ).scalars().all()
+        for row in rows:
+            await _revoke_refresh_token_row(db, row)
+    except Exception as exc:
+        logger.warning("Failed to revoke DB refresh tokens for user %s: %s", user.id, exc)
+
+    try:
+        from apps.chat.service import revoke_stream_user_tokens_best_effort
+        await revoke_stream_user_tokens_best_effort(user)
+    except Exception as exc:
+        logger.warning("Failed to revoke Stream tokens for user %s: %s", user.id, exc)
+
+    access_token, refresh_token = _generate_tokens(user)
+    await _store_refresh_token(db, user, refresh_token, device_id=None)
+
+    firebase_custom_token: str | None = None
+    if user.firebase_uid:
+        try:
+            from core.auth.services import create_firebase_custom_token
+            firebase_custom_token = create_firebase_custom_token(user.firebase_uid)
+        except Exception as exc:
+            logger.warning(
+                "Failed to create Firebase custom token after password change for user %s: %s",
+                user.id,
+                exc,
+            )
+
     await db.commit()
 
     return ApiResponse(
         status=True,
         message="Password updated successfully",
-        data=None
+        data={
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",  # nosec B105 -- token type constant, not a password
+            "firebaseCustomToken": firebase_custom_token,
+        },
     )

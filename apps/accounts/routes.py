@@ -36,6 +36,7 @@ router = APIRouter(prefix="/auth", tags=["1] User Registration, Authentication &
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import JSONResponse
 from apps.accounts.services import AccountExistsException, social_auth as social_auth_service
+from common.exceptions import ApiError
 from common.responses import error_response, serialize_response, success_response
 
 bearer_scheme = HTTPBearer(
@@ -75,6 +76,15 @@ async def social_auth(
             content=serialize_response(
                 error_response(
                     "Account already exists. Please login using your registered method.",
+                )
+            ),
+        )
+    except ApiError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content=serialize_response(
+                error_response(
+                    str(exc.message),
                 )
             ),
         )

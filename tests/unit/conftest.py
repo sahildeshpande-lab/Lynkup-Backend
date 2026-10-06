@@ -4,11 +4,16 @@ import os
 
 # Import all db models to populate SQLModel registry and avoid mapping errors in unit tests
 from apps.accounts.db_models import *
+from apps.administration.db_models import *  # noqa: F401
 from apps.profiles.db_models import *
 from apps.feed.db_models import *
 from apps.invitations.db_models import *
 from apps.engagement.db_models import *
 from apps.connections.db_models import *
+from apps.analytics.db_models import *  # noqa: F401
+from apps.export.models import *  # noqa: F401
+from apps.bulk_send.models import *  # noqa: F401
+from apps.learningspotlight.db_models import *  # noqa: F401
 
 import pytest
 from unittest.mock import AsyncMock, Mock
@@ -16,11 +21,33 @@ from unittest.mock import AsyncMock, Mock
 os.environ.setdefault("DISABLE_DB_POOL", "true")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("DATABASE_TEST_URL", "sqlite+aiosqlite:///:memory:")
+os.environ.setdefault("CELERY_BROKER_URL", "redis://localhost:6379/0")
 os.environ.setdefault("SMTP_HOST", "smtp.example.test")
 os.environ.setdefault("SMTP_PORT", "587")
 os.environ.setdefault("SMTP_USERNAME", "unit@example.test")
 os.environ.setdefault("SMTP_PASSWORD", "secret")
 os.environ.setdefault("SMTP_FROM_EMAIL", "noreply@example.test")
+
+from datetime import datetime, timezone
+
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+
+
+@event.listens_for(Engine, "connect")
+def _register_sqlite_now(dbapi_connection, _connection_record) -> None:
+    """SQLite has no now(); Country timestamps use PostgreSQL now() as the source of truth."""
+    create_function = getattr(dbapi_connection, "create_function", None)
+    if create_function is None:
+        return
+    try:
+        create_function(
+            "now",
+            0,
+            lambda: datetime.now(timezone.utc).replace(tzinfo=None).isoformat(sep=" ", timespec="microseconds"),
+        )
+    except (AttributeError, ValueError, TypeError):
+        pass
 
 
 class FakeScalarResult:
@@ -54,7 +81,7 @@ def mock_db():
     def build(*results):
         queue = list(results)
 
-        async def execute(_statement):
+        async def execute(_statement, *args, **kwargs):
             if queue:
                 return queue.pop(0)
             return FakeScalarResult()

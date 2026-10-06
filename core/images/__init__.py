@@ -11,6 +11,7 @@ from .config import (
     s3_client,
     upload_image_to_s3,
     save_image,
+    copy_remote_image_to_s3,
 )
 from .storage_service import (
     StorageService,
@@ -32,6 +33,7 @@ __all__ = [
     "file_exists",
     "s3_client",
     "upload_image_to_s3",
+    "copy_remote_image_to_s3",
     "save_image",
     "StorageService",
     "storage_service",

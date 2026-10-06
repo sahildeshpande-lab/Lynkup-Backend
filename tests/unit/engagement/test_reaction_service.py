@@ -67,6 +67,128 @@ async def test_upsert_post_reaction_creates_like_and_increments_counter(mock_db)
 
 
 @pytest.mark.asyncio
+async def test_upsert_post_reaction_notifies_author_on_recognition_milestone(mock_db):
+    post = _post(like_count=9)
+    post.author_user_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    payload = UpsertPostReactionRequest(post_id=post.id, reaction_type="LIKE")
+    db = mock_db()
+
+    with (
+        patch.object(svc, "get_post_for_update", AsyncMock(return_value=post)),
+        patch.object(svc, "get_user_reaction", AsyncMock(return_value=None)),
+        patch.object(svc, "upsert_user_reaction", AsyncMock()),
+        patch.object(svc, "update_post_like_count", AsyncMock(return_value=10)),
+        patch(
+            "apps.engagement.services.post_recognition_service.notify_post_recognition_milestones_best_effort",
+            AsyncMock(),
+        ) as notify_recognition,
+        patch("common.user_visibility.check_post_engagement_allowed", AsyncMock()),
+    ):
+        await svc.upsert_post_reaction(db, user_id, payload)
+
+    notify_recognition.assert_awaited_once_with(
+        db,
+        author_user_id=post.author_user_id,
+        post_id=post.id,
+        crossed_milestones=[10],
+    )
+
+
+@pytest.mark.asyncio
+async def test_upsert_post_reaction_skips_recognition_notification_for_self_like(mock_db):
+    post = _post(like_count=9)
+    user_id = uuid.uuid4()
+    post.author_user_id = user_id
+    payload = UpsertPostReactionRequest(post_id=post.id, reaction_type="LIKE")
+    db = mock_db()
+
+    with (
+        patch.object(svc, "get_post_for_update", AsyncMock(return_value=post)),
+        patch.object(svc, "get_user_reaction", AsyncMock(return_value=None)),
+        patch.object(svc, "upsert_user_reaction", AsyncMock()),
+        patch.object(svc, "update_post_like_count", AsyncMock(return_value=10)),
+        patch(
+            "apps.engagement.services.post_recognition_service.notify_post_recognition_milestones_best_effort",
+            AsyncMock(),
+        ) as notify_recognition,
+    ):
+        await svc.upsert_post_reaction(db, user_id, payload)
+
+    notify_recognition.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upsert_post_reaction_detects_crossed_recognition_milestones(mock_db):
+    post = _post(like_count=9)
+    user_id = uuid.uuid4()
+    payload = UpsertPostReactionRequest(post_id=post.id, reaction_type="LIKE")
+    db = mock_db()
+
+    with (
+        patch.object(svc, "get_post_for_update", AsyncMock(return_value=post)),
+        patch.object(svc, "get_user_reaction", AsyncMock(return_value=None)),
+        patch.object(svc, "upsert_user_reaction", AsyncMock()),
+        patch.object(svc, "update_post_like_count", AsyncMock(return_value=10)),
+        patch(
+            "common.post_recognition.get_post_recognition_milestones",
+            return_value=[10],
+        ) as detect_milestones,
+        patch("apps.engagement.config.settings.post_recognition_milestones", [10]),
+    ):
+        response = await svc.upsert_post_reaction(db, user_id, payload)
+
+    assert response.data.like_count == 10
+    detect_milestones.assert_called_once_with(
+        previous_like_count=9,
+        current_like_count=10,
+        milestones=[10],
+    )
+
+
+@pytest.mark.asyncio
+async def test_upsert_post_reaction_skips_milestone_detection_when_like_count_unchanged(mock_db):
+    post = _post(like_count=5)
+    user_id = uuid.uuid4()
+    payload = UpsertPostReactionRequest(post_id=post.id, reaction_type="celebrate")
+    db = mock_db()
+
+    with (
+        patch.object(svc, "get_post_for_update", AsyncMock(return_value=post)),
+        patch.object(svc, "get_user_reaction", AsyncMock(return_value=_reaction(ReactionType.like))),
+        patch.object(svc, "upsert_user_reaction", AsyncMock()),
+        patch.object(svc, "update_post_like_count", AsyncMock(return_value=5)),
+        patch(
+            "common.post_recognition.get_post_recognition_milestones",
+        ) as detect_milestones,
+    ):
+        await svc.upsert_post_reaction(db, user_id, payload)
+
+    detect_milestones.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upsert_post_reaction_skips_milestone_detection_on_unlike(mock_db):
+    post = _post(like_count=11)
+    user_id = uuid.uuid4()
+    payload = UpsertPostReactionRequest(post_id=post.id, reaction_type=None)
+    db = mock_db()
+
+    with (
+        patch.object(svc, "get_post_for_update", AsyncMock(return_value=post)),
+        patch.object(svc, "get_user_reaction", AsyncMock(return_value=_reaction(ReactionType.like))),
+        patch.object(svc, "delete_user_reaction", AsyncMock(return_value=_reaction())),
+        patch.object(svc, "update_post_like_count", AsyncMock(return_value=10)),
+        patch(
+            "common.post_recognition.get_post_recognition_milestones",
+        ) as detect_milestones,
+    ):
+        await svc.upsert_post_reaction(db, user_id, payload)
+
+    detect_milestones.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_upsert_post_reaction_same_type_is_idempotent(mock_db):
     post = _post(like_count=10)
     user_id = uuid.uuid4()
@@ -187,6 +309,31 @@ async def test_upsert_post_reaction_switch_like_to_celebrate_does_not_change_lik
     assert response.data.user_reaction == "CELEBRATE"
     upsert.assert_awaited_once()
     update_count.assert_awaited_once_with(db, post.id, 0)
+
+
+@pytest.mark.asyncio
+async def test_remove_post_reaction_bypasses_author_engagement_check(mock_db):
+    post = _post(like_count=5)
+    post.author_user_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    payload = UpsertPostReactionRequest(post_id=post.id, reaction_type=None)
+    db = mock_db()
+
+    with (
+        patch.object(svc, "get_post_for_update", AsyncMock(return_value=post)),
+        patch.object(svc, "get_user_reaction", AsyncMock(return_value=_reaction(ReactionType.like))),
+        patch.object(svc, "delete_user_reaction", AsyncMock()) as delete_reaction,
+        patch.object(svc, "update_post_like_count", AsyncMock(return_value=4)) as update_count,
+        patch("common.user_visibility.check_post_engagement_allowed", AsyncMock()) as mock_check,
+    ):
+        response = await svc.upsert_post_reaction(db, user_id, payload)
+
+    assert response.status is True
+    assert response.message == "Reaction removed successfully"
+    assert response.data.user_reaction is None
+    delete_reaction.assert_awaited_once()
+    mock_check.assert_not_called()
+
 
 
 @pytest.mark.asyncio

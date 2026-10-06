@@ -87,6 +87,7 @@ class RecommendedUserResponse(BaseModel):
     first_name: str | None = None
     last_name: str | None = None
     university: str | None = None
+    university_details: dict | None = None
     major: str | None = None
     minor: str | None = None
     edu_level: str | None = None
@@ -99,6 +100,37 @@ class RecommendedUserResponse(BaseModel):
     request_received: bool = False
 
 
+class MutualConnectionPreview(BaseModel):
+    user_id: UUID
+    first_name: str | None = None
+    last_name: str | None = None
+    profilePhoto_url: str | None = None
+
+
+class MutualConnectionsInfo(BaseModel):
+    count: int
+    users: list[MutualConnectionPreview]
+
+
+class MutualRecommendedUserResponse(BaseModel):
+    user_id: UUID
+    first_name: str | None = None
+    last_name: str | None = None
+    university: str | None = None
+    university_details: dict | None = None
+    major: str | None = None
+    minor: str | None = None
+    edu_level: str | None = None
+    profilePhoto_url: str | None = None
+    is_deleted: bool = False
+    is_connected: bool = False
+    is_followed: bool = False
+    is_blocked: bool = False
+    request_sent: bool = False
+    request_received: bool = False
+    mutual_connections: MutualConnectionsInfo
+
+
 class PendingLynkupRequestResponse(BaseModel):
     lynkup_id: UUID
     user_id: UUID
@@ -106,6 +138,26 @@ class PendingLynkupRequestResponse(BaseModel):
     first_name: str | None = None
     last_name: str | None = None
     profilePhoto_url: str | None = None
+    university: str | None = None
+    university_details: dict | None = None
 
     class Config:
         from_attributes = True
+
+
+class ConnectionListItemResponse(BaseModel):
+    lynkup_id: UUID
+    user_id: UUID
+    status: str
+    first_name: str | None = None
+    last_name: str | None = None
+    profilePhoto_url: str | None = None
+    university: str | None = None
+    university_details: dict | None = None
+    major: str | None = None
+    minor: str | None = None
+    edu_level: str | None = None
+
+    class Config:
+        from_attributes = True
+

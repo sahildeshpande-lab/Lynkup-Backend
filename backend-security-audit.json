@@ -1,0 +1,36 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {},
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "dependencies": {
+      "prod": 194,
+      "dev": 0,
+      "optional": 0,
+      "peer": 0,
+      "peerOptional": 0,
+      "total": 196
+    }
+  },
+  "audit": {
+    "tool": "pip-audit",
+    "audited_dependencies": 194,
+    "not_audited": [
+      {
+        "name": "en-core-web-sm",
+        "reason": "Dependency not found on PyPI and could not be audited: en-core-web-sm (3.8.0)"
+      },
+      {
+        "name": "torch",
+        "reason": "Dependency not found on PyPI and could not be audited: torch (2.13.0+cpu)"
+      }
+    ]
+  }
+}

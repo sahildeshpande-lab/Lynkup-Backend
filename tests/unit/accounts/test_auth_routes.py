@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from entrypoints.api import app
 from core.database.session import get_session
 from apps.accounts import routes as auth_routes
-from apps.accounts.schemas import ApiResponse, AuthSessionResponse, AuthUserResponse
+from apps.accounts.schemas import ApiResponse, AuthSessionResponse, AuthUserResponse, EmailSignupRequest
 
 client = TestClient(app)
 
@@ -56,7 +56,7 @@ async def _mock_signup(payload, firebase_user, db) -> ApiResponse:
         role=payload.role,
         createdAt=datetime.now(),
         updatedAt=datetime.now(),
-        status="pending",
+        status="Pending",
         profileVisibility="public",
         email_verified_at=None,
         is_onboarding_completed=False,
@@ -117,10 +117,38 @@ def test_signup_route_exists(monkeypatch) -> None:
     assert body["status"] is True
     assert body["message"] == "Signup successful"
     assert body["data"]["emailSent"] is True
-    assert body["data"]["user"]["status"] == "pending"
+    assert body["data"]["user"]["status"] == "Pending"
     assert body["data"]["user"]["profileVisibility"] == "public"
     assert body["data"]["user"]["email_verified_at"] is None
     assert body["data"]["user"]["is_onboarding_completed"] is False
+
+
+def test_signup_route_does_not_require_consent_fields(monkeypatch) -> None:
+    monkeypatch.setattr(auth_routes.services, "signup", _mock_signup)
+
+    response = client.post(
+        "/api/v1/auth/signup",
+        json={
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "email": "jane@example.com",
+            "password": "Secret123",
+            "role": "user",
+            "firebaseId": "valid-firebase-id-token",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] is True
+    schema = EmailSignupRequest.model_json_schema()
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+    assert "terms_accepted" not in properties
+    assert "privacy_accepted" not in properties
+    assert "terms_version" not in properties
+    assert "privacy_version" not in properties
+    assert "terms_accepted" not in required
+    assert "privacy_accepted" not in required
 
 
 def test_login_route_uses_login_request_schema(monkeypatch) -> None:
@@ -449,3 +477,178 @@ def test_social_auth_route_passes_optional_fields(monkeypatch) -> None:
     body = response.json()
     assert body["status"] is True
     assert body["message"] == "Signup successful"
+
+
+def test_social_auth_route_device_limit_returns_401(monkeypatch) -> None:
+    from common.exceptions import ApiError
+
+    async def _mock_social_auth(payload, db):
+        raise ApiError("The maximum number of accounts allowed on this device has been reached.")
+
+    monkeypatch.setattr(auth_routes, "social_auth_service", _mock_social_auth)
+
+    response = client.post(
+        "/api/v1/auth/social",
+        json=_SOCIAL_AUTH_PAYLOAD,
+    )
+
+    assert response.status_code == 401
+    body = response.json()
+    assert body["status"] is False
+    assert body["message"] == "The maximum number of accounts allowed on this device has been reached."
+    assert body["data"] is None
+
+
+def test_login_route_device_limit_returns_401(monkeypatch) -> None:
+    from common.exceptions import ApiError
+
+    async def _mock_login_limit(payload, firebase_user, db):
+        raise ApiError("The maximum number of accounts allowed on this device has been reached.")
+
+    monkeypatch.setattr(auth_routes.services, "login", _mock_login_limit)
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": "jane@example.com",
+            "password": "ValidPassword123!",
+            "firebaseId": "test-firebase-uid",
+            "device_id": "test-device-001",
+        },
+    )
+
+    assert response.status_code == 401
+    body = response.json()
+    assert body["status"] is False
+    assert body["message"] == "The maximum number of accounts allowed on this device has been reached."
+    assert body["data"] is None
+
+
+def test_signup_route_device_limit_returns_401(monkeypatch) -> None:
+    from common.exceptions import ApiError
+
+    async def _mock_signup_limit(payload, firebase_user, db):
+        raise ApiError("The maximum number of accounts allowed on this device has been reached.")
+
+    monkeypatch.setattr(auth_routes.services, "signup", _mock_signup_limit)
+
+    response = client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": "jane@example.com",
+            "password": "ValidPassword123!",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "role": "user",
+            "firebaseId": "test-firebase-uid",
+            "device_id": "test-device-001",
+        },
+    )
+
+    assert response.status_code == 401
+    body = response.json()
+    assert body["status"] is False
+    assert body["message"] == "The maximum number of accounts allowed on this device has been reached."
+    assert body["data"] is None
+
+
+def test_signup_route_existing_account_returns_401(monkeypatch) -> None:
+    from common.exceptions import ApiError
+
+    async def _mock_signup(payload, firebase_user, db):
+        raise ApiError("Account already exists")
+
+    monkeypatch.setattr(auth_routes.services, "signup", _mock_signup)
+
+    response = client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": "user@example.com",
+            "password": "ValidPassword123!",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "role": "user",
+            "firebaseId": "test-firebase-uid",
+        },
+    )
+
+    assert response.status_code == 401
+    body = response.json()
+    assert body["status"] is False
+    assert body["message"] == "Account already exists"
+    assert body["data"] is None
+
+
+def test_signup_route_rejects_staff_role(monkeypatch) -> None:
+    called = {"signup": False}
+
+    async def _mock_signup(payload, firebase_user, db):
+        called["signup"] = True
+        return ApiResponse(status=True, message="Signup successful", data={})
+
+    monkeypatch.setattr(auth_routes.services, "signup", _mock_signup)
+
+    response = client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": "jane@example.com",
+            "password": "ValidPassword123!",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "role": "moderator",
+            "firebaseId": "test-firebase-uid",
+        },
+    )
+
+    body = response.json()
+    assert body["status"] is False
+    assert body["message"] == "Invalid role"
+    assert called["signup"] is False
+
+
+def test_social_auth_route_rejects_staff_role(monkeypatch) -> None:
+    called = {"social": False}
+
+    async def _mock_social_auth(payload, db):
+        called["social"] = True
+        return {"user": {"email": "social@example.com"}}, True, "ok"
+
+    monkeypatch.setattr(auth_routes, "social_auth_service", _mock_social_auth)
+
+    response = client.post(
+        "/api/v1/auth/social",
+        json={
+            "loginType": "google",
+            "firebaseId": "test-firebase-uid",
+            "user": "superadmin",
+        },
+    )
+
+    body = response.json()
+    assert body["status"] is False
+    assert body["message"] == "Invalid role"
+    assert called["social"] is False
+
+
+def test_login_route_rejects_staff_user_returns_401(monkeypatch) -> None:
+    from common.exceptions import ApiError
+
+    async def _mock_login(payload, firebase_user, db):
+        raise ApiError("Account doesn't exist")
+
+    monkeypatch.setattr(auth_routes.services, "login", _mock_login)
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": "mod@example.com",
+            "password": "ValidPassword123!",
+            "firebaseId": "test-firebase-uid",
+        },
+    )
+
+    assert response.status_code == 401
+    body = response.json()
+    assert body["status"] is False
+    assert body["message"] == "Account doesn't exist"
+    assert body["data"] is None

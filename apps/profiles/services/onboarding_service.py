@@ -1,8 +1,10 @@
 from __future__ import annotations
 import logging
+from datetime import date
 from fastapi import HTTPException, UploadFile, status
-from core.images import normalize_image_name, generate_profile_image_url
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from core.images import normalize_image_name, generate_profile_image_url
 from apps.accounts.db_models import User
 from common.enums import OnboardingStatus, EducationLevel, UserStatus
 
@@ -10,9 +12,40 @@ from apps.profiles.normalization import normalize_major_minor
 
 from .completeness_service import calculate_completeness_score
 from .interest_service import _resolve_academic_interest_ids
-from .response_service import build_user_base_response
+from .response_service import apply_profile_graduation_date, build_user_base_response
+from apps.profiles.graduation_date import format_graduation_date
 
 logger = logging.getLogger(__name__)
+
+
+async def _resolve_catalog_program(
+    db: AsyncSession,
+    *,
+    model,
+    program_id: int | None,
+    name: str | None,
+    label: str,
+) -> tuple[int | None, str | None]:
+    if program_id is not None:
+        row = (await db.execute(select(model).where(model.id == program_id))).scalar_one_or_none()
+        if row is None or not row.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid {label}_id",
+            )
+        return row.id, row.name
+
+    normalized = normalize_major_minor(name)
+    if not normalized:
+        return None, None
+
+    row = (
+        await db.execute(select(model).where(func.lower(model.name) == normalized.lower()))
+    ).scalar_one_or_none()
+    if row is not None:
+        return row.id, row.name
+    return None, normalized
+
 
 async def complete_onboarding(
     user: User,
@@ -27,6 +60,9 @@ async def complete_onboarding(
     banner_photo_key :str | None ,
     db: AsyncSession,
     invitation_code: str | None = None,
+    major_id: int | None = None,
+    minor_id: int | None = None,
+    graduation_date: date | None = None,
 ) -> dict:
     from apps.profiles.db_models.profile_db_model import Profile
     from sqlmodel import select
@@ -46,9 +82,6 @@ async def complete_onboarding(
         )
     db.add(profile)
     await db.flush()
-
-    from apps.profiles.services.profile_stats_service import get_or_create_profile_stats
-    await get_or_create_profile_stats(db, profile.id)
 
     profile_data = {}
 
@@ -126,14 +159,23 @@ async def complete_onboarding(
             ) from exc
     profile_data["universityId"] = str(profile.university_id) if profile.university_id else None
 
-    major = normalize_major_minor(major)
-    minor = normalize_major_minor(minor)
+    from apps.profiles.db_models.major_db_model import Major
+    from apps.profiles.db_models.minor_db_model import Minor
+
+    profile.major_id, major = await _resolve_catalog_program(
+        db, model=Major, program_id=major_id, name=major, label="major"
+    )
+    profile.minor_id, minor = await _resolve_catalog_program(
+        db, model=Minor, program_id=minor_id, name=minor, label="minor"
+    )
 
     profile.major = major
     profile_data["major"] = major
+    profile_data["majorId"] = profile.major_id
 
     profile.minor = minor
     profile_data["minor"] = minor
+    profile_data["minorId"] = profile.minor_id
 
     # profile.profile_photo_url = normalize_image_name(profile_photo_key)
     # profile_data["profilePhotoUrl"] = generate_download_url(profile.profile_photo_url)
@@ -153,6 +195,10 @@ async def complete_onboarding(
         profile.profile_interests_id = await _resolve_academic_interest_ids(academic_interests, db)
         profile_data["academicInterests"] = academic_interests
 
+    if graduation_date is not None:
+        profile_data["graduationDate"] = format_graduation_date(graduation_date)
+    apply_profile_graduation_date(profile, graduation_date, user=user)
+
     user.onboarding_status = OnboardingStatus.completed
     # Completing onboarding implies a verified account; keep or promote to active.
     if user.status != UserStatus.active:
@@ -164,15 +210,27 @@ async def complete_onboarding(
     if invitation_code:
         from apps.invitations.services import redeem_invitation
 
-        invitation = await redeem_invitation(
-            db,
-            code=invitation_code,
-            redeemed_by_user_id=user.id,
-            commit=False,
-        )
-        user.referred_by_user_id = invitation.inviter_user_id
-        db.add(user)
-        await db.flush()
+        # Invitation lynkUp is best-effort: expired/redeemed/invalid codes must
+        # not block onboarding — only skip the Connect (lynkUp) side effect.
+        try:
+            invitation = await redeem_invitation(
+                db,
+                code=invitation_code,
+                redeemed_by_user_id=user.id,
+                commit=False,
+            )
+        except HTTPException as exc:
+            if exc.status_code != status.HTTP_400_BAD_REQUEST:
+                raise
+            logger.info(
+                "Skipping invitation lynkUp during onboarding for user %s: %s",
+                user.id,
+                exc.detail,
+            )
+        else:
+            user.referred_by_user_id = invitation.inviter_user_id
+            db.add(user)
+            await db.flush()
 
     profile.completeness_score = await calculate_completeness_score(user.id, db)
     db.add(profile)
@@ -288,11 +346,11 @@ async def update_profile_me_form(
     await refresh_profile_extracted_keywords_best_effort(db, user_id=current_user.id)
 
     if topic_sync_needed:
-        await TopicService.sync_user_topics(
+        await TopicService.refresh_user_topic_subscriptions(
             db,
             current_user.id,
+            profile,
             old_topics=old_topics,
-            profile=profile,
         )
 
     user_data = await build_user_base_response(

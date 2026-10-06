@@ -4,10 +4,11 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Enum, Index, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, Enum, Index, Integer, String
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
 
+from apps.invitations.config import INVITATION_CODE_MAX_LENGTH
 from common.enums import InvitationStatus
 from common.time import utc_now
 
@@ -22,7 +23,7 @@ class Invitation(SQLModel, table=True):
 
     inviter_user_id: UUID | None = Field(default=None, foreign_key="users.id", nullable=True)
     code: str = Field(
-        sa_column=Column(String(7), nullable=False),
+        sa_column=Column(String(INVITATION_CODE_MAX_LENGTH), nullable=False),
     )
     status: InvitationStatus = Field(
         default=InvitationStatus.active,
@@ -104,10 +105,6 @@ class Invitation(SQLModel, table=True):
     )
 
     __table_args__ = (
-        CheckConstraint(
-            "code ~ '^[A-Z]{3}[0-9]{4}$'",
-            name="ck_invitations_code_format",
-        ),
         Index("ix_invitations_code", "code", unique=True),
         Index("ix_invitations_inviter_user_id", "inviter_user_id"),
         Index("ix_invitations_status", "status"),

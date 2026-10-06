@@ -57,7 +57,7 @@ class BulkSendStorage:
         return bucket
 
     def build_tmp_key(self, admin_id: UUID, filename: str) -> str:
-        return f"{STORAGE_PREFIX}/tmp/{admin_id}/{uuid.uuid4()}/{_safe_filename(filename)}"
+        return f"{STORAGE_PREFIX}/tmp/{admin_id}/{uuid.uuid4()}/{_safe_filename(filename)}"  # nosec B108 -- cloud storage key prefix, not local fs
 
     def upload(self, storage_key: str, data: bytes, content_type: str) -> str:
         key = _normalize_key(storage_key)
@@ -97,7 +97,7 @@ class BulkSendStorage:
 
     def is_allowed_admin_key(self, storage_key: str, admin_id: UUID) -> bool:
         key = _normalize_key(storage_key)
-        return key.startswith(f"{STORAGE_PREFIX}/tmp/{admin_id}/") or key.startswith(
+        return key.startswith(f"{STORAGE_PREFIX}/tmp/{admin_id}/") or key.startswith(  # nosec B108 -- cloud storage key prefix, not local fs
             f"{STORAGE_PREFIX}/"
         )
 

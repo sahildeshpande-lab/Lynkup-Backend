@@ -2,14 +2,32 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone
+from typing import NamedTuple
 from uuid import UUID
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
+from sqlalchemy.sql.expression import literal_column
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.bulk_send.enums import EmailCampaignStatus, EmailDeliveryStatus
+from apps.bulk_send.enums import (
+    SENDGRID_MAX_PERSONALIZATIONS,
+    EmailCampaignStatus,
+    EmailDeliveryStatus,
+)
 from apps.bulk_send.models import EmailCampaign, EmailDelivery
 from apps.bulk_send.schemas import DeliveryStats
+from apps.profiles.db_models import Profile
+
+
+_TERMINAL_CAMPAIGN_STATUSES = (
+    EmailCampaignStatus.completed,
+    EmailCampaignStatus.failed,
+)
+
+
+class CampaignTerminalResult(NamedTuple):
+    campaign: EmailCampaign
+    stats: DeliveryStats
 
 
 def utc_now() -> datetime:
@@ -21,18 +39,42 @@ async def get_campaign(session: AsyncSession, campaign_id: UUID) -> EmailCampaig
     return (await session.execute(stmt)).scalars().first()
 
 
+def _campaign_search_clause(search: str | None):
+    """Match campaign name, email title (subject), or body text.
+    
+    1. Converts user search query to lowercase (e.g. 'Bulk Email' -> 'bulk email').
+    2. Converts DB column values to lowercase using func.lower() (e.g. 'BULK EMAIL' -> 'bulk email').
+    3. Matches the converted lowercase values on both sides across name, subject, and body_text.
+    """
+    term = (search or "").strip().lower()
+    if not term:
+        return None
+    pattern = f"%{term}%"
+    return or_(
+        func.lower(EmailCampaign.name).like(pattern),
+        func.lower(EmailCampaign.subject).like(pattern),
+        func.lower(func.coalesce(EmailCampaign.body_text, "")).like(pattern),
+    )
+
+
 async def list_campaigns(
     session: AsyncSession,
     *,
     page: int,
     page_size: int,
+    search: str | None = None,
 ) -> tuple[list[EmailCampaign], int]:
+    search_clause = _campaign_search_clause(search)
     count_stmt = select(func.count()).select_from(EmailCampaign)
+    if search_clause is not None:
+        count_stmt = count_stmt.where(search_clause)
     total = int((await session.execute(count_stmt)).scalar_one() or 0)
 
+    stmt = select(EmailCampaign)
+    if search_clause is not None:
+        stmt = stmt.where(search_clause)
     stmt = (
-        select(EmailCampaign)
-        .order_by(EmailCampaign.created_at.desc())
+        stmt.order_by(EmailCampaign.created_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -76,10 +118,58 @@ async def delivery_stats_for_campaign(
     )
 
 
+def _recipient_name_search_clause(search: str | None):
+    """Match recipient first_name, last_name, or full name (case-insensitive)."""
+    term = (search or "").strip().lower()
+    if not term:
+        return None
+    pattern = f"%{term}%"
+    full_name = func.lower(
+        func.concat(
+            func.coalesce(Profile.first_name, ""),
+            " ",
+            func.coalesce(Profile.last_name, ""),
+        )
+    )
+    return or_(
+        func.lower(func.coalesce(Profile.first_name, "")).like(pattern),
+        func.lower(func.coalesce(Profile.last_name, "")).like(pattern),
+        full_name.like(pattern),
+    )
+
+
+async def get_campaign_deliveries_with_profiles(
+    session: AsyncSession,
+    campaign_id: UUID,
+    *,
+    search: str | None = None,
+    page: int | None = None,
+    page_size: int | None = None,
+) -> tuple[list[tuple[EmailDelivery, Profile | None]], int]:
+    search_clause = _recipient_name_search_clause(search)
+    base = (
+        select(EmailDelivery, Profile)
+        .outerjoin(Profile, Profile.user_id == EmailDelivery.user_id)
+        .where(EmailDelivery.campaign_id == campaign_id)
+    )
+    if search_clause is not None:
+        base = base.where(search_clause)
+
+    count_stmt = select(func.count()).select_from(base.subquery())
+    total = int((await session.execute(count_stmt)).scalar_one() or 0)
+
+    stmt = base.order_by(EmailDelivery.created_at.asc(), EmailDelivery.id.asc())
+    if page is not None and page_size is not None:
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+
+    rows = (await session.execute(stmt)).all()
+    return [(row.EmailDelivery, row.Profile) for row in rows], total
+
+
 async def claim_pending_deliveries(
     session: AsyncSession,
     *,
-    limit: int = 10,
+    limit: int = SENDGRID_MAX_PERSONALIZATIONS,
 ) -> list[EmailDelivery]:
     """Claim pending deliveries with row locks so concurrent cron workers do not double-send."""
     active_statuses = (EmailCampaignStatus.queued, EmailCampaignStatus.processing)
@@ -129,20 +219,32 @@ async def mark_campaign_processing(session: AsyncSession, campaign_id: UUID) -> 
         await session.commit()
 
 
-async def maybe_complete_campaign(session: AsyncSession, campaign_id: UUID) -> None:
+async def maybe_complete_campaign(
+    session: AsyncSession, campaign_id: UUID
+) -> CampaignTerminalResult | None:
+    """Mark the campaign delivered or failed when no deliveries remain in flight.
+
+    Returns the campaign and stats only when it newly becomes terminal so
+    callers can write an admin activity log, matching push campaigns.
+    """
     stats = await delivery_stats_for_campaign(session, campaign_id)
     if stats.pending > 0 or stats.processing > 0:
-        return
+        return None
     campaign = await get_campaign(session, campaign_id)
     if campaign is None:
-        return
-    if campaign.status == EmailCampaignStatus.completed:
-        return
-    campaign.status = EmailCampaignStatus.completed
+        return None
+    if campaign.status in _TERMINAL_CAMPAIGN_STATUSES:
+        return None
+    campaign.status = (
+        EmailCampaignStatus.failed
+        if stats.sent == 0 and stats.failed > 0
+        else EmailCampaignStatus.completed
+    )
     campaign.completed_at = utc_now()
     campaign.updated_at = utc_now()
     session.add(campaign)
     await session.commit()
+    return CampaignTerminalResult(campaign=campaign, stats=stats)
 
 
 async def bulk_delivery_stats_by_campaign(

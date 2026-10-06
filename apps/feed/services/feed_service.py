@@ -1,23 +1,26 @@
 from __future__ import annotations
 
+import logging
+import time
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.connections.services.recommendation_service import get_user_connections
 from apps.feed.repositories.feed_repository import (
     count_feed_posts,
     fetch_feed_posts,
-    fetch_viewer_profile,
 )
-from apps.engagement.repositories import fetch_post_engagement_flags
-from apps.engagement.services.post_reaction_formatters import load_latest_post_reactions
 from apps.engagement.services.reaction_service import format_user_reaction
-from apps.feed.services.post_service import format_post_detail, format_repost_item
-from apps.feed.services.profile_enrichment import (
-    load_profile_details as _load_profile_details,
-    load_requested_user_ids as _load_requested_user_ids,
+from apps.feed.services.feed_enrichment_user_state import (
+    load_feed_enrichment_and_user_state as _load_feed_enrichment_and_user_state,
 )
+from apps.feed.services.post_service import format_post_detail, format_repost_item
+
+logger = logging.getLogger(__name__)
+
+
+def _perf_ms(started_at: float) -> float:
+    return (time.perf_counter() - started_at) * 1000.0
 
 
 async def get_feed_service(
@@ -29,15 +32,32 @@ async def get_feed_service(
     include_total: bool = False,
 ) -> list[dict] | tuple[list[dict], int, str | None]:
     """
-    Return feed events (posts and reposts) ordered by relevance, then created_at.
+    Return feed events (posts and reposts).
+
+    Include authors/reposters matching the viewer's university, major, or minor,
+    plus posts from connected users even when their academics differ. Rank by
+    engagement. If none match, fall back to all visible posts.
 
     Pagination uses keyset (cursor) internally. Legacy page/pageSize remain supported
     without changing the JSON response contract. When include_total=True, also returns
     next_cursor (opaque, or None on the last page).
     """
-    viewer_profile = await fetch_viewer_profile(db, current_user_id)
-    connection_ids = await get_user_connections(db, current_user_id)
-    total_items = await count_feed_posts(db, current_user_id, viewer_profile, connection_ids)
+    service_started = time.perf_counter()
+    # Viewer academics / visibility are evaluated inside feed SQL via
+    # ``LEFT JOIN profiles me``. Do not load a discarded ORM Profile here.
+    # Ranking/visibility use SQL EXISTS for connections — Python connection IDs
+    # are formatting-only (is_connected) and come from enrichment.
+    empty_connection_ids: set[UUID] = set()
+
+    # Phase 7: only pay for count when the response needs totalItems.
+    total_items = 0
+    count_ms = 0.0
+    if include_total:
+        count_started = time.perf_counter()
+        total_items = await count_feed_posts(
+            db, current_user_id, None, empty_connection_ids
+        )
+        count_ms = _perf_ms(count_started)
 
     if page is None and page_size is None and cursor is None:
         fetch_cursor = None
@@ -61,14 +81,16 @@ async def get_feed_service(
             limit = p * ps
             slice_start = (p - 1) * ps
 
+    events_started = time.perf_counter()
     raw_items, next_cursor = await fetch_feed_posts(
         db,
         current_user_id,
-        viewer_profile,
-        connection_ids,
+        None,
+        empty_connection_ids,
         cursor=fetch_cursor,
         limit=limit,
     )
+    events_ms = _perf_ms(events_started)
 
     if slice_start is not None:
         ps = page_size or 20
@@ -77,6 +99,15 @@ async def get_feed_service(
 
     if not raw_items:
         results = []
+        logger.info(
+            "[FEED_PERF] feed_service_total=%.2fms count=%.2fms events=%.2fms "
+            "items=0 include_total=%s sql_statements=%s",
+            _perf_ms(service_started),
+            count_ms,
+            events_ms,
+            include_total,
+            (1 if include_total else 0) + 1,  # count? + events (no hydration)
+        )
         if include_total:
             return results, total_items, next_cursor
         return results
@@ -118,19 +149,25 @@ async def get_feed_service(
         if reposter_profile is not None and reposter_user_id is not None:
             profiles_by_user_id[reposter_user_id] = reposter_profile
 
-    profile_details = await _load_profile_details(db, profiles_by_user_id)
-    requested_user_ids = await _load_requested_user_ids(
+    # Phase 7 STEP4: enrichment + user-state in one SQL round trip.
+    enrich_state_started = time.perf_counter()
+    combined = await _load_feed_enrichment_and_user_state(
         db,
         current_user_id,
-        set(profiles_by_user_id),
-    )
-    engagement_flags = await fetch_post_engagement_flags(
-        db,
-        current_user_id,
+        profiles_by_user_id,
         post_ids,
+        per_type_limit=3,
     )
-    latest_reactions = await load_latest_post_reactions(db, post_ids, per_type_limit=3)
+    enrich_state_ms = _perf_ms(enrich_state_started)
+    enrichment = combined.enrichment
+    user_state = combined.user_state
+    profile_details = enrichment.profile_details
+    requested_user_ids = enrichment.requested_user_ids
+    connection_ids = enrichment.connected_user_ids
+    engagement_flags = user_state.engagement
+    latest_reactions = user_state.latest_reactions
 
+    format_started = time.perf_counter()
     formatted_posts = []
     for item in feed_items:
         post = item["post"]
@@ -187,7 +224,23 @@ async def get_feed_service(
 
         formatted_posts.append(formatted)
 
+    format_ms = _perf_ms(format_started)
+    # count? + events + combined hydration + enrichment_user_state
+    sql_statements = (1 if include_total else 0) + 3
+    logger.info(
+        "[FEED_PERF] feed_service_total=%.2fms count=%.2fms events_hydrate=%.2fms "
+        "enrichment_user_state=%.2fms formatting=%.2fms items=%s "
+        "include_total=%s sql_statements=%s",
+        _perf_ms(service_started),
+        count_ms,
+        events_ms,
+        enrich_state_ms,
+        format_ms,
+        len(formatted_posts),
+        include_total,
+        sql_statements,
+    )
+
     if include_total:
         return formatted_posts, total_items, next_cursor
     return formatted_posts
-

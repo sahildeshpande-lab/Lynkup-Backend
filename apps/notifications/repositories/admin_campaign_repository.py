@@ -52,6 +52,19 @@ async def get_campaign_by_id(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+async def get_campaign_for_dispatch(
+    db: AsyncSession,
+    campaign_id: UUID,
+) -> NotificationCampaign | None:
+    """Load a campaign row with a row lock for worker dispatch."""
+    stmt = (
+        select(NotificationCampaign)
+        .where(NotificationCampaign.id == campaign_id)
+        .with_for_update()
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def update_campaign(
     db: AsyncSession,
     campaign: NotificationCampaign,

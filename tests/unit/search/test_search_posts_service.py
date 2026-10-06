@@ -55,6 +55,7 @@ async def test_search_posts_keyword_search(mock_db):
         patch("apps.search.repositories.count_search_posts", AsyncMock(return_value=1)) as count_posts,
         patch("apps.search.repositories.search_posts_with_details", AsyncMock(return_value=rows)) as search_posts_repo,
         patch("apps.engagement.repositories.fetch_post_engagement_flags", AsyncMock()) as fetch_flags,
+        patch("apps.engagement.services.post_reaction_formatters.load_latest_post_reactions", AsyncMock(return_value={})),
         patch("apps.feed.services.post_service.format_post_detail", return_value={"id": post.id, "like_count": 5}) as format_post,
     ):
         fetch_flags.return_value = SimpleNamespace(
@@ -182,12 +183,19 @@ async def test_search_posts_combined_filters(mock_db):
     kwargs = count_posts.await_args.kwargs
     assert kwargs["query"] == "robotics"
     assert kwargs["hashtag"] == "ai"
+    assert kwargs["hashtag_to_all"] is False
     assert kwargs["academic_interest"] == "Artificial Intelligence"
+    assert kwargs["academic_interest_to_all"] is False
     assert kwargs["university_name"] == "Tech"
+    assert kwargs["university_to_all"] is False
     assert kwargs["major"] == "CS"
+    assert kwargs["major_to_all"] is False
     assert kwargs["minor"] == "Math"
+    assert kwargs["minor_to_all"] is False
     assert kwargs["country"] == "Canada"
+    assert kwargs["country_to_all"] is False
     assert kwargs["edu_level"] == "1"
+    assert kwargs["edu_level_to_all"] is False
     assert search_posts_repo.await_args.kwargs["offset"] == 10
     assert search_posts_repo.await_args.kwargs["limit"] == 5
 
@@ -219,6 +227,51 @@ async def test_search_posts_multi_hashtag_and_university_filters(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_search_posts_forwards_to_all_flags(mock_db):
+    user = _user()
+    db = mock_db()
+
+    with (
+        patch("apps.search.repositories.count_search_posts", AsyncMock(return_value=0)) as count_posts,
+        patch("apps.search.repositories.search_posts_with_details", AsyncMock(return_value=[])) as search_posts_repo,
+    ):
+        await search_posts(
+            user,
+            db,
+            hashtag=["python", "fastapi"],
+            hashtag_to_all=True,
+            academic_interest=["AI", "ML"],
+            academic_interest_to_all=True,
+            university_name=["123", "456"],
+            university_to_all=True,
+            major=["Computer Science", "IT"],
+            major_to_all=True,
+            minor=["AI", "Data Science"],
+            minor_to_all=True,
+            country=["IN"],
+            country_to_all=True,
+            edu_level=["Bachelors"],
+            edu_level_to_all=True,
+            page=1,
+            page_size=20,
+        )
+
+    kwargs = count_posts.await_args.kwargs
+    assert kwargs["hashtag"] == ["python", "fastapi"]
+    assert kwargs["hashtag_to_all"] is True
+    assert kwargs["academic_interest_to_all"] is True
+    assert kwargs["university_to_all"] is True
+    assert kwargs["major"] == ["Computer Science", "IT"]
+    assert kwargs["major_to_all"] is True
+    assert kwargs["minor"] == ["AI", "Data Science"]
+    assert kwargs["minor_to_all"] is True
+    assert kwargs["country_to_all"] is True
+    assert kwargs["edu_level_to_all"] is True
+    assert search_posts_repo.await_args.kwargs["hashtag_to_all"] is True
+    assert search_posts_repo.await_args.kwargs["major"] == ["Computer Science", "IT"]
+
+
+@pytest.mark.asyncio
 async def test_search_posts_private_visibility_uses_repository(mock_db):
     user = _user()
     db = mock_db()
@@ -235,12 +288,19 @@ async def test_search_posts_private_visibility_uses_repository(mock_db):
         user.id,
         query=None,
         hashtag=None,
+        hashtag_to_all=False,
         academic_interest=None,
+        academic_interest_to_all=False,
         university_name=None,
+        university_to_all=False,
         major=None,
+        major_to_all=False,
         minor=None,
+        minor_to_all=False,
         country=None,
+        country_to_all=False,
         edu_level=None,
+        edu_level_to_all=False,
         offset=0,
         limit=None,
     )
@@ -286,3 +346,51 @@ async def test_search_posts_without_pagination_returns_all(mock_db):
         "totalItems": 0,
         "totalPages": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_search_posts_includes_is_connected_and_is_requested(mock_db):
+    user = _user()
+    author_connected = uuid.uuid4()
+    author_requested = uuid.uuid4()
+    author_unrelated = uuid.uuid4()
+
+    post1 = _post(author_user_id=author_connected)
+    post2 = _post(author_user_id=author_requested)
+    post3 = _post(author_user_id=author_unrelated)
+
+    rows = [
+        (post1, _profile(), None, None),
+        (post2, _profile(), None, None),
+        (post3, _profile(), None, None),
+    ]
+    db = mock_db()
+
+    with (
+        patch("apps.search.repositories.count_search_posts", AsyncMock(return_value=3)),
+        patch("apps.search.repositories.search_posts_with_details", AsyncMock(return_value=rows)),
+        patch("apps.connections.services.recommendation_service.get_user_connections", AsyncMock(return_value={author_connected})),
+        patch("apps.feed.services.profile_enrichment.load_requested_user_ids", AsyncMock(return_value={author_requested})),
+        patch("apps.feed.services.profile_enrichment.load_profile_details", AsyncMock(return_value={})),
+        patch("apps.engagement.repositories.fetch_post_engagement_flags", AsyncMock()) as fetch_flags,
+        patch("apps.engagement.services.post_reaction_formatters.load_latest_post_reactions", AsyncMock(return_value={})),
+    ):
+        fetch_flags.return_value = SimpleNamespace(
+            user_reaction_for=lambda _pid: None,
+            reposted_post_ids=set(),
+            bookmarked_post_ids=set(),
+        )
+        result = await search_posts(user, db, page=1, page_size=10)
+
+    items = result["items"]
+    assert len(items) == 3
+
+    assert items[0]["is_connected"] is True
+    assert items[0]["is_requested"] is False
+
+    assert items[1]["is_connected"] is False
+    assert items[1]["is_requested"] is True
+
+    assert items[2]["is_connected"] is False
+    assert items[2]["is_requested"] is False
+

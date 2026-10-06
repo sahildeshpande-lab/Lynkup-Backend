@@ -6,10 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from apps.feed.services.feed_service import (
-    _load_profile_details,
-    _load_requested_user_ids,
-    get_feed_service,
+from apps.feed.services.feed_service import get_feed_service
+from apps.feed.services.profile_enrichment import (
+    load_profile_details as _load_profile_details,
+    load_requested_user_ids as _load_requested_user_ids,
 )
 
 
@@ -54,6 +54,7 @@ async def test_load_profile_details_resolves_names_in_batches():
         profile_interests_id=["2", 1, "invalid"],
         major="Computer Science",
         minor="Mathematics",
+        edu_level="Masters",
     )
     db = AsyncMock()
     db.execute.side_effect = [
@@ -75,10 +76,16 @@ async def test_load_profile_details_resolves_names_in_batches():
     assert db.execute.await_count == 2
     assert details[user_id] == {
         "university": "Lynkup University",
+        "university_details": {
+            "id": str(university_id),
+            "university_name": "Lynkup University",
+            "university_website": None,
+        },
         "bio": "Profile bio",
         "academic_interest": ["Data Science", "AI"],
         "major": "Computer Science",
         "minor": "Mathematics",
+        "education_level": "Masters",
     }
 
 
@@ -126,36 +133,37 @@ async def test_get_feed_service_normal_post():
     db = AsyncMock()
 
     with (
-        patch("apps.feed.services.feed_service.fetch_viewer_profile", AsyncMock(return_value=None)),
-        patch("apps.feed.services.feed_service.get_user_connections", AsyncMock(return_value={author_id})),
         patch("apps.feed.services.feed_service.count_feed_posts", AsyncMock(return_value=1)),
         patch("apps.feed.services.feed_service.fetch_feed_posts", AsyncMock(return_value=([feed_item], None))),
         patch(
-            "apps.feed.services.feed_service._load_profile_details",
+            "apps.feed.services.feed_service._load_feed_enrichment_and_user_state",
             AsyncMock(
-                return_value={
-                    author_id: {
-                        "university": "Lynkup University",
-                        "bio": "Student bio",
-                        "academic_interest": ["Computer Science"],
-                        "major": "Software Engineering",
-                        "minor": "Mathematics",
-                    }
-                }
+                return_value=SimpleNamespace(
+                    enrichment=SimpleNamespace(
+                        profile_details={
+                        author_id: {
+                            "university": "Lynkup University",
+                            "bio": "Student bio",
+                            "academic_interest": ["Computer Science"],
+                            "major": "Software Engineering",
+                            "minor": "Mathematics",
+                        }
+                    },
+                        requested_user_ids={author_id},
+                        connected_user_ids={author_id},
+                    ),
+                    user_state=SimpleNamespace(
+                        engagement=SimpleNamespace(
+                            user_reaction_for=lambda pid: None,
+                            reposted_post_ids=frozenset(),
+                            bookmarked_post_ids=frozenset(),
+                        ),
+                        latest_reactions={},
+                    ),
+                )
             ),
         ),
-        patch(
-            "apps.feed.services.feed_service._load_requested_user_ids",
-            AsyncMock(return_value={author_id}),
-        ),
-        patch("apps.feed.services.feed_service.fetch_post_engagement_flags") as mock_flags,
-        patch("apps.feed.services.feed_service.load_latest_post_reactions", AsyncMock(return_value={})),
     ):
-        mock_flags.return_value = SimpleNamespace(
-            user_reaction_for=lambda pid: None,
-            reposted_post_ids=frozenset(),
-            bookmarked_post_ids=frozenset(),
-        )
 
         results = await get_feed_service(current_user_id, db)
 
@@ -233,43 +241,44 @@ async def test_get_feed_service_repost_item():
     db = AsyncMock()
 
     with (
-        patch("apps.feed.services.feed_service.fetch_viewer_profile", AsyncMock(return_value=None)),
-        patch("apps.feed.services.feed_service.get_user_connections", AsyncMock(return_value={author_id})),
         patch("apps.feed.services.feed_service.count_feed_posts", AsyncMock(return_value=1)),
         patch("apps.feed.services.feed_service.fetch_feed_posts", AsyncMock(return_value=([feed_item], None))),
         patch(
-            "apps.feed.services.feed_service._load_profile_details",
+            "apps.feed.services.feed_service._load_feed_enrichment_and_user_state",
             AsyncMock(
-                return_value={
-                    author_id: {
-                        "university": "Original University",
-                        "bio": "Original author bio",
-                        "academic_interest": ["Biology"],
-                        "major": "Biology",
-                        "minor": "Chemistry",
+                return_value=SimpleNamespace(
+                    enrichment=SimpleNamespace(
+                        profile_details={
+                        author_id: {
+                            "university": "Original University",
+                            "bio": "Original author bio",
+                            "academic_interest": ["Biology"],
+                            "major": "Biology",
+                            "minor": "Chemistry",
+                        },
+                        reposter_user_id: {
+                            "university": "Reposter University",
+                            "bio": "Reposter bio",
+                            "academic_interest": ["Design"],
+                            "major": "Design",
+                            "minor": "Business",
+                        },
                     },
-                    reposter_user_id: {
-                        "university": "Reposter University",
-                        "bio": "Reposter bio",
-                        "academic_interest": ["Design"],
-                        "major": "Design",
-                        "minor": "Business",
-                    },
-                }
+                        requested_user_ids={reposter_user_id},
+                        connected_user_ids={author_id},
+                    ),
+                    user_state=SimpleNamespace(
+                        engagement=SimpleNamespace(
+                            user_reaction_for=lambda pid: None,
+                            reposted_post_ids=frozenset(),
+                            bookmarked_post_ids=frozenset(),
+                        ),
+                        latest_reactions={},
+                    ),
+                )
             ),
         ),
-        patch(
-            "apps.feed.services.feed_service._load_requested_user_ids",
-            AsyncMock(return_value={reposter_user_id}),
-        ),
-        patch("apps.feed.services.feed_service.fetch_post_engagement_flags") as mock_flags,
-        patch("apps.feed.services.feed_service.load_latest_post_reactions", AsyncMock(return_value={})),
     ):
-        mock_flags.return_value = SimpleNamespace(
-            user_reaction_for=lambda pid: None,
-            reposted_post_ids=frozenset(),
-            bookmarked_post_ids=frozenset(),
-        )
 
         results = await get_feed_service(current_user_id, db)
 
@@ -353,22 +362,29 @@ async def test_get_feed_service_tuples_normalization():
     db = AsyncMock()
 
     with (
-        patch("apps.feed.services.feed_service.fetch_viewer_profile", AsyncMock(return_value=None)),
-        patch("apps.feed.services.feed_service.get_user_connections", AsyncMock(return_value=set())),
         patch("apps.feed.services.feed_service.count_feed_posts", AsyncMock(return_value=1)),
         patch("apps.feed.services.feed_service.fetch_feed_posts", AsyncMock(return_value=([(post, author_profile)], None))),
         patch(
-            "apps.feed.services.feed_service._load_requested_user_ids",
-            AsyncMock(return_value=set()),
+            "apps.feed.services.feed_service._load_feed_enrichment_and_user_state",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    enrichment=SimpleNamespace(
+                        profile_details={},
+                        requested_user_ids=set(),
+                        connected_user_ids=set(),
+                    ),
+                    user_state=SimpleNamespace(
+                        engagement=SimpleNamespace(
+                            user_reaction_for=lambda pid: None,
+                            reposted_post_ids=frozenset(),
+                            bookmarked_post_ids=frozenset(),
+                        ),
+                        latest_reactions={},
+                    ),
+                )
+            ),
         ),
-        patch("apps.feed.services.feed_service.fetch_post_engagement_flags") as mock_flags,
-        patch("apps.feed.services.feed_service.load_latest_post_reactions", AsyncMock(return_value={})),
     ):
-        mock_flags.return_value = SimpleNamespace(
-            user_reaction_for=lambda pid: None,
-            reposted_post_ids=frozenset(),
-            bookmarked_post_ids=frozenset(),
-        )
 
         results = await get_feed_service(current_user_id, db)
 
@@ -378,4 +394,52 @@ async def test_get_feed_service_tuples_normalization():
         assert formatted["first_name"] == "Alice"
         assert formatted["is_reposted"] is False
         assert formatted["reposted_data"] is None
+
+
+def test_feed_sql_excludes_reposted_self_posts():
+    from apps.feed.repositories.feed_repository import _FEED_COUNT_SQL, _FEED_EVENTS_SQL
+
+    # _FEED_EVENTS_SQL must exclude user's own original posts in reposts branch
+    assert "p.author_user_id <> :current_user" in _FEED_EVENTS_SQL
+    assert "reposter_profile.user_id <> :current_user" in _FEED_EVENTS_SQL
+
+    # Prefer academic matches and connected users; fall back to all visible.
+    # Original posts match the author; reposts match the reposter or original author.
+    assert "is_match" in _FEED_EVENTS_SQL
+    assert "max_match" in _FEED_EVENTS_SQL
+    assert "reposter_profile.university_id" in _FEED_EVENTS_SQL
+    assert "author_profile.university_id" in _FEED_EVENTS_SQL
+    assert "FROM connections c" in _FEED_EVENTS_SQL
+
+    # _FEED_COUNT_SQL must also exclude user's own original posts in reposts branch
+    assert "p.author_user_id <> :current_user" in _FEED_COUNT_SQL
+    assert "reposter_profile.user_id <> :current_user" in _FEED_COUNT_SQL
+    assert "r.is_deleted = false" in _FEED_COUNT_SQL
+    assert "is_match" in _FEED_COUNT_SQL
+    assert "max_match" in _FEED_COUNT_SQL
+    assert "reposter_profile.university_id" in _FEED_COUNT_SQL
+    assert "author_profile.university_id" in _FEED_COUNT_SQL
+    assert "FROM connections c" in _FEED_COUNT_SQL
+
+
+def test_feed_match_sql_includes_academic_or_connected():
+    from apps.feed.repositories.feed_repository import _feed_match_sql
+
+    post_sql = _feed_match_sql("author_profile", "p.author_user_id")
+    assert "author_profile.university_id" in post_sql
+    assert "author_profile.major" in post_sql
+    assert "author_profile.minor" in post_sql
+    assert "FROM connections c" in post_sql
+    assert "p.author_user_id" in post_sql
+
+    repost_sql = _feed_match_sql(
+        "reposter_profile",
+        "reposter_profile.user_id",
+        "p.author_user_id",
+    )
+    assert "reposter_profile.university_id" in repost_sql
+    assert "reposter_profile.user_id" in repost_sql
+    assert "p.author_user_id" in repost_sql
+    assert "FROM connections c" in repost_sql
+
 

@@ -9,10 +9,10 @@ from uuid import UUID
 from common.exceptions import ApiError
 
 
-def encode_cursor(*, relevance: int, created_at: datetime, post_id: UUID) -> str:
+def encode_cursor(*, engagement_score: int, created_at: datetime, post_id: UUID) -> str:
     """Encode feed keyset pagination state as an opaque Base64 cursor."""
     payload = {
-        "relevance": int(relevance),
+        "engagement_score": engagement_score,
         "created_at": created_at.isoformat(),
         "id": str(post_id),
     }
@@ -24,7 +24,10 @@ def decode_cursor(cursor: str) -> dict[str, Any]:
     """Decode an opaque feed cursor into keyset filter values.
 
     Returns:
-        dict with keys: relevance (int), created_at (datetime), id (UUID)
+        dict with keys: created_at (datetime), id (UUID)
+
+    Older cursors that also carried ``relevance`` are still accepted; that field
+    is ignored because the feed now orders by created_at only.
     """
     if not cursor or not isinstance(cursor, str):
         raise ApiError("Invalid cursor")
@@ -33,14 +36,14 @@ def decode_cursor(cursor: str) -> dict[str, Any]:
         padded = cursor + "=" * (-len(cursor) % 4)
         raw = base64.urlsafe_b64decode(padded.encode("ascii"))
         payload = json.loads(raw.decode("utf-8"))
-        relevance = int(payload["relevance"])
+        engagement_score = int(payload["engagement_score"])
         created_at = datetime.fromisoformat(payload["created_at"])
         post_id = UUID(str(payload["id"]))
     except (ApiError, KeyError, TypeError, ValueError, json.JSONDecodeError, OSError) as exc:
         raise ApiError("Invalid cursor") from exc
 
     return {
-        "relevance": relevance,
+        "engagement_score" : engagement_score,
         "created_at": created_at,
         "id": post_id,
     }

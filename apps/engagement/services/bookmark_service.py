@@ -46,6 +46,15 @@ async def update_bookmark(
             )
         try:
             await create_bookmark(db, user_id, payload.post_id)
+            from common.enums import UserActivityLogType
+            from apps.analytics.services import add_user_activity_log
+
+            await add_user_activity_log(
+                db,
+                user_id,
+                UserActivityLogType.BOOKMARK_POST,
+                commit=False,
+            )
             await db.commit()
             from apps.recommendations.services.engagement_keyword_service import (
                 apply_engagement_keyword_update_best_effort,

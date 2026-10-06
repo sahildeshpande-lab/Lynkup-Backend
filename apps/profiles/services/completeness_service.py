@@ -80,16 +80,43 @@ async def calculate_completeness_score(user_id, db: AsyncSession) -> int:
     calculated_score = (sum_of_weights * 100) / total_weights_sum
     return min(int(round(calculated_score)), 100)
 
-async def update_completeness_weights(payload, db: AsyncSession) -> dict:
+async def update_completeness_weights(
+    payload,
+    db: AsyncSession,
+    *,
+    actor_user_id=None,
+    actor_role: str | None = None,
+) -> dict:
     from apps.profiles.db_models import Profile
     from sqlmodel import select
 
     weights = await get_completeness_weights(db)
+    weight_fields = [
+        "bio", "university", "major", "edu_level",
+        "first_name", "last_name", "email",
+        "profile_photo_url", "interests", "graduation_date",
+        "location",
+    ]
+    old_values = {field: getattr(weights, field) for field in weight_fields}
     update_data = payload.model_dump(exclude_unset=True)
     for field, val in update_data.items():
         if val is not None:
             setattr(weights, field, val)
     db.add(weights)
+    new_values = {field: getattr(weights, field) for field in weight_fields}
+    if actor_user_id is not None:
+        from apps.administration.services.admin_activity_log_service import create_admin_activity_log
+
+        await create_admin_activity_log(
+            db,
+            user_id=actor_user_id,
+            role=actor_role,
+            action="update",
+            module="profile_completeness",
+            record_id=None,
+            description="updated profile completeness weights",
+            metadata={"old": old_values, "new": new_values},
+        )
     await db.commit()
     await db.refresh(weights)
 
@@ -118,7 +145,8 @@ async def update_completeness_weights(payload, db: AsyncSession) -> dict:
     elif total_weights_sum > 0:
         from sqlalchemy import text
         if db.bind.dialect.name == "sqlite":
-            sql = text(f"""
+            sql = text( # nosec B608 -- numeric config values, not user input
+                f"""  
                 UPDATE profiles
                 SET completeness_score = CAST(ROUND(
                     (
@@ -137,7 +165,8 @@ async def update_completeness_weights(payload, db: AsyncSession) -> dict:
                 ) AS INTEGER)
             """)
         else:
-            sql = text(f"""
+            sql = text(  # nosec B608 -- numeric config values, not user input
+                f"""
                 UPDATE profiles p
                 SET completeness_score = ROUND(
                     (

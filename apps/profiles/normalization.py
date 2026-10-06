@@ -16,8 +16,28 @@ def normalize_named_program_list(items: list | None) -> list | None:
     if items is None:
         return None
 
+    raw_list: list = []
+    if isinstance(items, str):
+        try:
+            import json
+            parsed = json.loads(items)
+            if isinstance(parsed, list):
+                raw_list = parsed
+            elif isinstance(parsed, dict):
+                raw_list = [parsed]
+            else:
+                raw_list = [str(parsed)]
+        except Exception:
+            raw_list = [items]
+    elif isinstance(items, dict):
+        raw_list = [items]
+    elif isinstance(items, (list, tuple, set)):
+        raw_list = list(items)
+    else:
+        return None
+
     combined: dict[str, dict | str] = {}
-    for item in items:
+    for item in raw_list:
         if isinstance(item, dict):
             raw_name = item.get("name") or item.get("title")
             normalized = normalize_major_minor(raw_name if raw_name is not None else None)
@@ -33,7 +53,7 @@ def normalize_named_program_list(items: list | None) -> list | None:
                 continue
             combined[normalized] = normalized
 
-    return list(combined.values())
+    return list(combined.values()) if combined else None
 
 
 def collect_normalized_program_names(

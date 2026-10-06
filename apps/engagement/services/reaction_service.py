@@ -77,15 +77,16 @@ async def upsert_post_reaction(
     if post is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
 
+    new_type = payload.reaction_type
+    removing = new_type is None
+
     author_id = getattr(post, "author_user_id", None)
-    if author_id is not None:
+    if not removing and author_id is not None:
         from common.user_visibility import check_post_engagement_allowed
         await check_post_engagement_allowed(db, user_id, author_id)
 
     existing = await get_user_reaction(db, payload.post_id, user_id)
     previous_type = existing.reaction_type if existing else None
-    new_type = payload.reaction_type
-    removing = new_type is None
 
     if previous_type == new_type:
         message = (
@@ -101,6 +102,8 @@ async def upsert_post_reaction(
         )
 
     delta = _like_count_delta(previous_type, new_type)
+    previous_like_count = post.like_count
+    crossed_milestones: list[int] = []
 
     try:
         if removing:
@@ -113,7 +116,37 @@ async def upsert_post_reaction(
                 new_type,
             )
         like_count = await update_post_like_count(db, payload.post_id, delta)
+        if delta > 0:
+            from apps.engagement.config import settings
+            from common.post_recognition import get_post_recognition_milestones
+
+            crossed_milestones = get_post_recognition_milestones(
+                previous_like_count=previous_like_count,
+                current_like_count=like_count,
+                milestones=settings.post_recognition_milestones,
+            )
+        if new_type == ReactionType.like and previous_type != ReactionType.like:
+            from common.enums import UserActivityLogType
+            from apps.analytics.services import add_user_activity_log
+
+            await add_user_activity_log(
+                db,
+                user_id,
+                UserActivityLogType.LIKE_POST,
+                commit=False,
+            )
         await db.commit()
+        if crossed_milestones and author_id is not None and author_id != user_id:
+            from apps.engagement.services.post_recognition_service import (
+                notify_post_recognition_milestones_best_effort,
+            )
+
+            await notify_post_recognition_milestones_best_effort(
+                db,
+                author_user_id=author_id,
+                post_id=payload.post_id,
+                crossed_milestones=crossed_milestones,
+            )
         if new_type == ReactionType.like and previous_type != ReactionType.like:
             from apps.recommendations.services.engagement_keyword_service import (
                 apply_engagement_keyword_update_best_effort,

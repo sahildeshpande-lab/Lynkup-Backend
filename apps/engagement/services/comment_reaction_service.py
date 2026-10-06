@@ -105,6 +105,16 @@ async def upsert_comment_reaction(
                 new_type,
             )
         like_count = await update_comment_like_count(db, payload.comment_id, delta)
+        if new_type == ReactionType.like and previous_type != ReactionType.like:
+            from common.enums import UserActivityLogType
+            from apps.analytics.services import add_user_activity_log
+
+            await add_user_activity_log(
+                db,
+                user_id,
+                UserActivityLogType.LIKE_COMMENT,
+                commit=False,
+            )
         await db.commit()
     except IntegrityError:
         await db.rollback()

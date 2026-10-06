@@ -12,6 +12,13 @@ from . import models as _models  # noqa: F401
 _engine_kwargs = {}
 if os.getenv("DISABLE_DB_POOL", "").lower() in {"1", "true", "yes", "on"}:
     _engine_kwargs["poolclass"] = NullPool
+elif settings.async_database_url.startswith("postgresql+asyncpg://"):
+    _engine_kwargs.update(
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_timeout=settings.db_pool_timeout,
+        pool_recycle=settings.db_pool_recycle,
+    )
 
 engine = create_async_engine(
     settings.async_database_url,
@@ -31,4 +38,7 @@ async_session_factory = async_sessionmaker(
 
 async def get_session() -> AsyncIterator[AsyncSession]:
     async with async_session_factory() as session:
-        yield session
+        try:
+            yield session
+        finally:
+            await session.close()  # Ensures connection goes back to pool even on errors

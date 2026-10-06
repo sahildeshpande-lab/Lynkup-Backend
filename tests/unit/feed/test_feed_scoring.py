@@ -190,33 +190,50 @@ def test_relevance_score_major_and_university_match():
     assert score == 2
 
 
-def test_feed_ordering_matches_first_then_all_posts_newest_first():
+def test_feed_ordering_keeps_academic_and_connected_matches():
+    """Academic matches and connected users stay in the feed; others drop."""
     now = datetime(2026, 7, 13, tzinfo=timezone.utc)
     yesterday = datetime(2026, 7, 12, tzinfo=timezone.utc)
     two_days_ago = datetime(2026, 7, 11, tzinfo=timezone.utc)
+    one_minute_ago = datetime(2026, 7, 13, 0, 1, 0, tzinfo=timezone.utc)
 
     posts = [
-        SimpleNamespace(id=1, is_match=False, created_at=now),
-        SimpleNamespace(id=2, is_match=True, created_at=yesterday),
-        SimpleNamespace(id=3, is_match=True, created_at=now),
-        SimpleNamespace(id=4, is_match=False, created_at=yesterday),
-        SimpleNamespace(id=5, is_match=False, created_at=two_days_ago),
+        SimpleNamespace(id="A", is_match=True, engagement=1, created_at=two_days_ago),  # university
+        SimpleNamespace(id="B", is_match=True, engagement=10, created_at=yesterday),  # connected
+        SimpleNamespace(id="C", is_match=True, engagement=5, created_at=now),  # major
+        SimpleNamespace(id="D", is_match=False, engagement=99, created_at=one_minute_ago),  # neither
     ]
+    max_match = max(int(post.is_match) for post in posts)
+    visible = [post for post in posts if max_match == 0 or post.is_match]
     ordered = sorted(
-        posts,
-        key=lambda post: (-int(post.is_match), -post.created_at.timestamp()),
+        visible,
+        key=lambda post: (-post.engagement, -post.created_at.timestamp()),
     )
-    assert [post.id for post in ordered] == [3, 2, 1, 4, 5]
+    assert [post.id for post in ordered] == ["B", "C", "A"]
+
+
+def test_feed_ordering_falls_back_to_all_visible_when_no_matches():
+    """When nothing matches university/major/minor, show all visible by time DESC."""
+    now = datetime(2026, 7, 13, tzinfo=timezone.utc)
+    yesterday = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    two_days_ago = datetime(2026, 7, 11, tzinfo=timezone.utc)
+    one_minute_ago = datetime(2026, 7, 13, 0, 1, 0, tzinfo=timezone.utc)
+
+    posts = [
+        SimpleNamespace(id="A", is_match=False, created_at=two_days_ago),
+        SimpleNamespace(id="B", is_match=False, created_at=yesterday),
+        SimpleNamespace(id="C", is_match=False, created_at=now),
+        SimpleNamespace(id="D", is_match=False, created_at=one_minute_ago),
+    ]
+    max_match = max(int(post.is_match) for post in posts)
+    visible = [post for post in posts if max_match == 0 or post.is_match]
+    ordered = sorted(visible, key=lambda post: -post.created_at.timestamp())
+    assert [post.id for post in ordered] == ["D", "C", "B", "A"]
 
 
 @pytest.mark.asyncio
 async def test_feed_service_pagination(mock_db):
     user_id = uuid.uuid4()
-    viewer_profile = SimpleNamespace(
-        major="CS",
-        minor="Math",
-        university_id=VIEWER_UNIVERSITY,
-    )
     post_one = SimpleNamespace(
         id=uuid.uuid4(),
         author_user_id=uuid.uuid4(),
@@ -269,25 +286,32 @@ async def test_feed_service_pagination(mock_db):
     ]
 
     with (
-        patch("apps.feed.services.feed_service.fetch_viewer_profile", AsyncMock(return_value=viewer_profile)),
-        patch("apps.feed.services.feed_service.get_user_connections", AsyncMock(return_value=set())),
         patch("apps.feed.services.feed_service.count_feed_posts", AsyncMock(return_value=5)) as count_posts,
         patch(
             "apps.feed.services.feed_service.fetch_feed_posts",
             AsyncMock(return_value=(page_rows, None)),
         ) as fetch_posts,
         patch(
-            "apps.feed.services.feed_service._load_requested_user_ids",
-            AsyncMock(return_value=set()),
+            "apps.feed.services.feed_service._load_feed_enrichment_and_user_state",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    enrichment=SimpleNamespace(
+                        profile_details={},
+                        requested_user_ids=set(),
+                        connected_user_ids=set(),
+                    ),
+                    user_state=SimpleNamespace(
+                        engagement=SimpleNamespace(
+                            user_reaction_for=lambda pid: None,
+                            reposted_post_ids=frozenset(),
+                            bookmarked_post_ids=frozenset(),
+                        ),
+                        latest_reactions={},
+                    ),
+                )
+            ),
         ),
-        patch("apps.feed.services.feed_service.fetch_post_engagement_flags") as mock_flags,
-        patch("apps.feed.services.feed_service.load_latest_post_reactions", AsyncMock(return_value={})),
     ):
-        mock_flags.return_value = SimpleNamespace(
-            user_reaction_for=lambda pid: None,
-            reposted_post_ids=frozenset(),
-            bookmarked_post_ids=frozenset(),
-        )
         posts, total, _next_cursor = await get_feed_service(
             user_id,
             db,
@@ -300,7 +324,7 @@ async def test_feed_service_pagination(mock_db):
     fetch_posts.assert_awaited_once_with(
         db,
         user_id,
-        viewer_profile,
+        None,
         set(),
         cursor=None,
         limit=4,
@@ -317,8 +341,6 @@ async def test_feed_service_without_pagination_fetches_all(mock_db):
     db = mock_db()
 
     with (
-        patch("apps.feed.services.feed_service.fetch_viewer_profile", AsyncMock(return_value=None)),
-        patch("apps.feed.services.feed_service.get_user_connections", AsyncMock(return_value=set())),
         patch("apps.feed.services.feed_service.count_feed_posts", AsyncMock(return_value=0)),
         patch(
             "apps.feed.services.feed_service.fetch_feed_posts",
@@ -344,11 +366,36 @@ def test_encode_decode_cursor_roundtrip():
 
     post_id = uuid.uuid4()
     created_at = datetime(2026, 7, 18, 12, 30, 0, tzinfo=timezone.utc)
-    cursor = encode_cursor(relevance=6, created_at=created_at, post_id=post_id)
+    cursor = encode_cursor(engagement_score=9, created_at=created_at, post_id=post_id)
     decoded = decode_cursor(cursor)
-    assert decoded["relevance"] == 6
+    assert decoded["engagement_score"] == 9
     assert decoded["created_at"] == created_at
     assert decoded["id"] == post_id
+
+
+def test_decode_cursor_accepts_legacy_relevance_payload():
+    """Old clients may still send cursors that include relevance; ignore it."""
+    import base64
+    import json
+
+    from apps.feed.services.feed_cursor import decode_cursor
+
+    post_id = uuid.uuid4()
+    created_at = datetime(2026, 7, 18, 12, 30, 0, tzinfo=timezone.utc)
+    legacy = {
+        "relevance": 6,
+        "engagement_score": 9,
+        "created_at": created_at.isoformat(),
+        "id": str(post_id),
+    }
+    cursor = base64.urlsafe_b64encode(
+        json.dumps(legacy, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).decode("ascii")
+    decoded = decode_cursor(cursor)
+    assert decoded["engagement_score"] == 9
+    assert decoded["created_at"] == created_at
+    assert decoded["id"] == post_id
+    assert "relevance" not in decoded
 
 
 def test_decode_cursor_rejects_malformed():
@@ -358,3 +405,78 @@ def test_decode_cursor_rejects_malformed():
 
     with _pytest.raises(ApiError, match="Invalid cursor"):
         decode_cursor("not-a-valid-cursor")
+
+
+@pytest.mark.asyncio
+async def test_get_feed_route_includes_next_cursor_and_has_more():
+    """Paginated feed body keeps existing fields and appends cursor metadata."""
+    from fastapi import Response
+
+    from apps.feed.routes import get_feed
+
+    user = SimpleNamespace(id=uuid.uuid4())
+    db = AsyncMock()
+    response = Response()
+
+    with (
+        patch(
+            "apps.feed.routes.get_feed_service",
+            AsyncMock(return_value=([{"id": "post-1"}], 5, "opaque-cursor")),
+        ),
+        patch(
+            "apps.analytics.services.add_user_activity_log_best_effort",
+            AsyncMock(),
+        ),
+    ):
+        result = await get_feed(
+            response=response,
+            page=1,
+            pageSize=2,
+            cursor=None,
+            current_user=user,
+            db=db,
+        )
+
+    data = result.data
+    assert data["items"] == [{"id": "post-1"}]
+    assert data["page"] == 1
+    assert data["pageSize"] == 2
+    assert data["totalItems"] == 5
+    assert data["totalPages"] == 3
+    assert data["next_cursor"] == "opaque-cursor"
+    assert data["has_more"] is True
+    assert response.headers["X-Next-Cursor"] == "opaque-cursor"
+
+
+@pytest.mark.asyncio
+async def test_get_feed_route_has_more_false_when_no_next_cursor():
+    from fastapi import Response
+
+    from apps.feed.routes import get_feed
+
+    user = SimpleNamespace(id=uuid.uuid4())
+    db = AsyncMock()
+    response = Response()
+
+    with (
+        patch(
+            "apps.feed.routes.get_feed_service",
+            AsyncMock(return_value=([{"id": "post-1"}], 1, None)),
+        ),
+        patch(
+            "apps.analytics.services.add_user_activity_log_best_effort",
+            AsyncMock(),
+        ),
+    ):
+        result = await get_feed(
+            response=response,
+            page=1,
+            pageSize=20,
+            cursor=None,
+            current_user=user,
+            db=db,
+        )
+
+    assert result.data["next_cursor"] is None
+    assert result.data["has_more"] is False
+    assert "X-Next-Cursor" not in response.headers

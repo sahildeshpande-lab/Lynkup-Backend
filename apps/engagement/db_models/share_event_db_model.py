@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, Index, UniqueConstraint
+from sqlalchemy import Column, DateTime, Index, String, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, SQLModel, Relationship
 
@@ -18,6 +18,14 @@ class ShareEvent(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True, index=True)
     user_id: UUID = Field(foreign_key="users.id", nullable=False)
     post_id: UUID = Field(foreign_key="posts.id", nullable=False)
+    branch_code: str | None = Field(
+        default=None,
+        sa_column=Column(String(64), nullable=True),
+    )
+    branch_url: str | None = Field(
+        default=None,
+        sa_column=Column(String(2048), nullable=True),
+    )
     created_at: datetime = Field(
         default_factory=utc_now,
         sa_column=Column(DateTime(timezone=True), nullable=False),
@@ -42,5 +50,6 @@ class ShareEvent(SQLModel, table=True):
         Index("ix_share_events_user_id", "user_id"),
         Index("ix_share_events_post_id", "post_id"),
         Index("ix_share_events_user_id_post_id", "user_id", "post_id"),
+        Index("ix_share_events_branch_code", "branch_code"),
         UniqueConstraint("user_id", "post_id", name="uq_share_events_user_post"),
     )

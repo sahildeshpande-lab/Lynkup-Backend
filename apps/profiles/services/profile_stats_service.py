@@ -2,71 +2,90 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
+from sqlmodel import select as sqlmodel_select
 
+from apps.accounts.db_models import User
 from apps.profiles.db_models.profile_db_model import Profile
-from apps.profiles.db_models.profile_stats_db_model import ProfileStats
-
-
-async def get_or_create_profile_stats(
-    db: AsyncSession,
-    profile_id: UUID,
-) -> ProfileStats:
-    result = await db.execute(
-        select(ProfileStats).where(ProfileStats.profile_id == profile_id).with_for_update()
-    )
-    stats = result.scalar_one_or_none()
-    if stats:
-        return stats
-
-    stats = ProfileStats(profile_id=profile_id, connection_count=0)
-    db.add(stats)
-    await db.flush()
-    return stats
+from common.enums import UserStatus
 
 
 async def get_connection_count_for_profile(
     db: AsyncSession,
-    profile_id: UUID | None,
+    user_id: UUID | None,
 ) -> int:
-    if profile_id is None:
+    """Count distinct active connections for a user, excluding hidden peers.
+
+    Matches:
+
+        SELECT COUNT(DISTINCT CASE
+            WHEN c.user_high_id = :user_id THEN c.user_low_id
+            ELSE c.user_high_id
+        END)
+        FROM connections c
+        JOIN users u ON u.id = CASE
+            WHEN c.user_high_id = :user_id THEN c.user_low_id
+            ELSE c.user_high_id
+        END
+        WHERE (c.user_high_id = :user_id OR c.user_low_id = :user_id)
+          AND u.status NOT IN ('suspended', 'banned')
+          AND u.is_deleted = false
+    """
+    if user_id is None:
         return 0
 
-    result = await db.execute(
-        select(ProfileStats.connection_count).where(ProfileStats.profile_id == profile_id)
+    from apps.connections.db_models import Connection
+
+    peer_id = case(
+        (Connection.user_high_id == user_id, Connection.user_low_id),
+        else_=Connection.user_high_id,
     )
-    count = result.scalar_one_or_none()
+    stmt = (
+        select(func.count(func.distinct(peer_id)))
+        .select_from(Connection)
+        .join(User, User.id == peer_id)
+        .where(
+            or_(Connection.user_high_id == user_id, Connection.user_low_id == user_id),
+            Connection.is_active.is_(True),
+            User.status.notin_((UserStatus.suspended, UserStatus.banned)),
+            User.is_deleted.is_(False),
+        )
+    )
+    count = (await db.execute(stmt)).scalar_one()
     return int(count or 0)
 
 
-async def increment_connection_counts_for_users(
-    db: AsyncSession,
-    user_id_1: UUID,
-    user_id_2: UUID,
-) -> None:
-    for user_id in (user_id_1, user_id_2):
-        profile_result = await db.execute(select(Profile).where(Profile.user_id == user_id))
-        profile = profile_result.scalar_one_or_none()
-        if not profile:
-            continue
-        stats = await get_or_create_profile_stats(db, profile.id)
-        stats.connection_count += 1
+async def count_public_posts_for_user(db: AsyncSession, user_id: UUID) -> int:
+    """Count authored + reposted posts visible on public profile surfaces."""
+    from apps.engagement.repositories.repost_repository import count_active_reposts_for_user
+    from apps.feed.repositories.post_repository import count_posts_by_state
+    from common.enums import FEED_VISIBLE_POST_STATES
+
+    authored = await count_posts_by_state(
+        db,
+        state=FEED_VISIBLE_POST_STATES,
+        user_id=user_id,
+    )
+    reposts = await count_active_reposts_for_user(db, user_id)
+    return int(authored or 0) + int(reposts or 0)
 
 
-async def decrement_connection_counts_for_users(
+async def recalculate_posts_count_for_user(
     db: AsyncSession,
-    user_id_1: UUID,
-    user_id_2: UUID,
+    user_id: UUID,
 ) -> None:
-    """Decrease connection counts for both users without going below zero."""
-    for user_id in (user_id_1, user_id_2):
-        profile_result = await db.execute(select(Profile).where(Profile.user_id == user_id))
-        profile = profile_result.scalar_one_or_none()
-        if not profile:
-            continue
-        stats = await get_or_create_profile_stats(db, profile.id)
-        stats.connection_count = max((stats.connection_count or 0) - 1, 0)
+    """Set cached posts_count from authored + qualifying repost rows."""
+    from apps.engagement.repositories.repost_repository import (
+        repair_orphaned_reposts_for_user,
+    )
+
+    profile_result = await db.execute(sqlmodel_select(Profile).where(Profile.user_id == user_id))
+    profile = profile_result.scalar_one_or_none()
+    if not profile:
+        return
+    await repair_orphaned_reposts_for_user(db, user_id)
+    profile.posts_count = await count_public_posts_for_user(db, user_id)
 
 
 async def increment_posts_count_for_user(
@@ -74,11 +93,7 @@ async def increment_posts_count_for_user(
     user_id: UUID,
 ) -> None:
     """Increase the published posts count for a user's profile."""
-    profile_result = await db.execute(select(Profile).where(Profile.user_id == user_id))
-    profile = profile_result.scalar_one_or_none()
-    if not profile:
-        return
-    profile.posts_count = (profile.posts_count or 0) + 1
+    await recalculate_posts_count_for_user(db, user_id)
 
 
 async def decrement_posts_count_for_user(
@@ -86,36 +101,84 @@ async def decrement_posts_count_for_user(
     user_id: UUID,
 ) -> None:
     """Decrease the published posts count for a user's profile without going below zero."""
-    profile_result = await db.execute(select(Profile).where(Profile.user_id == user_id))
-    profile = profile_result.scalar_one_or_none()
-    if not profile:
+    await recalculate_posts_count_for_user(db, user_id)
+
+
+async def recalculate_reposter_posts_counts(
+    db: AsyncSession,
+    post_id: UUID,
+    *,
+    exclude_user_id: UUID | None = None,
+) -> None:
+    """Refresh cached posts_count for every live reposter of ``post_id``."""
+    from apps.engagement.repositories.repost_repository import list_active_reposter_user_ids
+
+    for user_id in await list_active_reposter_user_ids(db, post_id):
+        if exclude_user_id is not None and user_id == exclude_user_id:
+            continue
+        await recalculate_posts_count_for_user(db, user_id)
+
+
+async def adjust_reposter_posts_counts(
+    db: AsyncSession,
+    post_id: UUID,
+    *,
+    decrement: bool,
+    exclude_user_id: UUID | None = None,
+) -> None:
+    """Refresh each live reposter's cached posts_count after original visibility changes.
+
+    Flag/escalate hide the original from profile lists, so those reposts must
+    drop out of the cache. Publish/reinstate puts them back. The Repost rows
+    stay active so a later unflag can restore the cards without re-reposting.
+    """
+    del decrement
+    await recalculate_reposter_posts_counts(
+        db,
+        post_id,
+        exclude_user_id=exclude_user_id,
+    )
+
+
+async def sync_posts_count_for_visibility_change(
+    db: AsyncSession,
+    *,
+    post_id: UUID,
+    author_user_id: UUID,
+    was_counted: bool,
+    now_counted: bool,
+) -> None:
+    """Update author + live-reposter caches when a post enters or leaves public count."""
+    if was_counted == now_counted:
         return
-    profile.posts_count = max((profile.posts_count or 0) - 1, 0)
+    await recalculate_posts_count_for_user(db, author_user_id)
+    await recalculate_reposter_posts_counts(
+        db,
+        post_id,
+        exclude_user_id=author_user_id,
+    )
 
 
 async def adjust_counts_for_deleting_user(
     db: AsyncSession,
     user_id: UUID,
 ) -> None:
-    """Zero the deleting user's counts and decrement peers' LynkUp counts.
+    """Legacy helper: zero posts count and deactivate LynkUps for a user.
 
-    Operates only on currently active connections so a retry against an
-    already-deleting account is a no-op for peers.
+    Account-deletion grace period no longer calls this — content and social
+    relationships must remain intact until permanent purge. Kept for any
+    explicit callers that still need the old behavior.
     """
-    from sqlalchemy import or_
-
     from apps.connections.db_models import Connection
 
-    profile_result = await db.execute(select(Profile).where(Profile.user_id == user_id))
+    profile_result = await db.execute(sqlmodel_select(Profile).where(Profile.user_id == user_id))
     profile = profile_result.scalar_one_or_none()
     if profile is not None:
         profile.posts_count = 0
-        stats = await get_or_create_profile_stats(db, profile.id)
-        stats.connection_count = 0
 
     connections = (
         await db.execute(
-            select(Connection).where(
+            sqlmodel_select(Connection).where(
                 Connection.is_active == True,  # noqa: E712
                 or_(
                     Connection.user_low_id == user_id,
@@ -126,18 +189,5 @@ async def adjust_counts_for_deleting_user(
     ).scalars().all()
 
     for connection in connections:
-        peer_id = (
-            connection.user_high_id
-            if connection.user_low_id == user_id
-            else connection.user_low_id
-        )
         connection.is_active = False
         db.add(connection)
-
-        peer_profile = (
-            await db.execute(select(Profile).where(Profile.user_id == peer_id))
-        ).scalar_one_or_none()
-        if peer_profile is None:
-            continue
-        peer_stats = await get_or_create_profile_stats(db, peer_profile.id)
-        peer_stats.connection_count = max((peer_stats.connection_count or 0) - 1, 0)

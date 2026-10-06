@@ -47,6 +47,15 @@ async def share_post(
     try:
         await create_share_event(db, user_id, post_id)
         await update_post_share_count(db, post_id, 1)
+        from common.enums import UserActivityLogType
+        from apps.analytics.services import add_user_activity_log
+
+        await add_user_activity_log(
+            db,
+            user_id,
+            UserActivityLogType.SHARE_POST,
+            commit=False,
+        )
         await db.commit()
     except IntegrityError:
         await db.rollback()

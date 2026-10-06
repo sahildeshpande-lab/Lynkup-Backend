@@ -10,14 +10,15 @@ logger = logging.getLogger(__name__)
 
 async def cleanup_expired_exports(
     service: DataExportService | None = None,
+    *, session_factory=None,
 ) -> int:
     """Delete expired export ZIP files and mark records as expired.
 
-    Intended to be invoked by Linux Cron or another external scheduler.
-    Do not call this from an infinite FastAPI-managed loop.
+    Invoked by Celery with a worker-owned session factory.
     """
     svc = service or get_data_export_service()
-    async with async_session_factory() as db:
+    factory = session_factory or async_session_factory
+    async with factory() as db:
         cleaned = await svc.cleanup_expired_exports(db=db)
     logger.info("Expired export cleanup finished; cleaned=%s", cleaned)
     return cleaned

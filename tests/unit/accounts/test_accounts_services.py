@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.database.session import async_session_factory, engine
 from core.database.init import init_db
 
-from apps.accounts.db_models import User, SecurityEvent, SecurityEventType, TransactionalEmailLog, RefreshToken
+from apps.accounts.db_models import User, SecurityEvent, SecurityEventType, TransactionalEmailLog, RefreshToken, ConsentRecord
 from apps.profiles.db_models import Profile
 from common.enums import OnboardingStatus, RegistrationType, UserStatus
 from apps.accounts.schemas import RefreshTokenRequest, LoginRequest
@@ -30,6 +30,7 @@ from apps.accounts.services import (
     _fetch_user_profile,
     _issue_auth_session,
     build_firebase_session_response,
+    firebase_email_matches_user,
     AccountExistsException,
 )
 
@@ -48,6 +49,13 @@ async def test_accounts_basic_helpers() -> None:
     dt_naive = datetime(2026, 6, 15)
     dt_aware = _as_aware_utc(dt_naive)
     assert dt_aware.tzinfo == timezone.utc
+
+    class _UserEmail:
+        email = "user@example.com"
+
+    assert firebase_email_matches_user({"email": "USER@example.com"}, _UserEmail) is True
+    assert firebase_email_matches_user({"email": "old@example.com"}, _UserEmail) is False
+    assert firebase_email_matches_user({}, _UserEmail) is False
 
 
 @pytest.mark.asyncio
@@ -99,6 +107,10 @@ async def test_accounts_complete_firebase_registration() -> None:
             }
             with pytest.raises(AccountExistsException):
                 await complete_firebase_registration(mismatch_firebase_user, session)
+
+            consent_stmt = select(ConsentRecord).where(ConsentRecord.user_id == user.id)
+            consents = (await session.execute(consent_stmt)).scalars().all()
+            assert consents == []
 
     finally:
         await engine.dispose()

@@ -133,6 +133,15 @@ async def send_connection_request(db: AsyncSession, sender_id: UUID, receiver_id
 
     request = ConnectionRequest(sender_user_id=sender_id, receiver_user_id=receiver_id, status="pending")
     db.add(request)
+    from common.enums import UserActivityLogType
+    from apps.analytics.services import add_user_activity_log
+
+    await add_user_activity_log(
+        db,
+        sender_id,
+        UserActivityLogType.SEND_CONNECTION_REQUEST,
+        commit=False,
+    )
     await db.commit()
     await db.refresh(request)
 
@@ -150,8 +159,8 @@ async def send_connection_request(db: AsyncSession, sender_id: UUID, receiver_id
             db,
             recipient_user_id=receiver_id,
             notification_type="CONNECTION_REQUEST",
-            title="Connection Request",
-            body=f"{sender_name} sent you a connection request.",
+            title="LynkUp Request",
+            body=f"{sender_name} sent you a LynkUp request.",
             sender_user_id=sender_id,
         )
     except Exception:
@@ -177,6 +186,10 @@ async def send_connection_request(db: AsyncSession, sender_id: UUID, receiver_id
 async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user_id: UUID, response: str) -> ApiResponse:
     if response not in ["accepted", "declined"]:
         return error_response("Invalid response.", response_cls=ApiResponse)
+
+    other_user = (await db.execute(select(User).where(User.id == other_user_id))).scalar_one_or_none()
+    if other_user is None:
+        return error_response("Not a valid User", response_cls=ApiResponse)
 
     stmt = select(ConnectionRequest).where(
         ConnectionRequest.status == "pending",
@@ -207,21 +220,23 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
         conn_res = await db.execute(conn_check)
         existing_conn = conn_res.scalars().first()
 
-        should_increment = False
         if existing_conn:
             if not existing_conn.is_active:
                 existing_conn.is_active = True
-                should_increment = True
         else:
             new_conn = Connection(user_low_id=low_id, user_high_id=high_id)
             db.add(new_conn)
-            should_increment = True
 
-        if should_increment:
-            from apps.profiles.services.profile_stats_service import increment_connection_counts_for_users
-            await increment_connection_counts_for_users(
-                db, sender_user_id, receiver_user_id
-            )
+    if response == "accepted":
+        from common.enums import UserActivityLogType
+        from apps.analytics.services import add_user_activity_log
+
+        await add_user_activity_log(
+            db,
+            user_id,
+            UserActivityLogType.ACCEPT_CONNECTION_REQUEST,
+            commit=False,
+        )
 
     try:
         await db.commit()
@@ -251,8 +266,8 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
     #     sender_row = sender_result.first()
     #     if sender_row:
     #         sender_user, sender_profile = sender_row
-    #         full_name = f"{sender_profile.first_name} {sender_profile.last_name}".strip() if sender_profile else None
-    #         await send_lynkup_response_email(sender_user.email, response, full_name)
+    #         first_name = (sender_profile.first_name or "").strip() if sender_profile else None
+    #         await send_lynkup_response_email(sender_user.email, response, first_name)
     #         logger.info("Lynkup response email queued for %s", sender_user.email)
     #     else:
     #         logger.warning("Sender user not found for Lynkup response email, user_id=%s", req.sender_user_id)
@@ -274,11 +289,11 @@ async def respond_connection_request(db: AsyncSession, user_id: UUID, other_user
                     or "Someone"
                 )
             if response == "accepted":
-                title = "Connection Accepted"
-                body = f"{receiver_name} accepted your connection request."
+                title = "LynkUp Accepted"
+                body = f"{receiver_name} accepted your LynkUp request."
             else:
-                title = "Connection Declined"
-                body = f"{receiver_name} declined your connection request."
+                title = "LynkUp Declined"
+                body = f"{receiver_name} declined your LynkUp request."
             logger.info(
                 "Sending %s push notification request_id=%s recipient=%s responder=%s title=%r",
                 notification_type,
@@ -327,12 +342,11 @@ async def remove_connection(
     current_user_id: UUID,
     other_user_id: UUID,
 ) -> ApiResponse:
-    """Remove an accepted connection and/or any pending/accepted connection requests, then update connection counts."""
+    """Remove an accepted connection and/or any pending/accepted connection requests."""
     if current_user_id == other_user_id:
         return error_response("Connection not found", response_cls=ApiResponse)
 
     from apps.connections.repositories import delete_connection, get_active_connection_between
-    from apps.profiles.services.profile_stats_service import decrement_connection_counts_for_users
 
     connection = await get_active_connection_between(db, current_user_id, other_user_id)
     request_rows = (
@@ -359,7 +373,6 @@ async def remove_connection(
     try:
         if connection is not None:
             await delete_connection(db, connection)
-            await decrement_connection_counts_for_users(db, current_user_id, other_user_id)
         for request_row in request_rows:
             await db.delete(request_row)
         await db.commit()
@@ -391,12 +404,17 @@ async def get_pending_requests(
     from common.pagination import paginate_items, build_paginated_response
     from sqlalchemy import func
 
-    base_stmt = select(ConnectionRequest, Profile).join(
+    from apps.profiles.db_models.university_db_model import University
+
+    base_stmt = select(ConnectionRequest, Profile, University).join(
         Profile,
         Profile.user_id == ConnectionRequest.sender_user_id,
     ).join(
         User,
         User.id == ConnectionRequest.sender_user_id,
+    ).outerjoin(
+        University,
+        University.id == Profile.university_id,
     ).where(
         ConnectionRequest.status == "pending",
         ConnectionRequest.receiver_user_id == user_id,
@@ -412,7 +430,7 @@ async def get_pending_requests(
             )
         )
 
-    def _build_pending_item(req: ConnectionRequest, profile: Profile) -> dict:
+    def _build_pending_item(req: ConnectionRequest, profile: Profile, uni: University | None) -> dict:
         request_sent = req.sender_user_id == user_id
         request_received = req.receiver_user_id == user_id
         other_user_id = req.receiver_user_id if request_sent else req.sender_user_id
@@ -423,6 +441,12 @@ async def get_pending_requests(
             "first_name": profile.first_name,
             "last_name": profile.last_name,
             "profilePhoto_url": generate_profile_image_url(profile.profile_photo_url) if profile.profile_photo_url else None,
+            "university": uni.name if uni else None,
+            "university_details": {
+                "id": str(uni.id) if uni else (str(profile.university_id) if profile.university_id else None),
+                "university_name": uni.name if uni else None,
+                "university_website": uni.website if uni else None,
+            },
             "request_sent": request_sent,
             "request_received": request_received,
             "is_sent": request_sent,
@@ -432,7 +456,7 @@ async def get_pending_requests(
     if page is None and page_size is None:
         result = await db.execute(base_stmt.order_by(ConnectionRequest.created_at.desc()))
         rows = result.all()
-        data = [_build_pending_item(req, profile) for req, profile in rows]
+        data = [_build_pending_item(req, profile, uni) for req, profile, uni in rows]
         return success_response("Lynkup Request pending", data, response_cls=ApiResponse)
 
     p = page or 1
@@ -445,7 +469,7 @@ async def get_pending_requests(
     result = await db.execute(stmt)
     rows = result.all()
 
-    data = [_build_pending_item(req, profile) for req, profile in rows]
+    data = [_build_pending_item(req, profile, uni) for req, profile, uni in rows]
 
     paginated = build_paginated_response(data, p, ps, total_items)
     return success_response("Lynkup Request pending", paginated.model_dump(), response_cls=ApiResponse)
@@ -460,8 +484,10 @@ async def get_connections_service(
     from common.pagination import build_paginated_response
     from sqlalchemy import func
 
+    from apps.profiles.db_models.university_db_model import University
+
     base_stmt = (
-        select(Connection, Profile)
+        select(Connection, Profile, University)
         .join(
             Profile,
             or_(
@@ -473,6 +499,10 @@ async def get_connections_service(
             User,
             User.id == Profile.user_id,
         )
+        .outerjoin(
+            University,
+            University.id == Profile.university_id,
+        )
         .where(
             or_(Connection.user_low_id == user_id, Connection.user_high_id == user_id),
             Connection.is_active == True,
@@ -480,7 +510,7 @@ async def get_connections_service(
         )
     )
 
-    async def _build_item(conn: Connection, profile: Profile) -> dict:
+    async def _build_item(conn: Connection, profile: Profile, uni: University | None) -> dict:
         other_user_id = conn.user_high_id if conn.user_low_id == user_id else conn.user_low_id
         lynkup_stmt = (
             select(ConnectionRequest.id)
@@ -508,12 +538,21 @@ async def get_connections_service(
             "first_name": profile.first_name,
             "last_name": profile.last_name,
             "profilePhoto_url": generate_profile_image_url(profile.profile_photo_url) if profile.profile_photo_url else None,
+            "university": uni.name if uni else None,
+            "university_details": {
+                "id": str(uni.id) if uni else (str(profile.university_id) if profile.university_id else None),
+                "university_name": uni.name if uni else None,
+                "university_website": uni.website if uni else None,
+            },
+            "major": profile.major,
+            "minor": profile.minor,
+            "edu_level": profile.edu_level,
         }
 
     if page is None and page_size is None:
         result = await db.execute(base_stmt.order_by(Connection.connected_at.desc()))
         rows = result.all()
-        data = [await _build_item(conn, profile) for conn, profile in rows]
+        data = [await _build_item(conn, profile, uni) for conn, profile, uni in rows]
         return success_response("Connections fetched successfully", data, response_cls=ApiResponse)
 
     p = page or 1
@@ -524,7 +563,7 @@ async def get_connections_service(
 
     stmt = base_stmt.order_by(Connection.connected_at.desc()).offset((p - 1) * ps).limit(ps)
     rows = (await db.execute(stmt)).all()
-    data = [await _build_item(conn, profile) for conn, profile in rows]
+    data = [await _build_item(conn, profile, uni) for conn, profile, uni in rows]
 
     paginated = build_paginated_response(data, p, ps, total_items)
     return success_response(

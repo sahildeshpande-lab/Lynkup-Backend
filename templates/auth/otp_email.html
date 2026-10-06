@@ -1,10 +1,4 @@
-<br>
-<p class="body-text" style="margin:0 0 20px;color:#475569;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.6;width:100%;max-width:100%;word-wrap:break-word;overflow-wrap:break-word;">
-  {{greeting}}<br><br>
-  Please use this one-time code to verify your email address and securely access your account.
-</p>
-
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:4px 0 16px;">
   <tr>
     <td align="center" class="otp-wrapper" style="text-align:center;padding:0;width:100%;">
       {{otp_display}}
@@ -12,7 +6,7 @@
   </tr>
 </table>
 
-<br>
-<p class="muted-text" style="margin:0 0 16px;font-size:14px;color:#64748B;font-family:Arial,Helvetica,sans-serif;line-height:1.6;width:100%;max-width:100%;word-wrap:break-word;overflow-wrap:break-word;">
-  One-time code will expire in {{otp_expire_minutes}} minutes.
+<p class="muted-text" style="margin:0 0 4px;font-size:13px;color:#64748B;font-family:Arial,Helvetica,sans-serif;line-height:1.6;text-align:center;">
+  The one-time code will expire in {{otp_expire_minutes}} minutes.
 </p>
+

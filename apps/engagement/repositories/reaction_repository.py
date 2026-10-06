@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.engagement.db_models import PostReaction
 from apps.feed.db_models import Post
+from common.enums import PostState
 
 
 def utc_now() -> datetime:
@@ -15,7 +16,14 @@ def utc_now() -> datetime:
 
 
 async def get_post_for_update(db: AsyncSession, post_id: UUID) -> Post | None:
-    stmt = select(Post).where(Post.id == post_id).with_for_update()
+    stmt = (
+        select(Post)
+        .where(
+            Post.id == post_id,
+            Post.state.notin_([PostState.deleted, PostState.rejected]),
+        )
+        .with_for_update()
+    )
     return (await db.execute(stmt)).scalar_one_or_none()
 
 

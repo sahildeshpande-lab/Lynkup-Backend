@@ -3,12 +3,41 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import bindparam, text
+from sqlalchemy.dialects.postgresql import ARRAY, UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.engagement.db_models import PostReaction, Repost, Bookmark
-from apps.profiles.db_models import Profile
 from common.enums import ReactionType
+
+_FETCH_POST_ENGAGEMENT_FLAGS_SQL = """
+WITH requested_posts AS (
+    SELECT DISTINCT unnest(CAST(:post_ids AS uuid[])) AS post_id
+),
+viewer_profile AS (
+    SELECT p.id AS profile_id
+    FROM profiles p
+    WHERE p.user_id = :user_id
+    LIMIT 1
+)
+SELECT
+    rp.post_id,
+    pr.reaction_type,
+    (b.id IS NOT NULL) AS is_bookmarked,
+    (r.id IS NOT NULL) AS is_reposted
+FROM requested_posts rp
+LEFT JOIN post_reactions pr
+    ON pr.post_id = rp.post_id
+   AND pr.user_id = :user_id
+LEFT JOIN bookmarks b
+    ON b.post_id = rp.post_id
+   AND b.user_id = :user_id
+LEFT JOIN viewer_profile vp
+    ON TRUE
+LEFT JOIN reposts r
+    ON r.post_id = rp.post_id
+   AND r.profile_id = vp.profile_id
+   AND r.is_deleted = FALSE
+"""
 
 
 @dataclass(frozen=True)
@@ -32,6 +61,14 @@ class PostEngagementFlags:
         return frozenset(pid for pid, _ in self.user_reactions)
 
 
+def _coerce_reaction_type(value: object | None) -> ReactionType | None:
+    if value is None:
+        return None
+    if isinstance(value, ReactionType):
+        return value
+    return ReactionType(str(value))
+
+
 async def fetch_post_engagement_flags(
     db: AsyncSession,
     user_id: UUID,
@@ -40,33 +77,34 @@ async def fetch_post_engagement_flags(
     if not post_ids:
         return PostEngagementFlags.empty()
 
-    reactions_stmt = select(PostReaction.post_id, PostReaction.reaction_type).where(
-        PostReaction.user_id == user_id,
-        PostReaction.post_id.in_(post_ids),
+    stmt = text(_FETCH_POST_ENGAGEMENT_FLAGS_SQL).bindparams(
+        bindparam("post_ids", type_=ARRAY(PGUUID(as_uuid=True))),
+        bindparam("user_id", type_=PGUUID(as_uuid=True)),
     )
-    reaction_rows = (await db.execute(reactions_stmt)).all()
-    user_reactions = tuple((row[0], row[1]) for row in reaction_rows)
-
-    bookmarks_stmt = select(Bookmark.post_id).where(
-        Bookmark.user_id == user_id,
-        Bookmark.post_id.in_(post_ids),
-    )
-    bookmarked_post_ids = frozenset((await db.execute(bookmarks_stmt)).scalars().all())
-
-    profile_id = (
-        await db.execute(select(Profile.id).where(Profile.user_id == user_id))
-    ).scalar_one_or_none()
-
-    reposted_post_ids: frozenset[UUID] = frozenset()
-    if profile_id is not None:
-        repost_stmt = select(Repost.post_id).where(
-            Repost.profile_id == profile_id,
-            Repost.post_id.in_(post_ids),
+    rows = (
+        await db.execute(
+            stmt,
+            {
+                "post_ids": post_ids,
+                "user_id": user_id,
+            },
         )
-        reposted_post_ids = frozenset((await db.execute(repost_stmt)).scalars().all())
+    ).all()
+
+    user_reactions: list[tuple[UUID, ReactionType]] = []
+    bookmarked_post_ids: set[UUID] = set()
+    reposted_post_ids: set[UUID] = set()
+    for post_id, reaction_type, is_bookmarked, is_reposted in rows:
+        coerced = _coerce_reaction_type(reaction_type)
+        if coerced is not None:
+            user_reactions.append((post_id, coerced))
+        if is_bookmarked:
+            bookmarked_post_ids.add(post_id)
+        if is_reposted:
+            reposted_post_ids.add(post_id)
 
     return PostEngagementFlags(
-        user_reactions=user_reactions,
-        reposted_post_ids=reposted_post_ids,
-        bookmarked_post_ids=bookmarked_post_ids,
+        user_reactions=tuple(user_reactions),
+        reposted_post_ids=frozenset(reposted_post_ids),
+        bookmarked_post_ids=frozenset(bookmarked_post_ids),
     )

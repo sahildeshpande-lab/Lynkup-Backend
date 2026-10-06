@@ -48,6 +48,9 @@ from core.push import send_push_to_devices
 
 logger = logging.getLogger(__name__)
 
+IN_APP_NOTIFICATIONS_DISABLED_CODE = "IN_APP_NOTIFICATIONS_DISABLED"
+IN_APP_NOTIFICATIONS_DISABLED_MESSAGE = "In-app notifications are turned off. Please turn them on to view your available notifications."
+
 _FIREBASE_TOPICS_KEY = "firebase_topics"
 
 # User-facing post moderation notification types (rows live in notification_types).
@@ -55,6 +58,12 @@ POST_FLAGGED = "POST_FLAGGED"
 POST_REINSTATED = "POST_REINSTATED"
 POST_REJECTED = "POST_REJECTED"
 ACCOUNT_STATUS_CHANGED = "ACCOUNT_STATUS_CHANGED"
+POST_UPDATED = "POST_UPDATED"
+POST_ASSIGNED_MODERATOR = "POST_ASSIGNED_MODERATOR"
+POST_ASSIGNED_SUPERADMIN = "POST_ASSIGNED_SUPERADMIN"
+POST_RECOGNITION = "POST_RECOGNITION"
+LEARNING_SPOTLIGHT_RECOMMENDED = "LEARNING_SPOTLIGHT_RECOMMENDED"
+CONNECTION_REMINDER = "CONNECTION_REMINDER"
 
 _POST_AUTHOR_NOTIFICATION_COPY: dict[str, tuple[str, str]] = {
     POST_FLAGGED: (
@@ -67,7 +76,7 @@ _POST_AUTHOR_NOTIFICATION_COPY: dict[str, tuple[str, str]] = {
     ),
     POST_REJECTED: (
         "Post Rejected",
-        "Your post has been rejected by our moderation team.",
+        "Your post has been deleted by our moderation team.",
     ),
 }
 
@@ -81,17 +90,98 @@ _POST_AUTHOR_TYPE_DESCRIPTIONS: dict[str, str] = {
 async def _merged_category_preferences(
     db: AsyncSession,
     existing: dict[str, Any] | None,
+    *,
+    email_preferences: dict[str, Any] | None = None,
 ) -> dict[str, bool]:
     """
     Active categories from DB as defaults (True), overlaid with the user's stored
     values. Inactive categories are excluded even if present in stored JSON.
+
+    Always includes ``weekly_lynkup_request_reminder`` (push/in-app LynkUp digest).
+    If that key is absent from stored category prefs but present on legacy
+    ``email_preferences``, the email value is migrated into the category map.
     """
+    from apps.notifications.email_preferences import (
+        CATEGORY_PREF_WEEKLY_LYNKUP_REQUEST_REMINDER,
+        EXTRA_CATEGORY_PREFERENCE_DEFAULTS,
+    )
+
     merged = dict(await get_default_category_preferences(db))
+    merged.update(EXTRA_CATEGORY_PREFERENCE_DEFAULTS)
     if existing:
         for key in list(merged.keys()):
             if key in existing:
-                merged[key] = bool(existing[key])
+                merged[key] = _coerce_preference_bool(existing[key], default=True)
+            elif key == CATEGORY_PREF_WEEKLY_LYNKUP_REQUEST_REMINDER:
+                upper = key.upper()
+                if upper in existing:
+                    merged[key] = _coerce_preference_bool(existing[upper], default=True)
+    weekly_key = CATEGORY_PREF_WEEKLY_LYNKUP_REQUEST_REMINDER
+    stored_has_weekly = bool(
+        existing
+        and (weekly_key in existing or weekly_key.upper() in existing)
+    )
+    if (
+        not stored_has_weekly
+        and email_preferences
+        and weekly_key in email_preferences
+    ):
+        merged[weekly_key] = _coerce_preference_bool(
+            email_preferences[weekly_key], default=True
+        )
     return merged
+
+
+def _category_preference_key(notification_type: str) -> str:
+    """Map notification type codes to preference keys when they differ."""
+    from apps.notifications.email_preferences import (
+        CATEGORY_PREF_WEEKLY_LYNKUP_REQUEST_REMINDER,
+    )
+
+    if notification_type == CONNECTION_REMINDER:
+        return CATEGORY_PREF_WEEKLY_LYNKUP_REQUEST_REMINDER
+    return notification_type
+
+
+def _coerce_preference_bool(value: Any, *, default: bool = True) -> bool:
+    """Normalize JSON preference values (bool/int/str) to a real bool."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
+def is_weekly_lynkup_reminder_enabled(
+    category_preferences: dict[str, Any] | None,
+    *,
+    email_preferences: dict[str, Any] | None = None,
+) -> bool:
+    """Return whether pending LynkUp reminder push/in-app is enabled."""
+    from apps.notifications.email_preferences import (
+        CATEGORY_PREF_WEEKLY_LYNKUP_REQUEST_REMINDER,
+    )
+
+    key = CATEGORY_PREF_WEEKLY_LYNKUP_REQUEST_REMINDER
+    stored = category_preferences or {}
+    if key in stored:
+        return _coerce_preference_bool(stored[key], default=True)
+    upper = key.upper()
+    if upper in stored:
+        return _coerce_preference_bool(stored[upper], default=True)
+    # Legacy location before the preference moved to category_preferences.
+    email_stored = email_preferences or {}
+    if key in email_stored:
+        return _coerce_preference_bool(email_stored[key], default=True)
+    return True
 
 
 async def _is_category_enabled(
@@ -99,8 +189,33 @@ async def _is_category_enabled(
     preferences,
     notification_type: str,
 ) -> bool:
-    categories = await _merged_category_preferences(db, preferences.category_preferences)
-    return bool(categories.get(notification_type, True))
+    if notification_type == CONNECTION_REMINDER:
+        return is_weekly_lynkup_reminder_enabled(
+            getattr(preferences, "category_preferences", None),
+            email_preferences=getattr(preferences, "email_preferences", None),
+        )
+
+    categories = await _merged_category_preferences(
+        db,
+        preferences.category_preferences,
+        email_preferences=getattr(preferences, "email_preferences", None),
+    )
+    return _coerce_preference_bool(
+        categories.get(_category_preference_key(notification_type), True),
+        default=True,
+    )
+
+
+def _post_id_from_payload(payload: dict[str, Any] | None) -> str | None:
+    if not payload:
+        return None
+    post_id = payload.get("post_id")
+    if post_id:
+        return str(post_id)
+    deep_link = payload.get("deep_link")
+    if isinstance(deep_link, dict) and deep_link.get("post_id"):
+        return str(deep_link["post_id"])
+    return None
 
 
 def _to_notification_item(
@@ -119,6 +234,7 @@ def _to_notification_item(
     else:
         is_read = notification.is_read
         read_at = notification.read_at
+    payload = notification.deep_link_payload
     return NotificationItem(
         id=notification.id,
         notification_type=type_name,
@@ -126,7 +242,8 @@ def _to_notification_item(
         campaign_id=notification.campaign_id,
         title=notification.title,
         body=notification.body,
-        deep_link_payload=notification.deep_link_payload,
+        deep_link_payload=payload,
+        post_id=_post_id_from_payload(payload),
         is_read=is_read,
         read_at=read_at,
         created_at=notification.created_at,
@@ -164,7 +281,8 @@ async def _user_registered_at(db: AsyncSession, user_id: UUID) -> datetime | Non
 
 def _broadcast_sent_at(notification: Notification) -> datetime | None:
     """Effective send time for a broadcast (campaign.sent_at when present)."""
-    campaign = getattr(notification, "campaign", None)
+    # Prefer already-loaded campaign; never trigger async lazy-load here.
+    campaign = notification.__dict__.get("campaign")
     sent_at = getattr(campaign, "sent_at", None) if campaign is not None else None
     return _as_aware_utc(sent_at) or _as_aware_utc(
         getattr(notification, "created_at", None)
@@ -216,15 +334,18 @@ async def _list_unified_notifications_for_user(
     user_id: UUID,
     *,
     is_read: bool | None = None,
+    preference: Any | None = None,
 ) -> list[tuple[Notification, bool, bool, Any]]:
     """Return (notification, is_broadcast, is_read, read_at) tuples newest-first."""
-    preference = await _get_or_create_preferences(db, user_id)
+    if preference is None:
+        preference = await _get_or_create_preferences(db, user_id)
     if not preference.in_app_enabled:
         return []
 
     enabled_categories = await _merged_category_preferences(
         db,
         preference.category_preferences,
+        email_preferences=getattr(preference, "email_preferences", None),
     )
 
     personal = await list_personal_notifications_for_user(
@@ -240,6 +361,17 @@ async def _list_unified_notifications_for_user(
 
     broadcasts = await list_broadcast_notifications(db)
     user_registered_at = await _user_registered_at(db, user_id)
+
+    broadcast_campaign_ids = [
+        notification.campaign_id
+        for notification in broadcasts
+        if notification.campaign_id is not None
+    ]
+    audience_by_campaign = await get_campaign_audience_for_user(
+        db,
+        user_id,
+        broadcast_campaign_ids,
+    )
 
     user_topics: set[str] | None = None
     visible_broadcasts: list[Notification] = []
@@ -257,23 +389,22 @@ async def _list_unified_notifications_for_user(
         ):
             continue
         if type_name == "TOPIC":
+            campaign_id = notification.campaign_id
+            in_audience = bool(
+                campaign_id is not None and campaign_id in audience_by_campaign
+            )
             if user_topics is None:
                 user_topics = await _user_topic_set(db, user_id)
-            if not _is_broadcast_visible_to_user(
+            topic_match = _is_broadcast_visible_to_user(
                 notification,
                 user_topics=user_topics,
                 user_registered_at=user_registered_at,
-            ):
+            )
+            if not (in_audience or topic_match):
                 continue
         elif type_name != "ANNOUNCEMENT":
             continue
         visible_broadcasts.append(notification)
-
-    audience_by_campaign = await get_campaign_audience_for_user(
-        db,
-        user_id,
-        [notification.campaign_id for notification in visible_broadcasts if notification.campaign_id],
-    )
 
     merged: list[tuple[Notification, bool, bool, Any]] = [
         (row, False, row.is_read, row.read_at) for row in personal
@@ -295,6 +426,15 @@ async def _list_unified_notifications_for_user(
     return merged
 
 
+def _notification_list_reason(*, in_app_enabled: bool) -> dict[str, str]:
+    if in_app_enabled:
+        return {}
+    return {
+        "code": IN_APP_NOTIFICATIONS_DISABLED_CODE,
+        "message": IN_APP_NOTIFICATIONS_DISABLED_MESSAGE,
+    }
+
+
 def _notification_type_enabled(
     notification: Notification,
     enabled_categories: dict[str, bool],
@@ -304,23 +444,38 @@ def _notification_type_enabled(
         type_name = notification.notification_type.name
     if not type_name:
         return True
-    return bool(enabled_categories.get(type_name, True))
+    return bool(enabled_categories.get(_category_preference_key(type_name), True))
 
 
 async def _get_or_create_preferences(db: AsyncSession, user_id: UUID):
+    from apps.notifications.email_preferences import (
+        EXTRA_CATEGORY_PREFERENCE_DEFAULTS,
+        merge_email_preferences,
+    )
+
     preference = await get_preferences_by_user_id(db, user_id)
     if preference is not None:
         # Ensure newly added active categories appear; drop deactivated from the view.
-        merged = await _merged_category_preferences(db, preference.category_preferences)
-        if merged != (preference.category_preferences or {}):
+        merged = await _merged_category_preferences(
+            db,
+            preference.category_preferences,
+            email_preferences=preference.email_preferences,
+        )
+        merged_email = merge_email_preferences(preference.email_preferences)
+        needs_update = merged != (preference.category_preferences or {}) or merged_email != (
+            preference.email_preferences or {}
+        )
+        if needs_update:
             preference = await persist_update_preferences(
                 db,
                 preference,
                 category_preferences=merged,
+                email_preferences=merged_email,
             )
         return preference
 
     defaults = await get_default_category_preferences(db)
+    defaults = {**defaults, **EXTRA_CATEGORY_PREFERENCE_DEFAULTS}
     return await create_preferences(
         db,
         user_id=user_id,
@@ -333,6 +488,8 @@ async def get_preferences(
     *,
     user_id: UUID,
 ) -> NotificationPreferencesResponse:
+    from apps.notifications.email_preferences import merge_email_preferences
+
     preference = await _get_or_create_preferences(db, user_id)
     await db.commit()
     return success_response(
@@ -340,9 +497,11 @@ async def get_preferences(
         NotificationPreferencesData(
             push_enabled=preference.push_enabled,
             in_app_enabled=preference.in_app_enabled,
+            email_preferences=merge_email_preferences(preference.email_preferences),
             category_preferences=await _merged_category_preferences(
                 db,
                 preference.category_preferences,
+                email_preferences=preference.email_preferences,
             ),
         ),
         response_cls=NotificationPreferencesResponse,
@@ -355,6 +514,11 @@ async def update_preferences(
     user_id: UUID,
     payload: UpdateNotificationPreferencesRequest,
 ) -> NotificationPreferencesResponse:
+    from apps.notifications.email_preferences import (
+        EXTRA_CATEGORY_PREFERENCE_DEFAULTS,
+        merge_email_preferences,
+    )
+
     preference = await _get_or_create_preferences(db, user_id)
 
     merged_categories = None
@@ -362,11 +526,24 @@ async def update_preferences(
         merged_categories = await _merged_category_preferences(
             db,
             preference.category_preferences,
+            email_preferences=preference.email_preferences,
         )
+        extra_keys = set(EXTRA_CATEGORY_PREFERENCE_DEFAULTS)
         for key, value in payload.category_preferences.items():
-            key_str = str(key).strip().upper()
+            key_raw = str(key).strip()
+            key_lower = key_raw.lower()
+            if key_lower in extra_keys:
+                merged_categories[key_lower] = bool(value)
+                continue
+            key_str = key_raw.upper()
             if key_str in merged_categories:
                 merged_categories[key_str] = bool(value)
+
+    merged_email = None
+    if payload.email_preferences is not None:
+        merged_email = merge_email_preferences(preference.email_preferences)
+        for key, value in payload.email_preferences.items():
+            merged_email[key] = bool(value)
 
     preference = await persist_update_preferences(
         db,
@@ -374,6 +551,7 @@ async def update_preferences(
         push_enabled=payload.push_enabled,
         in_app_enabled=payload.in_app_enabled,
         category_preferences=merged_categories,
+        email_preferences=merged_email,
     )
     await db.commit()
     await db.refresh(preference)
@@ -383,9 +561,11 @@ async def update_preferences(
         NotificationPreferencesData(
             push_enabled=preference.push_enabled,
             in_app_enabled=preference.in_app_enabled,
+            email_preferences=merge_email_preferences(preference.email_preferences),
             category_preferences=await _merged_category_preferences(
                 db,
                 preference.category_preferences,
+                email_preferences=preference.email_preferences,
             ),
         ),
         response_cls=NotificationPreferencesResponse,
@@ -400,12 +580,30 @@ async def list_notifications(
     page_size: int | None = None,
     is_read: bool | None = None,
 ) -> NotificationListResponse:
+    preference = await _get_or_create_preferences(db, user_id)
+    reason = _notification_list_reason(in_app_enabled=preference.in_app_enabled)
     merged = await _list_unified_notifications_for_user(
         db,
         user_id,
         is_read=is_read,
+        preference=preference,
     )
+    # Persist any preference create/merge done while building the inbox.
+    await db.commit()
     total_items = len(merged)
+
+    if is_read is None:
+        total_unread = sum(1 for _, _, is_read_value, _ in merged if not is_read_value)
+    elif is_read is False:
+        total_unread = total_items
+    else:
+        all_unread = await _list_unified_notifications_for_user(
+            db,
+            user_id,
+            is_read=False,
+            preference=preference,
+        )
+        total_unread = len(all_unread)
 
     paginate = page is not None or page_size is not None
     if paginate:
@@ -423,12 +621,21 @@ async def list_notifications(
             )
             for row, is_broadcast, is_read_value, read_at_value in page_rows
         ]
-        data = build_paginated_response(
+        paginated_dict = build_paginated_response(
             items,
             resolved_page,
             resolved_page_size,
             total_items,
         ).model_dump(mode="json")
+        data = {
+            "items": paginated_dict["items"],
+            "Totalcount": total_unread,
+            "page": paginated_dict["page"],
+            "pageSize": paginated_dict["pageSize"],
+            "totalItems": paginated_dict["totalItems"],
+            "totalPages": paginated_dict["totalPages"],
+            "reason": reason,
+        }
     else:
         items = [
             _to_notification_item(
@@ -439,7 +646,11 @@ async def list_notifications(
             )
             for row, is_broadcast, is_read_value, read_at_value in merged
         ]
-        data = {"items": [item.model_dump(mode="json") for item in items]}
+        data = {
+            "items": [item.model_dump(mode="json") for item in items],
+            "Totalcount": total_unread,
+            "reason": reason,
+        }
 
     return success_response(
         "Notifications fetched successfully.",
@@ -481,13 +692,48 @@ async def mark_as_read(
             response_cls=MarkNotificationReadResponse,
         )
 
+    # Match list visibility: ANNOUNCEMENT always (post-registration);
+    # TOPIC when user is in campaign audience or has a Firebase topic match.
     user_registered_at = await _user_registered_at(db, user_id)
-    user_topics = await _user_topic_set(db, user_id)
-    if not _is_broadcast_visible_to_user(
+    if not _is_broadcast_after_registration(
         broadcast,
-        user_topics=user_topics,
         user_registered_at=user_registered_at,
     ):
+        return error_response(
+            "Notification not found.",
+            response_cls=MarkNotificationReadResponse,
+        )
+
+    type_name = (
+        broadcast.notification_type.name
+        if getattr(broadcast, "notification_type", None) is not None
+        else None
+    )
+    if type_name == "TOPIC":
+        campaign_ids = (
+            [broadcast.campaign_id] if broadcast.campaign_id is not None else []
+        )
+        audience_by_campaign = await get_campaign_audience_for_user(
+            db,
+            user_id,
+            campaign_ids,
+        )
+        in_audience = bool(
+            broadcast.campaign_id is not None
+            and broadcast.campaign_id in audience_by_campaign
+        )
+        user_topics = await _user_topic_set(db, user_id)
+        topic_match = _is_broadcast_visible_to_user(
+            broadcast,
+            user_topics=user_topics,
+            user_registered_at=user_registered_at,
+        )
+        if not (in_audience or topic_match):
+            return error_response(
+                "Notification not found.",
+                response_cls=MarkNotificationReadResponse,
+            )
+    elif type_name != "ANNOUNCEMENT":
         return error_response(
             "Notification not found.",
             response_cls=MarkNotificationReadResponse,
@@ -557,6 +803,7 @@ async def create_notification(
     sender_user_id: UUID | None = None,
     campaign_id: UUID | None = None,
     extra: dict[str, Any] | None = None,
+    send_push: bool = True,
 ) -> Notification | None:
     """
     Common entry point for creating in-app + push notifications.
@@ -587,6 +834,14 @@ async def create_notification(
         category_enabled,
     )
 
+    if type_name == CONNECTION_REMINDER and not category_enabled:
+        logger.info(
+            "LynkUp reminder skipped recipient_user_id=%s "
+            "reason=weekly_lynkup_request_reminder_disabled",
+            recipient_user_id,
+        )
+        return None
+
     notification: Notification | None = None
     data_payload: dict[str, Any] = NotificationPayloadBuilder.build(
         notification_type=type_name,
@@ -595,7 +850,14 @@ async def create_notification(
         extra=extra,
     )
 
-    if preference.in_app_enabled and category_enabled:
+    # CONNECTION_REMINDER is gated by weekly_lynkup_request_reminder (category_enabled).
+    # Always persist an in-app row when that preference is on so the reminder is
+    # visible and the producer can confirm delivery. Other types still honor
+    # in_app_enabled.
+    should_persist_in_app = category_enabled and (
+        preference.in_app_enabled or type_name == CONNECTION_REMINDER
+    )
+    if should_persist_in_app:
         notification = await persist_notification(
             db,
             recipient_user_id=recipient_user_id,
@@ -615,7 +877,9 @@ async def create_notification(
         db.add(notification)
         await db.flush()
 
-    if preference.push_enabled and category_enabled:
+    # Push requires global push + category. For CONNECTION_REMINDER the category
+    # key is weekly_lynkup_request_reminder (off => no push delivery).
+    if send_push and preference.push_enabled and category_enabled:
         try:
             targets = await get_active_push_targets_for_users(db, [recipient_user_id])
             logger.info(
@@ -650,6 +914,12 @@ async def create_notification(
                 type_name,
                 recipient_user_id,
             )
+    elif not send_push:
+        logger.info(
+            "Push notification skipped type=%s recipient_user_id=%s reason=admin_push_disabled",
+            type_name,
+            recipient_user_id,
+        )
     else:
         logger.info(
             "Push notification skipped type=%s recipient_user_id=%s push_enabled=%s category_enabled=%s",
@@ -681,7 +951,11 @@ async def _ensure_notification_type(
     *,
     description: str | None = None,
 ) -> Any:
-    """Get or create a notification_types row (data only — no schema change)."""
+    """Get or create a notification_types row (data only — no schema change).
+
+    Uses flush (not commit) so callers that own the transaction — e.g. the
+    connection-reminder producer — are not disrupted by a nested commit.
+    """
     from apps.notifications.db_models import NotificationType
     from common.time import utc_now
 
@@ -698,13 +972,19 @@ async def _ensure_notification_type(
     )
     db.add(row)
     try:
-        await db.commit()
+        await db.flush()
         await db.refresh(row)
         logger.info("Seeded notification type name=%s", name)
         return row
     except Exception:
-        await db.rollback()
-        # Concurrent insert — re-read.
+        # Concurrent insert or transient failure — re-read without rolling back
+        # the caller's broader transaction when possible.
+        try:
+            await db.refresh(row)
+            if getattr(row, "id", None) is not None:
+                return row
+        except Exception:
+            pass
         existing = await get_notification_type_by_name(db, name)
         if existing is not None:
             return existing
@@ -815,3 +1095,370 @@ async def notify_account_status(
             status_value,
         )
         return None
+
+
+async def notify_post_recognition(
+    db: AsyncSession,
+    *,
+    author_user_id: UUID,
+    post_id: UUID,
+    milestone: int,
+    first_name: str | None = None,
+) -> Notification | None:
+    """Notify a post author that their post reached a like milestone."""
+    if milestone <= 0:
+        return None
+
+    greeting_name = (first_name or "").strip()
+    if greeting_name:
+        body = f"{greeting_name}, your post is getting recognized! Keep it up! 🔥"
+    else:
+        body = "Your post is getting recognized! Keep it up! 🔥"
+    title = "Post Recognition"
+
+    try:
+        ensured = await _ensure_notification_type(
+            db,
+            POST_RECOGNITION,
+            description="Post reached a configured like milestone",
+        )
+        if ensured is None:
+            return None
+
+        return await create_notification(
+            db,
+            recipient_user_id=author_user_id,
+            notification_type=POST_RECOGNITION,
+            title=title,
+            body=body,
+            extra={
+                "post_id": str(post_id),
+                "milestone": milestone,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Failed to notify post recognition author_user_id=%s post_id=%s milestone=%s",
+            author_user_id,
+            post_id,
+            milestone,
+        )
+        return None
+
+
+def _learning_spotlight_recommended_body(greeting_name: str | None) -> str:
+    name = (greeting_name or "").strip()
+    if name:
+        return f"{name}, your Learning Spotlight articles are ready. Happy Learning 😊"
+    return "Learning Spotlight articles are ready. Happy Learning 😊"
+
+
+async def notify_learning_spotlight_recommended(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    spotlight_type: object,
+    cycle_day: int,
+    first_name: str | None = None,
+    send_push: bool = True,
+) -> Notification | None:
+    """Notify a user that a Learning Spotlight recommendation is ready."""
+    if cycle_day <= 0:
+        return None
+
+    type_value = (
+        spotlight_type.value
+        if hasattr(spotlight_type, "value")
+        else str(spotlight_type or "").strip()
+    )
+    greeting_name = (first_name or "").strip().title()
+    body = _learning_spotlight_recommended_body(greeting_name)
+    title = "Learning Spotlight"
+
+    try:
+        if first_name is None:
+            from apps.profiles.db_models import Profile
+
+            profile_first_name = (
+                await db.execute(select(Profile.first_name).where(Profile.user_id == user_id))
+            ).scalar_one_or_none()
+            if isinstance(profile_first_name, str) and profile_first_name.strip():
+                greeting_name = profile_first_name.strip()
+                body = _learning_spotlight_recommended_body(greeting_name)
+
+        ensured = await _ensure_notification_type(
+            db,
+            LEARNING_SPOTLIGHT_RECOMMENDED,
+            description="Learning Spotlight recommendation generated for user",
+        )
+        if ensured is None:
+            return None
+
+        return await create_notification(
+            db,
+            recipient_user_id=user_id,
+            notification_type=LEARNING_SPOTLIGHT_RECOMMENDED,
+            title=title,
+            body=body,
+            extra={
+                "spotlight_type": type_value,
+                "cycle_day": cycle_day,
+            },
+            send_push=send_push,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to notify learning spotlight recommendation user_id=%s cycle_day=%s",
+            user_id,
+            cycle_day,
+        )
+        return None
+
+
+async def notify_connection_reminder(
+    db: AsyncSession,
+    *,
+    recipient_user_id: UUID,
+    pending_count: int,
+    sender_name: str | None = None,
+    sender_user_id: UUID | None = None,
+    send_push: bool = True,
+) -> Notification | None:
+    """Notify a user that they have pending connection (LynkUp) requests."""
+    if pending_count <= 0:
+        return None
+
+    title = "LynkUp Reminder"
+    if pending_count == 1 and sender_name and sender_name.strip():
+        body = f"You have a pending LynkUp request from {sender_name.strip()}."
+    elif pending_count == 1:
+        body = "You have a pending LynkUp request waiting for your response."
+    else:
+        body = f"You have {pending_count} pending LynkUp requests waiting for your response."
+
+    try:
+        ensured = await _ensure_notification_type(
+            db,
+            CONNECTION_REMINDER,
+            description="Weekly reminder for pending connection requests",
+        )
+        if ensured is None:
+            return None
+
+        return await create_notification(
+            db,
+            recipient_user_id=recipient_user_id,
+            notification_type=CONNECTION_REMINDER,
+            title=title,
+            body=body,
+            sender_user_id=sender_user_id,
+            extra={"pending_count": pending_count},
+            send_push=send_push,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to notify connection reminder recipient_user_id=%s",
+            recipient_user_id,
+        )
+        return None
+
+
+async def _resolve_user_full_name(db: AsyncSession, user_id: UUID) -> str:
+    from apps.accounts.db_models import User
+    from apps.profiles.db_models import Profile
+
+    stmt = (
+        select(User, Profile)
+        .outerjoin(Profile, Profile.user_id == User.id)
+        .where(User.id == user_id)
+    )
+    row = (await db.execute(stmt)).first()
+    if row is not None:
+        user, profile = row
+        if profile is not None:
+            parts = [
+                p.strip()
+                for p in (getattr(profile, "first_name", None), getattr(profile, "last_name", None))
+                if p and p.strip()
+            ]
+            if parts:
+                return " ".join(parts)
+            if getattr(profile, "username", None) and profile.username.strip():
+                return profile.username.strip()
+        if user is not None and getattr(user, "email", None):
+            return user.email
+    return "User"
+
+
+async def _fetch_superadmin_user_ids(db: AsyncSession) -> list[UUID]:
+    from apps.accounts.db_models import Role, User, UserRole
+
+    stmt = (
+        select(User.id)
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(Role.name == "superadmin", User.is_deleted.is_(False))
+    )
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def notify_post_assigned(
+    db: AsyncSession,
+    *,
+    post_id: UUID,
+    author_user_id: UUID,
+    moderator_id: UUID,
+) -> None:
+    """
+    Notify the assigned moderator and superadmins when a post is assigned for review.
+    """
+    try:
+        author_name = await _resolve_user_full_name(db, author_user_id)
+        moderator_name = await _resolve_user_full_name(db, moderator_id)
+
+        # 1. Notify assigned moderator
+        await _ensure_notification_type(
+            db,
+            POST_ASSIGNED_MODERATOR,
+            description="Post assigned to moderator for review",
+        )
+        mod_title = "New Post Assigned - Moderator"
+        mod_body = f"{author_name} created a new post and it has been assigned to you for moderation."
+        await create_notification(
+            db,
+            recipient_user_id=moderator_id,
+            notification_type=POST_ASSIGNED_MODERATOR,
+            title=mod_title,
+            body=mod_body,
+            sender_user_id=author_user_id,
+            extra={
+                "post_id": str(post_id),
+                "author_user_id": str(author_user_id),
+                "moderator_id": str(moderator_id),
+            },
+        )
+
+        # 2. Notify all superadmins
+        await _ensure_notification_type(
+            db,
+            POST_ASSIGNED_SUPERADMIN,
+            description="Post assigned to moderator (superadmin notification)",
+        )
+        superadmin_ids = await _fetch_superadmin_user_ids(db)
+        sa_title = "New Post Assigned - Superadmin"
+        sa_body = f"{author_name} created a new post and it has been assigned to {moderator_name} for moderation."
+        for sa_id in superadmin_ids:
+            if sa_id == moderator_id:
+                continue
+            await create_notification(
+                db,
+                recipient_user_id=sa_id,
+                notification_type=POST_ASSIGNED_SUPERADMIN,
+                title=sa_title,
+                body=sa_body,
+                sender_user_id=author_user_id,
+                extra={
+                    "post_id": str(post_id),
+                    "author_user_id": str(author_user_id),
+                    "moderator_id": str(moderator_id),
+                },
+            )
+
+        # 3. Record in admin_activity_logs (for /admin/notification and /admin/activity-logs)
+        from apps.administration.repositories.admin_activity_log_repository import (
+            create_admin_activity_log_record,
+        )
+
+        log_user_id = superadmin_ids[0] if superadmin_ids else author_user_id
+        await create_admin_activity_log_record(
+            db,
+            user_id=log_user_id,
+            role="superadmin",
+            action="assign",
+            module="post",
+            record_id=post_id,
+            description=sa_body,
+            metadata={
+                "post_id": str(post_id),
+                "author_user_id": str(author_user_id),
+                "moderator_id": str(moderator_id),
+            },
+        )
+        await db.commit()
+    except Exception:
+        logger.exception(
+            "Failed to send post assigned notifications post_id=%s author_user_id=%s moderator_id=%s",
+            post_id,
+            author_user_id,
+            moderator_id,
+        )
+
+
+async def notify_post_edited(
+    db: AsyncSession,
+    *,
+    post_id: UUID,
+    author_user_id: UUID,
+    moderator_id: UUID | None = None,
+) -> None:
+    """
+    Notify superadmins and the assigned moderator when a user updates/edits their post.
+    """
+    try:
+        author_name = await _resolve_user_full_name(db, author_user_id)
+        await _ensure_notification_type(
+            db,
+            POST_UPDATED,
+            description="User updated a post in review",
+        )
+        title = "Post Updated"
+        body = f"{author_name} Updated the post"
+
+        recipients: set[UUID] = set()
+        if moderator_id is not None:
+            recipients.add(moderator_id)
+        superadmin_ids = await _fetch_superadmin_user_ids(db)
+        recipients.update(superadmin_ids)
+
+        for recipient_id in recipients:
+            await create_notification(
+                db,
+                recipient_user_id=recipient_id,
+                notification_type=POST_UPDATED,
+                title=title,
+                body=body,
+                sender_user_id=author_user_id,
+                extra={
+                    "post_id": str(post_id),
+                    "author_user_id": str(author_user_id),
+                },
+            )
+
+        # Record in admin_activity_logs (for /admin/notification and /admin/activity-logs)
+        from apps.administration.repositories.admin_activity_log_repository import (
+            create_admin_activity_log_record,
+        )
+
+        log_user_id = superadmin_ids[0] if superadmin_ids else author_user_id
+        await create_admin_activity_log_record(
+            db,
+            user_id=log_user_id,
+            role="superadmin",
+            action="update",
+            module="post",
+            record_id=post_id,
+            description=body,
+            metadata={
+                "post_id": str(post_id),
+                "author_user_id": str(author_user_id),
+                "moderator_id": str(moderator_id) if moderator_id else None,
+            },
+        )
+        await db.commit()
+    except Exception:
+        logger.exception(
+            "Failed to send post updated notifications post_id=%s author_user_id=%s",
+            post_id,
+            author_user_id,
+        )

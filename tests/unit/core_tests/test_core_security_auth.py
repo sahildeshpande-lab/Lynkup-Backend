@@ -13,6 +13,8 @@ from core.database.init import init_db
 
 from apps.accounts.db_models import User
 from common.enums import UserStatus
+from apps.administration.services.auth_service import _generate_admin_tokens
+from apps.administration.services.password_service import PASSWORD_HASHER
 from core.auth.config import settings as auth_settings
 from core.security.auth import (
     get_bearer_token,
@@ -111,7 +113,7 @@ async def test_get_current_user_db_states() -> None:
         async with async_session_factory() as session:
             with pytest.raises(ApiError) as exc:
                 await get_current_user(creds_access, session)
-            assert exc.value.message == "Account doesn't exist "
+            assert exc.value.message == "Account doesn't exist"
 
         # 3. User suspended state (not active)
         async with async_session_factory() as session:
@@ -206,84 +208,91 @@ async def test_get_current_moderator_or_viewer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_current_admin_paths() -> None:
-    try:
-        await init_db()
+async def test_get_current_admin_paths(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
 
-        async with async_session_factory() as session:
-            admin_id = uuid.uuid4()
-            admin = User(
-                id=admin_id,
-                email=f"admin_auth_{uuid.uuid4()}@example.com",
-                role="superadmin",
-                status="active",
-            )
-            session.add(admin)
-            await session.commit()
-            await session.refresh(admin)
+    from apps.administration.db_models import AdminSessionStatus
+    from apps.administration.services.auth_service import _admin_password_fingerprint
 
-            from apps.accounts.services import assign_user_role
-            await assign_user_role(session, admin, "superadmin")
-            await session.commit()
+    admin_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    password_hash = PASSWORD_HASHER.hash("AdminPassword123!")
+    admin = User(
+        id=admin_id,
+        email=f"admin_auth_{uuid.uuid4()}@example.com",
+        password_hash=password_hash,
+        status=UserStatus.active,
+    )
+    admin.role = "superadmin"
+    admin_session = SimpleNamespace(
+        id=session_id,
+        user_id=admin_id,
+        status=AdminSessionStatus.ACTIVE.value,
+    )
 
-        access_payload = {
-            "sub": str(admin_id),
-            "type": "access",
-            "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
-        }
-        access_token = jwt.encode(
-            access_payload, auth_settings.jwt_secret, algorithm=auth_settings.jwt_algorithm
-        )
-        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=access_token)
+    access_token, _refresh_token, _jti = _generate_admin_tokens(admin, session_id=session_id)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=access_token)
+    request = SimpleNamespace(state=SimpleNamespace())
 
-        async with async_session_factory() as session:
-            db_admin = await get_current_admin(creds, session)
-            assert db_admin.id == admin_id
+    results = iter([admin, admin_session])
 
-        with pytest.raises(ApiError) as exc:
-            await get_current_admin(None, None)
-        assert exc.value.message == "Missing access token"
+    async def _execute(_stmt, *args, **kwargs):
+        value = next(results)
+        mock = MagicMock()
+        mock.scalar_one_or_none.return_value = value
+        return mock
 
-        refresh_payload = {
-            "sub": str(admin_id),
-            "type": "refresh",
-            "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
-        }
-        refresh_token = jwt.encode(
-            refresh_payload, auth_settings.jwt_secret, algorithm=auth_settings.jwt_algorithm
-        )
-        refresh_creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=refresh_token)
-        async with async_session_factory() as session:
-            with pytest.raises(ApiError) as exc:
-                await get_current_admin(refresh_creds, session)
-            assert exc.value.message == "Invalid access token"
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=_execute)
 
-        async with async_session_factory() as session:
-            user = User(
-                email=f"plain_user_{uuid.uuid4()}@example.com",
-                role="user",
-                status="active",
-            )
-            session.add(user)
-            await session.commit()
-            await session.refresh(user)
+    db_admin = await get_current_admin(request, creds, db)
+    assert db_admin.id == admin_id
+    assert request.state.admin_session_id == session_id
 
-            user_payload = {
-                "sub": str(user.id),
-                "type": "access",
-                "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
-            }
-            user_token = jwt.encode(
-                user_payload, auth_settings.jwt_secret, algorithm=auth_settings.jwt_algorithm
-            )
-            user_creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=user_token)
+    with pytest.raises(ApiError) as exc:
+        await get_current_admin(SimpleNamespace(state=SimpleNamespace()), None, None)
+    assert exc.value.message == "Missing access token"
 
-            with pytest.raises(ApiError) as exc:
-                await get_current_admin(user_creds, session)
-            assert exc.value.message == "Insufficient permissions"
+    refresh_payload = {
+        "sub": str(admin_id),
+        "type": "refresh",
+        "session_id": str(session_id),
+        "pf": _admin_password_fingerprint(password_hash),
+        "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
+    }
+    refresh_token = jwt.encode(
+        refresh_payload, auth_settings.jwt_secret, algorithm=auth_settings.jwt_algorithm
+    )
+    refresh_creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=refresh_token)
+    with pytest.raises(ApiError) as exc:
+        await get_current_admin(SimpleNamespace(state=SimpleNamespace()), refresh_creds, db)
+    assert exc.value.message == "Invalid access token"
 
-    finally:
-        await engine.dispose()
+    plain_user = User(
+        id=uuid.uuid4(),
+        email=f"plain_user_{uuid.uuid4()}@example.com",
+        status=UserStatus.active,
+    )
+    plain_user.role = "user"
+    user_payload = {
+        "sub": str(plain_user.id),
+        "type": "access",
+        "session_id": str(uuid.uuid4()),
+        "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
+    }
+    user_token = jwt.encode(
+        user_payload, auth_settings.jwt_secret, algorithm=auth_settings.jwt_algorithm
+    )
+    user_creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=user_token)
+
+    user_db = MagicMock()
+    user_result = MagicMock()
+    user_result.scalar_one_or_none.return_value = plain_user
+    user_db.execute = AsyncMock(return_value=user_result)
+    with pytest.raises(ApiError) as exc:
+        await get_current_admin(SimpleNamespace(state=SimpleNamespace()), user_creds, user_db)
+    assert exc.value.message == "Insufficient permissions"
 
 
 @pytest.mark.asyncio
@@ -301,7 +310,7 @@ async def test_get_current_user_firebase_paths(monkeypatch) -> None:
         async with async_session_factory() as session:
             user = User(
                 firebase_uid=firebase_uid,
-                email=f"firebase_path_{uuid.uuid4()}@example.com",
+                email="firebase@example.com",
                 role="user",
                 status="active",
             )

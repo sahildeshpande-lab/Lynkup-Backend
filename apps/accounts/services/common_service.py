@@ -4,6 +4,8 @@ import os
 import secrets
 import jwt
 from datetime import datetime, timezone, timedelta
+from uuid import UUID
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 from sqlalchemy.orm import selectinload
@@ -12,7 +14,8 @@ from pwdlib.hashers.bcrypt import BcryptHasher
 from apps.accounts.db_models import Role, UserRole
 from apps.accounts.db_models import RefreshToken, SecurityEvent, SecurityEventType, TransactionalEmailLog, User
 from apps.profiles.db_models import Profile
-from common.enums import RegistrationType, UserStatus
+from common.enums import RegistrationType, UserStatus, format_user_status
+from common.exceptions import ApiError
 from core.auth.config import settings as auth_settings
 from ..schemas import AuthUserResponse
 JWT_SECRET = auth_settings.jwt_secret
@@ -25,10 +28,9 @@ def _now() -> datetime:
 
 
 def is_soft_deleted_user(user: User) -> bool:
-    """Return True when the account is soft-deleted / in deletion grace period."""
     return bool(
         getattr(user, "is_deleted", False)
-        or user.deleted_at is not None
+        or getattr(user, "deleted_at", None) is not None
         or user.status == UserStatus.deleting
     )
 
@@ -36,20 +38,32 @@ def is_soft_deleted_user(user: User) -> bool:
 def reactivate_soft_deleted_user(
     user: User,
     *,
-    now: datetime,
+    now: datetime | None = None,
     firebase_uid: str | None = None,
-) -> None:
-    """Clear soft-delete fields and optionally re-link a new Firebase UID.
-
-    Does not commit — caller owns the transaction.
+    status: UserStatus = UserStatus.active,
+) -> bool:
     """
-    user.status = UserStatus.active
-    user.is_deleted = False
-    user.deleted_at = None
-    user.purge_after = None
-    user.updated_at = now
-    if firebase_uid:
+    Clear scheduled-deletion flags so the user can sign in again.
+
+    Optionally relinks a new Firebase UID (common after Firebase user delete).
+    Returns True when the account was soft-deleted and has been reactivated.
+    """
+    timestamp = now or _now()
+    was_deleted = is_soft_deleted_user(user)
+    if not was_deleted and firebase_uid is None:
+        return False
+
+    if was_deleted:
+        user.is_deleted = False
+        user.deleted_at = None
+        user.purge_after = None
+        user.status = status
+
+    if firebase_uid is not None:
         user.firebase_uid = firebase_uid
+
+    user.updated_at = timestamp
+    return was_deleted
 
 
 async def _fetch_user_profile(db: AsyncSession, user: User) -> Profile | None:
@@ -59,7 +73,32 @@ async def _fetch_user_profile(db: AsyncSession, user: User) -> Profile | None:
 def _hash_password(password: str, username: str | None = None) -> str:
     return PASSWORD_HASHER.hash(password)
 
-def _generate_otp() -> str:
+def is_static_otp_account(email: str | None) -> bool:
+    """Return True when the email is the configured static-OTP test account."""
+    configured = (auth_settings.static_otp_email or "").strip().lower()
+    candidate = (email or "").strip().lower()
+    return bool(configured and candidate and candidate == configured)
+
+
+def can_reuse_stored_otp(user: User) -> bool:
+    """Static-OTP accounts may reuse a stored code only when it is the configured OTP."""
+    if not is_static_otp_account(getattr(user, "email", None)):
+        return True
+    return user.email_otp == auth_settings.static_otp_code
+
+
+def otp_matches(user: User, submitted_otp: str) -> bool:
+    """Compare a submitted OTP using static-OTP rules when they apply."""
+    if not user.email_otp:
+        return False
+    if is_static_otp_account(getattr(user, "email", None)):
+        return submitted_otp == auth_settings.static_otp_code
+    return user.email_otp == submitted_otp
+
+
+def _generate_otp(email: str | None = None) -> str:
+    if is_static_otp_account(email):
+        return auth_settings.static_otp_code
     return f"{secrets.randbelow(9000) + 1000}"
 
 async def _log_email_event(
@@ -160,7 +199,7 @@ def _build_auth_user_response(user: User, profile: Profile | None) -> AuthUserRe
         lastName=last_name,
         email=user.email,
         role=user.role,
-        status=user.status.value if hasattr(user.status, "value") else str(user.status),
+        status=format_user_status(user.status),
         isEmailVerified=(user.email_verified_at is not None),
         email_verified_at=user.email_verified_at,
         email_otp_created_at=user.email_otp_created_at,
@@ -194,6 +233,26 @@ def _as_aware_utc(value: datetime) -> datetime:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
 
+
+SOCIAL_EMAIL_MISMATCH_MESSAGE = (
+    "This Google/Apple account does not match your current email. "
+    "Sign in with your new email and password."
+)
+
+
+def firebase_email_matches_user(firebase_user: dict | None, user) -> bool:
+    """True when the verified Firebase token email matches the account email.
+
+    Empty token email (including the ``{uid}@firebase.local`` signup stub) is
+    never treated as a match for an existing user.
+    """
+    token_email = str((firebase_user or {}).get("email") or "").lower().strip()
+    db_email = str(getattr(user, "email", None) or "").lower().strip()
+    if not token_email or not db_email:
+        return False
+    return token_email == db_email
+
+
 async def log_security_event(
     db: AsyncSession,
     user_id,
@@ -213,6 +272,76 @@ async def log_security_event(
 class AccountExistsException(Exception):
     def __init__(self, registration_type: str):
         self.registration_type = registration_type
+
+
+from common.auth_messages import (
+    ACCOUNT_DOESNT_EXIST_MESSAGE,
+    PUBLIC_AUTH_ACCOUNT_EXISTS_MESSAGE,
+    STAFF_PUBLIC_AUTH_NOT_ALLOWED_MESSAGE,
+)
+SIGNUP_GENERIC_FAILURE_MESSAGE = "Unable to complete signup. Please try again."
+STAFF_APP_AUTH_ROLES = frozenset({"moderator", "viewer", "superadmin"})
+
+
+def _normalize_role_name(role: str | object) -> str:
+    if hasattr(role, "value"):
+        return str(role.value).lower()
+    return str(role).lower()
+
+
+def _existing_user_has_staff_role(user: User) -> bool:
+    """Detect staff roles from eagerly loaded ``user.roles`` assignments."""
+    roles = getattr(user, "roles", None) or []
+    for user_role in roles:
+        role = getattr(user_role, "role", None)
+        if role is None:
+            continue
+        role_name = getattr(role, "name", None)
+        if role_name and _normalize_role_name(role_name) in STAFF_APP_AUTH_ROLES:
+            return True
+    return False
+
+
+def is_staff_app_role(role: str | object) -> bool:
+    return _normalize_role_name(role) in STAFF_APP_AUTH_ROLES
+
+
+def ensure_public_signup_role(role: str | object) -> None:
+    """Public /auth/signup and /auth/social accept standard app users only."""
+    if _normalize_role_name(role) != "user":
+        raise ApiError(STAFF_PUBLIC_AUTH_NOT_ALLOWED_MESSAGE)
+
+
+async def user_has_staff_role(db: AsyncSession, user_id: UUID) -> bool:
+    """Return True when the user has a staff role assigned in ``user_roles``."""
+    stmt = (
+        select(Role.name)
+        .join(UserRole, UserRole.role_id == Role.id)
+        .where(UserRole.user_id == user_id)
+    )
+    role_names = (await db.execute(stmt)).scalars().all()
+    return any(is_staff_app_role(name) for name in role_names)
+
+
+# async def ensure_public_app_user(db: AsyncSession, user: User) -> None:
+#     """Public /auth/login and /auth/signup must not authenticate staff accounts."""
+#     if await user_has_staff_role(db, user.id):
+#         raise ApiError(ACCOUNT_DOESNT_EXIST_MESSAGE)
+
+def ensure_public_app_user(user: User) -> None:
+    """Public /auth/login and /auth/signup must not authenticate staff accounts."""
+    for user_role in user.roles or []:
+        role = user_role.role
+        if role and is_staff_app_role(role.name):
+            raise ApiError(ACCOUNT_DOESNT_EXIST_MESSAGE)
+
+
+async def get_role_from_db(db: AsyncSession, role_name: str) -> Role | None:
+    """Look up a role by name from the database without creating it."""
+    normalized = _normalize_role_name(role_name)
+    stmt = select(Role).where(Role.name == normalized)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
 
 async def assign_user_role(db: AsyncSession, user: User, role_name: str) -> None:
     from apps.accounts.db_models import Role, UserRole

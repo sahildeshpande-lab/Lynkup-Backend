@@ -32,6 +32,16 @@ def revoke_firebase_tokens(uid: str):
     initialize_firebase_app()
     auth.revoke_refresh_tokens(uid)
 
+
+def create_firebase_custom_token(uid: str) -> str:
+    """Mint a custom token so the calling client can refresh its Firebase session."""
+    initialize_firebase_app()
+    token = auth.create_custom_token(uid)
+    if isinstance(token, bytes):
+        return token.decode("utf-8")
+    return str(token)
+
+
 def disable_firebase_user(uid:str):
     initialize_firebase_app()
     auth.update_user(uid,disabled=True)
@@ -46,6 +56,37 @@ def update_firebase_password(uid:str,password:str):
     auth.update_user(uid,password=password)
 
 
+def update_firebase_email(uid: str, email: str) -> None:
+    """Update the email on an existing Firebase user; UID remains unchanged."""
+    initialize_firebase_app()
+    auth.update_user(uid, email=email, email_verified=False)
+
+
+_SOCIAL_PROVIDER_IDS = frozenset({"google.com", "apple.com"})
+
+
+def unlink_social_login_providers(uid: str) -> list[str]:
+    """Unlink Google/Apple when the Firebase user still has a password provider.
+
+    Social-only accounts are left linked so email change cannot lock them out.
+    """
+    initialize_firebase_app()
+    record = auth.get_user(uid)
+    providers = list(record.provider_data or [])
+    has_password = any(getattr(provider, "provider_id", None) == "password" for provider in providers)
+    social_ids: list[str] = []
+    seen: set[str] = set()
+    for provider in providers:
+        provider_id = getattr(provider, "provider_id", None)
+        if provider_id in _SOCIAL_PROVIDER_IDS and provider_id not in seen:
+            seen.add(provider_id)
+            social_ids.append(provider_id)
+    if not has_password or not social_ids:
+        return []
+    auth.update_user(uid, providers_to_delete=social_ids)
+    return social_ids
+
+
 def create_firebase_user(email: str, password: str, display_name: str | None = None):
     initialize_firebase_app()
     return auth.create_user(
@@ -57,8 +98,24 @@ def create_firebase_user(email: str, password: str, display_name: str | None = N
 
 
 def delete_firebase_user(uid: str):
+    delete_firebase_user_safely(uid)
+
+
+def delete_firebase_user_safely(firebase_uid: str | None) -> None:
+    """Delete a Firebase Auth user, ignoring missing users and logging other failures."""
+    if not firebase_uid:
+        return
+
     initialize_firebase_app()
-    auth.delete_user(uid)
+    try:
+        auth.delete_user(firebase_uid)
+    except auth.UserNotFoundError:
+        pass
+    except Exception:
+        logger.exception(
+            "Failed to delete Firebase user during signup cleanup. uid=%s",
+            firebase_uid,
+        )
 
 
 def _stringify_fcm_data(data: dict[str, Any] | None) -> dict[str, str] | None:

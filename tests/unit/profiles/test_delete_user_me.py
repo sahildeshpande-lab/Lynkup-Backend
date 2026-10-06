@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -24,38 +24,36 @@ def _user(*, status=UserStatus.active, is_deleted=False, deleted_at=None, fireba
 
 
 @pytest.mark.asyncio
-async def test_delete_user_me_soft_deletes_and_disables_firebase(mock_db, scalar_result):
+async def test_delete_user_me_soft_deletes_and_runs_side_effects(mock_db, scalar_result):
     user = _user()
     db = mock_db(scalar_result(None))
 
     with (
         patch.object(svc, "build_user_base_response", AsyncMock(return_value={"id": str(user.id)})),
         patch(
-            "apps.profiles.services.profile_service.disable_firebase_user",
-            create=True,
-        ),
-        patch("core.auth.services.disable_firebase_user") as disable_firebase,
-        patch(
             "apps.profiles.services.profile_stats_service.adjust_counts_for_deleting_user",
             AsyncMock(),
         ) as adjust_counts,
+        patch(
+            "apps.user_deletion.services.account_recovery_service.run_deletion_request_side_effects",
+            AsyncMock(),
+        ) as side_effects,
+        patch(
+            "apps.user_deletion.services.account_recovery_service.deletion_settings"
+        ) as ds,
     ):
-        # Patch where the service imports from
-        with patch(
-            "core.auth.services.disable_firebase_user",
-            disable_firebase,
-        ):
-            # Re-import path used inside the function
-            result = await svc.delete_user_me(user, db)
+        ds.account_purge_after_days = 30
+        result = await svc.delete_user_me(user, db)
 
     assert result["deleted"] is True
     assert user.status == UserStatus.deleting
     assert user.is_deleted is True
     assert user.deleted_at is not None
     assert user.purge_after is not None
+    assert user.purge_after - user.deleted_at == timedelta(days=30)
     db.commit.assert_awaited_once()
-    adjust_counts.assert_awaited_once_with(db, user.id)
-    disable_firebase.assert_called_once_with("firebase-uid")
+    adjust_counts.assert_not_awaited()
+    side_effects.assert_awaited_once()
 
 
 @pytest.mark.asyncio

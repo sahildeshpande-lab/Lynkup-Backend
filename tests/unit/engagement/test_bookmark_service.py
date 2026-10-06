@@ -129,17 +129,18 @@ async def test_fetch_post_engagement_flags_includes_bookmarks(mock_db, scalar_re
     user_id = uuid.uuid4()
     post_a = uuid.uuid4()
     post_b = uuid.uuid4()
-    profile_id = uuid.uuid4()
 
     db = mock_db(
-        FakeScalarResult(values=[]),
-        FakeScalarResult(values=[post_a]),
-        scalar_result(profile_id),
-        FakeScalarResult(values=[]),
+        FakeScalarResult(
+            values=[
+                (post_a, None, True, False),
+                (post_b, None, False, False),
+            ]
+        ),
     )
 
     flags = await fetch_post_engagement_flags(db, user_id, [post_a, post_b])
 
     assert post_a in flags.bookmarked_post_ids
     assert post_b not in flags.bookmarked_post_ids
-    assert db.execute.await_count == 4
+    assert db.execute.await_count == 1

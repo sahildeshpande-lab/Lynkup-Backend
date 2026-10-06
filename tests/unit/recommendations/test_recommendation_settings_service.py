@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -304,3 +304,256 @@ async def test_get_settings_with_history_returns_paginated_history() -> None:
     assert data["history"]["totalPages"] == 2
     assert len(data["history"]["items"]) == 1
     assert data["history"]["items"][0]["id"] == newer.id
+
+
+@pytest.mark.asyncio
+async def test_enable_sets_cycle_start_date_when_null() -> None:
+    """Case 1: first enable initializes cycle_start_date to today."""
+    existing = LearningRecommendationSettings(
+        is_enabled=False,
+        generation_frequency_days=2,
+        max_recommendations=10,
+        cycle_start_date=None,
+        updated_by=None,
+    )
+    session = _FakeSession(rows=[existing])
+    fixed_now = datetime(2026, 8, 23, 15, 30, tzinfo=timezone.utc)
+
+    with patch(
+        "apps.recommendations.services.recommendation_settings_service._utc_now",
+        return_value=fixed_now,
+    ):
+        updated = await RecommendationSettingsService().update_settings(
+            session,  # type: ignore[arg-type]
+            admin_user_id=uuid4(),
+            is_enabled=True,
+        )
+
+    assert updated.is_enabled is True
+    assert updated.cycle_start_date == date(2026, 8, 23)
+    assert settings_to_dict(updated)["cycle_start_date"] == date(2026, 8, 23)
+
+
+@pytest.mark.asyncio
+async def test_update_other_fields_keeps_existing_cycle_start_date() -> None:
+    """Case 2: already enabled with cycle set — other updates leave it unchanged."""
+    anchored = date(2026, 8, 20)
+    existing = LearningRecommendationSettings(
+        is_enabled=True,
+        generation_frequency_days=14,
+        max_recommendations=10,
+        cycle_start_date=anchored,
+        updated_by=None,
+    )
+    session = _FakeSession(rows=[existing])
+
+    updated = await RecommendationSettingsService().update_settings(
+        session,  # type: ignore[arg-type]
+        admin_user_id=uuid4(),
+        max_recommendations=8,
+    )
+
+    assert updated.is_enabled is True
+    assert updated.max_recommendations == 8
+    assert updated.cycle_start_date == anchored
+
+
+@pytest.mark.asyncio
+async def test_disable_preserves_cycle_start_date() -> None:
+    """Case 3: disable does not clear cycle_start_date."""
+    anchored = date(2026, 8, 23)
+    existing = LearningRecommendationSettings(
+        is_enabled=True,
+        generation_frequency_days=14,
+        max_recommendations=10,
+        cycle_start_date=anchored,
+        updated_by=None,
+    )
+    session = _FakeSession(rows=[existing])
+
+    updated = await RecommendationSettingsService().update_settings(
+        session,  # type: ignore[arg-type]
+        admin_user_id=uuid4(),
+        is_enabled=False,
+    )
+
+    assert updated.is_enabled is False
+    assert updated.cycle_start_date == anchored
+
+
+@pytest.mark.asyncio
+async def test_reenable_preserves_existing_cycle_start_date() -> None:
+    """Case 4: re-enable after disable keeps the original cycle_start_date."""
+    anchored = date(2026, 8, 23)
+    existing = LearningRecommendationSettings(
+        is_enabled=False,
+        generation_frequency_days=14,
+        max_recommendations=10,
+        cycle_start_date=anchored,
+        updated_by=None,
+    )
+    session = _FakeSession(rows=[existing])
+    fixed_now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+
+    with patch(
+        "apps.recommendations.services.recommendation_settings_service._utc_now",
+        return_value=fixed_now,
+    ):
+        updated = await RecommendationSettingsService().update_settings(
+            session,  # type: ignore[arg-type]
+            admin_user_id=uuid4(),
+            is_enabled=True,
+        )
+
+    assert updated.is_enabled is True
+    assert updated.cycle_start_date == anchored
+    assert updated.cycle_start_date != date(2026, 9, 1)
+
+
+@pytest.mark.asyncio
+async def test_current_cycle_in_settings_and_get_response() -> None:
+    admin_id = uuid4()
+    existing = LearningRecommendationSettings(
+        is_enabled=True,
+        generation_frequency_days=3,
+        max_recommendations=1,
+        cycle_start_date=date(2026, 8, 25),
+        cycle_configuration={
+            "cycle": [
+                "leading_thinker",
+                "country_perspective",
+                "influential_research",
+                "latest_research",
+                "beyond_your_field",
+            ]
+        },
+        learning_spotlight_papers_count=1,
+        updated_by=admin_id,
+    )
+    session = _FakeSession(
+        rows=[existing],
+        history_rows=[],
+        profile_rows=[("Super", "Admin")],
+    )
+
+    with patch(
+        "apps.learningspotlight.services.cycle_service._as_utc_date",
+        return_value=date(2026, 8, 26),
+    ):
+        data = await RecommendationSettingsService().get_settings_with_history(
+            session,  # type: ignore[arg-type]
+            admin_user_id=admin_id,
+        )
+
+        assert data["current_settings"]["current_cycle"] == "country_perspective"
+        assert data["current_settings"]["current_cycle_day"] == 2
+        assert data["current_settings"]["is_running"] is False
+        assert "current_cycle" not in data
+        assert "history" in data
+
+
+@pytest.mark.asyncio
+async def test_try_claim_manual_spotlight_run_sets_flag_when_idle() -> None:
+    settings = LearningRecommendationSettings(
+        is_enabled=True,
+        is_running=False,
+        generation_frequency_days=14,
+        max_recommendations=10,
+    )
+    service = RecommendationSettingsService()
+    session = AsyncMock()
+    with patch.object(
+        service,
+        "_load_singleton",
+        new=AsyncMock(return_value=settings),
+    ) as load:
+        claimed = await service.try_claim_manual_spotlight_run(session)
+
+    assert claimed is True
+    assert settings.is_running is True
+    load.assert_awaited_once_with(session, for_update=True)
+    session.add.assert_called_once_with(settings)
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_try_claim_manual_spotlight_run_rejects_when_running() -> None:
+    settings = LearningRecommendationSettings(
+        is_enabled=True,
+        is_running=True,
+        generation_frequency_days=14,
+        max_recommendations=10,
+    )
+    service = RecommendationSettingsService()
+    session = AsyncMock()
+    with patch.object(service, "_load_singleton", new=AsyncMock(return_value=settings)):
+        claimed = await service.try_claim_manual_spotlight_run(session)
+
+    assert claimed is False
+    session.rollback.assert_awaited_once()
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_try_claim_manual_spotlight_run_without_settings_row() -> None:
+    service = RecommendationSettingsService()
+    session = AsyncMock()
+    with patch.object(service, "_load_singleton", new=AsyncMock(return_value=None)):
+        assert await service.try_claim_manual_spotlight_run(session) is True
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_settings_to_dict_includes_is_running():
+    settings = LearningRecommendationSettings(
+        is_enabled=True,
+        is_running=True,
+        generation_frequency_days=3,
+        max_recommendations=2,
+        cycle_start_date=date(2026, 8, 25),
+    )
+    payload = settings_to_dict(settings)
+    assert payload["is_running"] is True
+
+
+@pytest.mark.asyncio
+async def test_settings_to_dict_includes_is_pushnotification_enabled():
+    settings = LearningRecommendationSettings(
+        is_enabled=True,
+        generation_frequency_days=3,
+        max_recommendations=2,
+        is_pushnotification_enabled=False,
+    )
+    payload = settings_to_dict(settings)
+    assert payload["is_pushnotification_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_update_settings_persists_is_pushnotification_enabled():
+    admin_id = uuid4()
+    existing = LearningRecommendationSettings(
+        is_enabled=True,
+        generation_frequency_days=3,
+        max_recommendations=2,
+        is_pushnotification_enabled=True,
+        updated_by=admin_id,
+    )
+    session = _FakeSession(rows=[existing])
+
+    updated = await RecommendationSettingsService().update_settings(
+        session,  # type: ignore[arg-type]
+        admin_user_id=admin_id,
+        is_pushnotification_enabled=False,
+    )
+
+    assert updated.is_pushnotification_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_is_push_notification_enabled_defaults_true_without_settings_row():
+    session = _FakeSession(rows=[])
+    enabled = await RecommendationSettingsService().is_push_notification_enabled(
+        session  # type: ignore[arg-type]
+    )
+    assert enabled is True
+

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.profiles.db_models import Country, University
@@ -22,13 +22,35 @@ if TYPE_CHECKING:
 async def search_universities(params: UniversitySearchParams, db: AsyncSession) -> dict:
     normalized_query = (params.query or "").strip().lower()
 
-    if normalized_query : 
+    sort_raw = getattr(params, "sort", None) or getattr(params, "sort_by", None)
+    order_raw = getattr(params, "order", None) or getattr(params, "order_by", None)
+    sort_val = sort_raw.value if hasattr(sort_raw, "value") else sort_raw
+    order_val = order_raw.value if hasattr(order_raw, "value") else order_raw
+
+    sort_field = (sort_val or "").strip().lower()
+    if sort_field == "created_at":
+        order_dir = (order_val or "desc").strip().lower()
+        target_col = getattr(University, "created_at", getattr(University, "updated_at", University.name))
+        primary_order = target_col.asc() if order_dir == "asc" else target_col.desc()
+        custom_orders = [primary_order, University.name.asc()]
+    elif order_val:
+        order_dir = order_val.strip().lower()
+        primary_order = University.name.desc() if order_dir == "desc" else University.name.asc()
+        custom_orders = [primary_order]
+    else:
+        custom_orders = None
+
+
+
+
+    base_conditions = [University.is_active == True]  # noqa: E712
+
+    if normalized_query:
         search_terms = normalized_query.split()
         if not search_terms:
             search_terms = [normalized_query]
 
-        from sqlalchemy import and_
-        conditions = [University.name.ilike(f"%{term}%") for term in search_terms]
+        conditions = base_conditions + [University.name.ilike(f"%{term}%") for term in search_terms]
         similarity_score = func.similarity(University.name, normalized_query)
 
         count_stmt = (
@@ -37,20 +59,41 @@ async def search_universities(params: UniversitySearchParams, db: AsyncSession) 
             .outerjoin(Country, Country.id == University.country_id)
             .where(and_(*conditions))
         )
-        stmt=(
-            select(University,Country.name.label("country_name"),)
-            .outerjoin(Country,Country.id==University.country_id)
+        order_clauses = custom_orders if custom_orders is not None else [similarity_score.desc(), University.name.asc()]
+        stmt = (
+            select(
+                University,
+                Country.name.label("country_name"),
+            )
+            .outerjoin(Country, Country.id == University.country_id)
             .where(and_(*conditions))
-            .order_by(similarity_score.desc(),University.name.asc(),))
-    else :
-        count_stmt=(
-            select(func.count()).select_from(University)
+            .order_by(*order_clauses)
         )
-        stmt=(select(University,Country.name.label("country_name"),).outerjoin(Country,Country.id==University.country_id).order_by(University.name.asc()))
+    else:
+        count_stmt = (
+            select(func.count()).select_from(University).where(and_(*base_conditions))
+        )
+        order_clauses = custom_orders if custom_orders is not None else [University.name.asc()]
+        stmt = (
+            select(
+                University,
+                Country.name.label("country_name"),
+            )
+            .outerjoin(Country, Country.id == University.country_id)
+            .where(and_(*base_conditions))
+            .order_by(*order_clauses)
+        )
+
     total_items = int((await db.execute(count_stmt)).scalar_one())
 
-    stmt = stmt.offset(
-    (params.page - 1) * params.pageSize).limit(params.pageSize)
+    if params.page is not None and params.pageSize is not None:
+        stmt = stmt.offset((params.page - 1) * params.pageSize).limit(params.pageSize)
+        resolved_page = params.page
+        resolved_page_size = params.pageSize
+    else:
+        resolved_page = 1
+        resolved_page_size = total_items if total_items > 0 else 1
+
     result = await db.execute(stmt)
     rows = result.all()
     items = [
@@ -66,7 +109,7 @@ async def search_universities(params: UniversitySearchParams, db: AsyncSession) 
         }
         for university, country_name in rows
     ]
-    paginated = build_paginated_response(items, params.page, params.pageSize, total_items)
+    paginated = build_paginated_response(items, resolved_page, resolved_page_size, total_items)
     return {"query": params.query, **paginated.model_dump()}
 
 
@@ -222,9 +265,11 @@ async def list_countries(
     page: int | None,
     page_size: int | None,
     db: AsyncSession,
+    sort: str | None = None,
+    order: str | None = None,
 ) -> dict:
     """Return countries from the countries table, optionally filtered by name/iso_code."""
-    filters = []
+    filters = [Country.is_active == True]  # noqa: E712
     if query and query.strip():
         needle = f"%{query.strip()}%"
         filters.append(
@@ -235,10 +280,36 @@ async def list_countries(
         )
 
     count_stmt = select(func.count()).select_from(Country)
-    stmt = select(Country).order_by(Country.name.asc())
+
+    sort_val = sort.value if hasattr(sort, "value") else sort
+    order_val = order.value if hasattr(order, "value") else order
+
+    sort_field = (sort_val or "").strip().lower()
+    order_dir = (order_val or "asc").strip().lower()
+    if sort_field == "created_at":
+        # Last activity = max(created_at, updated_at). CASE is portable across PG/SQLite.
+        last_activity = case(
+            (Country.updated_at > Country.created_at, Country.updated_at),
+            else_=Country.created_at,
+        )
+        order_clause = [
+            last_activity.asc() if order_dir == "asc" else last_activity.desc(),
+            Country.name.asc(),
+            Country.id.asc(),
+        ]
+    else:
+        # Default: alphabetical by name (A-Z / Z-A)
+        order_clause = [
+            Country.name.desc() if order_dir == "desc" else Country.name.asc(),
+            Country.id.asc(),
+        ]
+
+    stmt = select(Country).order_by(*order_clause)
+
     if filters:
         count_stmt = count_stmt.where(*filters)
         stmt = stmt.where(*filters)
+
 
     total_items = int((await db.execute(count_stmt)).scalar_one())
 
@@ -251,14 +322,17 @@ async def list_countries(
         resolved_page_size = total_items if total_items > 0 else 1
 
     rows = list((await db.execute(stmt)).scalars().all())
-    items = [
-        {
-            "id": str(country.id),
-            "name": country.name,
-            "iso_code": country.iso_code,
-        }
-        for country in rows
-    ]
+    items = []
+    for country in rows:
+        created_at_value = getattr(country, "created_at", None)
+        items.append(
+            {
+                "id": str(country.id),
+                "name": country.name,
+                "iso_code": country.iso_code,
+                "created_at": created_at_value.isoformat() if created_at_value else None,
+            }
+        )
     return build_paginated_response(items, resolved_page, resolved_page_size, total_items).model_dump()
 
 
@@ -331,7 +405,13 @@ async def _list_program_field(
         raise ValueError(f"Unsupported program field: {field}")
 
     university_rows = list(
-        (await db.execute(select(university_column))).scalars().all()
+        (
+            await db.execute(
+                select(university_column).where(University.is_active == True)  # noqa: E712
+            )
+        )
+        .scalars()
+        .all()
     )
     profile_rows = list(
         (
@@ -380,6 +460,51 @@ async def list_majors(
     )
 
 
+def _exact_profile_major_clause(major_query: str):
+    """Match ``Profile.major`` exactly (case-insensitive, trimmed)."""
+    from apps.profiles.db_models.profile_db_model import Profile
+
+    cleaned = major_query.strip()
+    if not cleaned:
+        return None
+    return func.lower(func.trim(Profile.major)) == cleaned.lower()
+
+
+def _search_users_text_clause(query: str):
+    """Name/email/university stay fuzzy; major is an exact full-form match.
+
+    ``CS`` matches major ``CS`` only, not Computer Science or Cyber Security.
+    Minor is not searched.
+    """
+    from apps.accounts.db_models import User
+    from apps.profiles.db_models.profile_db_model import Profile
+    from apps.profiles.db_models.university_db_model import University
+
+    normalized_query = query.strip()
+    if not normalized_query:
+        return None
+
+    search_terms = [term for term in normalized_query.split() if term]
+    term_clauses = []
+    for term in search_terms:
+        field_matches = [
+            Profile.first_name.ilike(f"%{term}%"),
+            Profile.last_name.ilike(f"%{term}%"),
+            User.email.ilike(f"%{term}%"),
+            University.name.ilike(f"%{term}%"),
+        ]
+        major_clause = _exact_profile_major_clause(term)
+        if major_clause is not None:
+            field_matches.append(major_clause)
+        term_clauses.append(or_(*field_matches))
+
+    combined = and_(*term_clauses)
+    full_major = _exact_profile_major_clause(normalized_query)
+    if full_major is not None:
+        return or_(combined, full_major)
+    return combined
+
+
 async def list_minors(
     query: Optional[str],
     page: int | None,
@@ -400,17 +525,15 @@ async def search_users(
     db: AsyncSession,
     query: Optional[str] = None,
     university_name: str | list[str] | None = None,
-    edu_level: str | list[str] | None = None,
     page: Optional[int] = None,
     page_size: Optional[int] = None,
 ) -> dict:
     from sqlmodel import select
-    from sqlalchemy import func, and_, or_, exists
+    from sqlalchemy import func, and_, exists
     from apps.accounts.db_models import User, UserRole, Role
     from apps.profiles.db_models.profile_db_model import Profile
     from apps.profiles.db_models.university_db_model import University
     from apps.search.repositories.post_search_repository import (
-        _edu_level_match_clause,
         _split_filter_values,
         _university_match_clause,
     )
@@ -451,30 +574,15 @@ async def search_users(
     )
     if university_clause is not None:
         structured_filters.append(university_clause)
-    edu_clause = _edu_level_match_clause(Profile, _split_filter_values(edu_level))
-    if edu_clause is not None:
-        structured_filters.append(edu_clause)
     if structured_filters:
         stmt = stmt.where(and_(*structured_filters))
 
-    # Fuzzy search query (pg_trgm)
+    # Name/email/university are fuzzy; major is exact. Minor is not searched.
+    text_clause = None
     if query and query.strip():
         normalized_query = query.strip()
-        search_terms = normalized_query.split()
-        conditions = []
-        for term in search_terms:
-            conditions.append(
-                or_(
-                    Profile.first_name.ilike(f"%{term}%"),
-                    Profile.last_name.ilike(f"%{term}%"),
-                    User.email.ilike(f"%{term}%"),
-                    University.name.ilike(f"%{term}%"),
-                    Profile.major.ilike(f"%{term}%"),
-                    Profile.minor.ilike(f"%{term}%"),
-                    Profile.edu_level.ilike(f"%{term}%")
-                )
-            )
-        stmt = stmt.where(and_(*conditions))
+        text_clause = _search_users_text_clause(normalized_query)
+        stmt = stmt.where(text_clause)
 
         full_name_expr = func.concat(Profile.first_name, " ", Profile.last_name)
         similarity_score = func.greatest(
@@ -482,8 +590,6 @@ async def search_users(
             func.similarity(User.email, normalized_query),
             func.coalesce(func.similarity(University.name, normalized_query), 0.0),
             func.coalesce(func.similarity(Profile.major, normalized_query), 0.0),
-            func.coalesce(func.similarity(Profile.minor, normalized_query), 0.0),
-            func.coalesce(func.similarity(Profile.edu_level, normalized_query), 0.0)
         )
         stmt = stmt.order_by(similarity_score.desc())
     else:
@@ -504,23 +610,8 @@ async def search_users(
     count_stmt = count_stmt.where(User.id != current_user.id)
     if structured_filters:
         count_stmt = count_stmt.where(and_(*structured_filters))
-    if query and query.strip():
-        normalized_query = query.strip()
-        search_terms = normalized_query.split()
-        conditions = []
-        for term in search_terms:
-            conditions.append(
-                or_(
-                    Profile.first_name.ilike(f"%{term}%"),
-                    Profile.last_name.ilike(f"%{term}%"),
-                    User.email.ilike(f"%{term}%"),
-                    University.name.ilike(f"%{term}%"),
-                    Profile.major.ilike(f"%{term}%"),
-                    Profile.minor.ilike(f"%{term}%"),
-                    Profile.edu_level.ilike(f"%{term}%")
-                )
-            )
-        count_stmt = count_stmt.where(and_(*conditions))
+    if text_clause is not None:
+        count_stmt = count_stmt.where(text_clause)
 
     # Pagination logic
     if page is not None and page_size is not None:
@@ -577,12 +668,19 @@ async def search_posts(
     *,
     query: str | None = None,
     hashtag: str | list[str] | None = None,
+    hashtag_to_all: bool = False,
     academic_interest: str | list[str] | None = None,
+    academic_interest_to_all: bool = False,
     university_name: str | list[str] | None = None,
-    major: str | None = None,
-    minor: str | None = None,
+    university_to_all: bool = False,
+    major: str | list[str] | None = None,
+    major_to_all: bool = False,
+    minor: str | list[str] | None = None,
+    minor_to_all: bool = False,
     country: str | list[str] | None = None,
+    country_to_all: bool = False,
     edu_level: str | list[str] | None = None,
+    edu_level_to_all: bool = False,
     page: int | None = None,
     page_size: int | None = None,
 ) -> dict:
@@ -595,18 +693,42 @@ async def search_posts(
     search_kwargs = {
         "query": query,
         "hashtag": hashtag,
+        "hashtag_to_all": hashtag_to_all,
         "academic_interest": academic_interest,
+        "academic_interest_to_all": academic_interest_to_all,
         "university_name": university_name,
+        "university_to_all": university_to_all,
         "major": major,
+        "major_to_all": major_to_all,
         "minor": minor,
+        "minor_to_all": minor_to_all,
         "country": country,
+        "country_to_all": country_to_all,
         "edu_level": edu_level,
+        "edu_level_to_all": edu_level_to_all,
     }
 
     async def _format_items(rows):
+        from apps.connections.services.recommendation_service import get_user_connections
         from apps.engagement.services.post_reaction_formatters import load_latest_post_reactions
+        from apps.feed.services.profile_enrichment import (
+            load_profile_details,
+            load_requested_user_ids,
+        )
 
         post_ids = [post.id for post, *_ in rows]
+        profiles_by_user_id = {
+            post.author_user_id: author_profile
+            for post, author_profile, *_ in rows
+            if author_profile is not None
+        }
+        connection_ids = await get_user_connections(db, current_user.id)
+        requested_user_ids = await load_requested_user_ids(
+            db,
+            current_user.id,
+            set(profiles_by_user_id),
+        )
+        profile_details = await load_profile_details(db, profiles_by_user_id)
         engagement_flags = await fetch_post_engagement_flags(db, current_user.id, post_ids)
         latest_reactions = await load_latest_post_reactions(db, post_ids, per_type_limit=3)
         items = [
@@ -615,6 +737,9 @@ async def search_posts(
                 author_profile=author_profile,
                 moderator_user=mod_user,
                 moderator_profile=mod_profile,
+                is_connected=post.author_user_id in connection_ids,
+                is_requested=post.author_user_id in requested_user_ids,
+                profile_details=profile_details.get(post.author_user_id),
                 is_liked=engagement_flags.user_reaction_for(post.id) is not None,
                 is_reposted=post.id in engagement_flags.reposted_post_ids,
                 is_bookmarked=post.id in engagement_flags.bookmarked_post_ids,

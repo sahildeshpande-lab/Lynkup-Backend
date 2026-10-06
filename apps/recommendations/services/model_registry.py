@@ -22,7 +22,7 @@ def _configure_huggingface_cache() -> None:
     hf_home = (
         recommendation_settings.hf_home
         or os.getenv("HF_HOME")
-        or "/tmp/huggingface"
+        or "/tmp/huggingface"  # nosec B108 -- env var fallback for HuggingFace cache
     ).strip()
     if not hf_home:
         return

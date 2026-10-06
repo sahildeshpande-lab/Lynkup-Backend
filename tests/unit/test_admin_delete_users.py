@@ -33,10 +33,11 @@ async def test_admin_delete_users_soft_deletes_user_role(monkeypatch, mock_db, s
     db = mock_db(scalar_result(user), scalar_result(None))
 
     monkeypatch.setattr(svc, "build_user_base_response", AsyncMock(return_value={"id": str(user.id)}))
-    adjust_counts = AsyncMock()
+    monkeypatch.setattr("core.auth.services.delete_firebase_user", lambda *args: None)
+    side_effects = AsyncMock()
     monkeypatch.setattr(
-        "apps.profiles.services.profile_stats_service.adjust_counts_for_deleting_user",
-        adjust_counts,
+        "apps.user_deletion.services.account_recovery_service.run_deletion_request_side_effects",
+        side_effects,
     )
 
     result = await svc.admin_delete_users([str(user.id)], "user", db)
@@ -46,8 +47,8 @@ async def test_admin_delete_users_soft_deletes_user_role(monkeypatch, mock_db, s
     assert user.is_deleted is True
     assert user.deleted_at is not None
     assert user.purge_after is not None
-    adjust_counts.assert_awaited_once_with(db, user.id)
     db.commit.assert_awaited_once()
+    side_effects.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -71,8 +72,9 @@ async def test_admin_delete_users_reassigns_posts_before_moderator_delete(monkey
     reassign = AsyncMock()
     monkeypatch.setattr(svc, "_reassign_moderator_posts_to_superadmin", reassign)
     monkeypatch.setattr(svc, "build_user_base_response", AsyncMock(return_value={"id": str(moderator.id)}))
+    monkeypatch.setattr("core.auth.services.delete_firebase_user", lambda *args: None)
     monkeypatch.setattr(
-        "apps.profiles.services.profile_stats_service.adjust_counts_for_deleting_user",
+        "apps.user_deletion.services.account_recovery_service.run_deletion_request_side_effects",
         AsyncMock(),
     )
 
@@ -83,6 +85,29 @@ async def test_admin_delete_users_reassigns_posts_before_moderator_delete(monkey
     assert reassign.await_args.args[2] == superadmin.id
     assert len(result["deleted_users"]) == 1
     assert moderator.is_deleted is True
+
+
+@pytest.mark.asyncio
+async def test_reassign_moderator_queue_updates_posts_and_reports():
+    db = AsyncMock()
+    moderator_id = uuid4()
+    superadmin_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    await svc._reassign_moderator_posts_to_superadmin(
+        db,
+        moderator_id,
+        superadmin_id,
+        now=now,
+    )
+
+    assert db.execute.await_count == 2
+    compiled = [
+        str(call.args[0].compile(compile_kwargs={"literal_binds": True})).lower()
+        for call in db.execute.await_args_list
+    ]
+    assert any("posts" in sql and "moderator_id" in sql for sql in compiled)
+    assert any("reports" in sql and "moderator_id" in sql for sql in compiled)
 
 
 @pytest.mark.asyncio
@@ -116,8 +141,9 @@ async def test_admin_delete_users_bulk_moderator_reassignment(monkeypatch, mock_
         "build_user_base_response",
         AsyncMock(side_effect=[{"id": str(moderator_one.id)}, {"id": str(moderator_two.id)}]),
     )
+    monkeypatch.setattr("core.auth.services.delete_firebase_user", lambda *args: None)
     monkeypatch.setattr(
-        "apps.profiles.services.profile_stats_service.adjust_counts_for_deleting_user",
+        "apps.user_deletion.services.account_recovery_service.run_deletion_request_side_effects",
         AsyncMock(),
     )
 

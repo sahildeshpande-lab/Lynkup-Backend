@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, ForeignKey, Index, JSON, String
+from sqlalchemy import Column, DateTime, Index, JSON, String, text
 from sqlmodel import Field, SQLModel
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class University(SQLModel, table=True):
@@ -18,6 +23,14 @@ class University(SQLModel, table=True):
     minor: list[dict] | None = Field(default=None, sa_column=Column(JSON))
     academic_program: list[dict] | None = Field(default=None, sa_column=Column(JSON))
     is_active: bool = Field(default=True, nullable=False, index=True)
+    updated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(
+            DateTime(timezone=True),
+            nullable=False,
+            server_default=text("now()"),
+        ),
+    )
 
     __table_args__ = (
         Index("ix_universities_name_trgm", "name", postgresql_using="gin", postgresql_ops={"name": "gin_trgm_ops"}),

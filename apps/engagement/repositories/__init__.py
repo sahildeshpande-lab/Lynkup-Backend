@@ -42,6 +42,7 @@ from .share_repository import (
     create_share_event,
     fetch_share_counts,
     get_post_share_count,
+    get_share_event_for_post,
     get_user_share_event,
     update_post_share_count,
 )
@@ -94,6 +95,7 @@ __all__ = [
     "create_share_event",
     "fetch_share_counts",
     "get_post_share_count",
+    "get_share_event_for_post",
     "get_user_share_event",
     "update_post_share_count",
 ]

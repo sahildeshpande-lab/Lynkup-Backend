@@ -8,17 +8,27 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.accounts.db_models import User
-from apps.bulk_send.enums import EmailCampaignStatus, EmailDeliveryStatus
+from apps.profiles.db_models import Profile
+from apps.profiles.db_models.country_db_model import Country
+from apps.bulk_send.enums import BulkEmailTargetType, EmailCampaignStatus, EmailDeliveryStatus
 from apps.bulk_send.models import EmailCampaign, EmailDelivery, utc_now
+from apps.bulk_send.recipient_resolution import (
+    bulk_email_preference_opt_out_message,
+    load_users_by_ids_preserving_order,
+    resolve_bulk_email_audience,
+)
 from apps.bulk_send.repository import (
     delivery_stats_for_campaign,
     get_campaign,
+    get_campaign_deliveries_with_profiles,
     list_campaigns,
 )
 from apps.bulk_send.schemas import (
     AttachmentMeta,
     AttachmentUploadData,
+    BulkEmailTarget,
     CampaignDetail,
+    CampaignRecipientDetail,
     CampaignSummary,
     CreateBulkCampaignRequest,
     CreateCampaignData,
@@ -31,7 +41,7 @@ from apps.bulk_send.storage import (
     upload_attachment_file,
 )
 from common.exceptions import ApiError
-from common.pagination import build_paginated_response
+from common.pagination import build_paginated_response, paginate_or_all
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +75,27 @@ class BulkSendService:
                 f"A campaign may include at most {MAX_ATTACHMENTS_PER_CAMPAIGN} attachments"
             )
 
-        users = await self._load_recipients(db, payload.user_ids)
+        await self._validate_country_targets(db, payload.targets)
+
+        audience = await resolve_bulk_email_audience(
+            db,
+            targets=payload.targets,
+            is_alumni=payload.is_alumni,
+        )
+        users = await load_users_by_ids_preserving_order(db, audience.eligible_user_ids)
+        if not users:
+            if (
+                not audience.eligible_user_ids
+                and audience.preference_excluded_user_ids
+            ):
+                raise ApiError(
+                    await self._bulk_email_opt_out_error(
+                        db,
+                        audience.preference_excluded_user_ids,
+                    )
+                )
+            raise ApiError("No eligible recipients found to send bulk email")
+
         attachments = self._validated_attachments(admin.id, payload.attachments)
 
         now = utc_now()
@@ -118,8 +148,11 @@ class BulkSendService:
         db: AsyncSession,
         page: int = 1,
         page_size: int = 20,
+        search: str | None = None,
     ) -> dict:
-        items, total = await list_campaigns(db, page=page, page_size=page_size)
+        items, total = await list_campaigns(
+            db, page=page, page_size=page_size, search=search
+        )
         summaries = [CampaignSummary.model_validate(item) for item in items]
         return build_paginated_response(summaries, page, page_size, total).model_dump(mode="json")
 
@@ -128,11 +161,47 @@ class BulkSendService:
         *,
         db: AsyncSession,
         campaign_id: UUID,
+        page: int | None = None,
+        page_size: int | None = None,
+        search: str | None = None,
     ) -> CampaignDetail:
         campaign = await get_campaign(db, campaign_id)
         if campaign is None:
             raise ApiError("Campaign not found")
         stats = await delivery_stats_for_campaign(db, campaign_id)
+        delivery_rows, total = await get_campaign_deliveries_with_profiles(
+            db,
+            campaign_id,
+            search=search,
+            page=page,
+            page_size=page_size,
+        )
+
+        recipients: list[CampaignRecipientDetail] = []
+        for delivery, profile in delivery_rows:
+            first_name = profile.first_name if profile else None
+            last_name = profile.last_name if profile else None
+            parts = [p for p in (first_name, last_name) if p]
+            user_name = " ".join(parts).strip() or None
+            is_delivered = (
+                delivery.status == EmailDeliveryStatus.sent
+                or delivery.delivered_at is not None
+            )
+            recipients.append(
+                CampaignRecipientDetail(
+                    user_id=delivery.user_id,
+                    first_name=first_name,
+                    last_name=last_name,
+                    user_name=user_name,
+                    email=delivery.email,
+                    status=delivery.status,
+                    is_delivered=is_delivered,
+                    delivered_at=delivery.delivered_at,
+                    last_attempt_at=delivery.last_attempt_at,
+                    failure_reason=delivery.failure_reason,
+                )
+            )
+
         return CampaignDetail(
             id=campaign.id,
             name=campaign.name,
@@ -148,23 +217,92 @@ class BulkSendService:
             body_text=campaign.body_text,
             attachments=list(campaign.attachments or []),
             delivery_stats=stats or DeliveryStats(),
+            recipients=paginate_or_all(
+                recipients,
+                page=page,
+                page_size=page_size,
+                total_items=total,
+            ),
         )
 
-    async def _load_recipients(self, db: AsyncSession, user_ids: list[UUID]) -> list[User]:
-        stmt = select(User).where(User.id.in_(user_ids)).where(User.is_deleted.is_(False))
-        users = list((await db.execute(stmt)).scalars().all())
-        found = {user.id for user in users}
-        missing = [str(uid) for uid in user_ids if uid not in found]
+    async def _validate_country_targets(
+        self,
+        db: AsyncSession,
+        targets: list[BulkEmailTarget],
+    ) -> None:
+        country_ids: list[UUID] = []
+        for target in targets:
+            if target.type != BulkEmailTargetType.COUNTRY or target.to_all:
+                continue
+            for value in target.values:
+                try:
+                    country_ids.append(UUID(value))
+                except (TypeError, ValueError):
+                    continue
+        if not country_ids:
+            return
+        await self._validate_countries(db, country_ids)
+
+    async def _validate_countries(self, db: AsyncSession, country_ids: list[UUID]) -> None:
+        rows = (
+            await db.execute(
+                select(Country.id).where(
+                    Country.id.in_(country_ids),
+                    Country.is_active.is_(True),
+                )
+            )
+        ).scalars().all()
+        found = set(rows)
+        missing = [str(country_id) for country_id in country_ids if country_id not in found]
         if missing:
-            raise ApiError(f"Invalid recipient user_ids: {', '.join(missing)}")
+            raise ApiError(f"Invalid or inactive country_ids: {', '.join(missing)}")
 
-        without_email = [str(user.id) for user in users if not (user.email or "").strip()]
-        if without_email:
-            raise ApiError(f"Recipients missing email addresses: {', '.join(without_email)}")
+    async def _bulk_email_opt_out_error(
+        self,
+        db: AsyncSession,
+        excluded_user_ids: list[UUID],
+    ) -> str:
+        email: str | None = None
+        if len(excluded_user_ids) == 1:
+            opted_out_users = await load_users_by_ids_preserving_order(
+                db,
+                excluded_user_ids,
+            )
+            if opted_out_users:
+                email = opted_out_users[0].email
+        return bulk_email_preference_opt_out_message(
+            excluded_count=len(excluded_user_ids),
+            email=email,
+        )
 
-        # Preserve request order
-        by_id = {user.id: user for user in users}
-        return [by_id[uid] for uid in user_ids]
+    def _eligible_users_stmt(
+        self,
+        *,
+        country_ids: list[UUID] | None = None,
+        is_alumni: bool = False,
+    ):
+        """Build a base eligible-users select (kept for unit tests / diagnostics)."""
+        from common.enums import UserStatus
+
+        stmt = (
+            select(User)
+            .where(User.is_deleted.is_(False))
+            .where(User.deleted_at.is_(None))
+            .where(
+                User.status.notin_(
+                    [UserStatus.suspended, UserStatus.banned, UserStatus.deleting]
+                )
+            )
+            .where(User.email.is_not(None))
+            .where(User.email != "")
+        )
+        if country_ids or is_alumni:
+            stmt = stmt.join(Profile, Profile.user_id == User.id)
+        if country_ids:
+            stmt = stmt.where(Profile.country_id.in_(country_ids))
+        if is_alumni:
+            stmt = stmt.where(Profile.is_alumni.is_(True))
+        return stmt.order_by(User.created_at.asc())
 
     def _validated_attachments(
         self,

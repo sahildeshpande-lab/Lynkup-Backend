@@ -17,6 +17,7 @@ class PostUploadData(BaseModel):
     url: str
     key: str
     type: MediaType
+    original_filename: Optional[str] = None
 
 
 class PostUploadResponse(ApiResponse):
@@ -32,7 +33,7 @@ class MediaItem(BaseModel):
 
 class PostContentPayload(BaseModel):
     """Content payload for creating or updating a post."""
-    caption: Optional[str] = Field(default=None, max_length=255)
+    caption: Optional[str] = Field(default=None, max_length=5000)
     content_html: Optional[str] = None
     visibility: Literal["public", "hidden"] = "public"
 
@@ -41,7 +42,7 @@ class PostContentPayload(BaseModel):
 
 class EditPostContentPayload(BaseModel):
     """Payload for editing existing post fields, where all fields are optional."""
-    caption: Optional[str] = Field(default=None, max_length=255)
+    caption: Optional[str] = Field(default=None, max_length=5000)
     content_html: Optional[str] = None
     visibility: Optional[Literal["public", "hidden"]] = None
 
@@ -117,14 +118,16 @@ class RepostedPostData(BaseModel):
     last_name: Optional[str] = None
     profile_photo_url: Optional[str] = None
     profilePhoto_url: Optional[str] = None
-    profile_visibility: str = "public"
+    profile_visibility: str = "private"
     is_connected: bool = False
     is_requested: bool = False
     university: Optional[str] = None
+    university_details: Optional[dict[str, Any]] = None
     bio: Optional[str] = None
     academic_interest: List[str] = Field(default_factory=list)
     major: Optional[str] = None
     minor: Optional[str] = None
+    education_level: Optional[str] = None
     state: str
     status: Optional[str] = None
     revision_number: int
@@ -132,6 +135,7 @@ class RepostedPostData(BaseModel):
     created_at: datetime
     updated_at: datetime
     is_edited: bool = False
+    triggered_moderation_review: bool = False
     like_count: int = 0
     repost_count: int = 0
     share_count: int = 0
@@ -148,6 +152,7 @@ class RepostedPostData(BaseModel):
     moderator_name: Optional[str] = None
     moderation_notes: Optional[str] = None
     media: List[PostMediaData] = Field(default_factory=list)
+    original_post_account_status: Optional[str] = None
     reposted_data: None = None
 
 
@@ -165,20 +170,25 @@ class PostDetailData(BaseModel):
     last_name: Optional[str] = None
     profile_photo_url: Optional[str] = None
     profilePhoto_url: Optional[str] = None
-    profile_visibility: str = "public"
+    profile_visibility: str = "private"
+    original_post_account_status: Optional[str] = None
     is_connected: bool = False
     is_requested: bool = False
     university: Optional[str] = None
+    university_details: Optional[dict[str, Any]] = None
     bio: Optional[str] = None
     academic_interest: List[str] = Field(default_factory=list)
     major: Optional[str] = None
     minor: Optional[str] = None
+    education_level: Optional[str] = None
     state: str
+    status: Optional[str] = None
     revision_number: int
     content: PostContentData
     created_at: datetime
     updated_at: datetime
     is_edited: bool = False
+    triggered_moderation_review: bool = False
     like_count: int = 0
     repost_count: int = 0
     share_count: int = 0
@@ -189,5 +199,10 @@ class PostDetailData(BaseModel):
     is_repostable: bool = True
     user_reaction: str | None = None
     reactions: PostReactionsGrouped = Field(default_factory=PostReactionsGrouped)
+    is_moderator_reviewed: Optional[bool] = None
+    reviewed_at: Optional[datetime] = None
+    moderator_id: Optional[UUID] = None
+    moderator_name: Optional[str] = None
+    moderation_notes: Optional[str] = None
     media: List[PostMediaData] = Field(default_factory=list)
     reposted_data: Optional[RepostedPostData] = None

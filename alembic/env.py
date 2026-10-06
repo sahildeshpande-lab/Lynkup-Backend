@@ -4,8 +4,10 @@ from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 from sqlmodel import SQLModel 
 from apps.accounts.db_models import *
-from apps.profiles.db_models import *
 from apps.administration.db_models import *
+from apps.analytics.db_models import *  # noqa: F401
+from apps.export.models import *  # noqa: F401
+from apps.profiles.db_models import *
 from apps.feed.db_models import *
 from apps.invitations.db_models import *
 from apps.engagement.db_models import *

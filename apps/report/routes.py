@@ -21,11 +21,17 @@ from apps.report.services import (
     get_reports,
     review_report_admin_service,
 )
-from common.enums import ReportEntityType, ReportStatus
+from common.enums import (
+    ReportEntityType,
+    ReportStatus,
+    ReportedEntityOrder,
+    ReportedEntitySort,
+)
 from common.pagination import PaginationParams
 from common.schemas import ApiResponse
+from apps.administration.dependencies import require_signed_moderator_or_viewer
 from core.database.session import get_session
-from core.security.auth import get_current_app_user, get_current_moderator, get_current_moderator_or_viewer
+from core.security.auth import get_current_app_user
 
 router = APIRouter(tags=["8] Reports"])
 
@@ -59,16 +65,16 @@ async def list_reports_admin_route(
     entity_type: ReportEntityType = Query(...),
     entity_id: UUID = Query(...),
     moderator_id: UUID | None = Query(None),
-    current_user=Depends(get_current_moderator_or_viewer),
+    current_user=Depends(require_signed_moderator_or_viewer),
     db: AsyncSession = Depends(get_session),
     pagination: PaginationParams = Depends(),
 ) -> ReportListResponse:
-    _ = current_user
+    _ = (current_user, moderator_id)
     return await get_reports(
         db,
         entity_type=entity_type,
         entity_id=entity_id,
-        moderator_id=moderator_id,
+        moderator_id=None,
         page=pagination.page,
         page_size=pagination.pageSize,
     )
@@ -85,6 +91,8 @@ async def list_reports_admin_route(
         "Includes summary counts by status (under_review, actioned, rejected), "
         "total across all statuses, and paginated items. "
         "Optionally filter items by status (under_review, actioned, rejected). "
+        "Sort by report_count (default), created_at, updated_at, or "
+        "latest_reported_at. order=desc (default) or order=asc. "
         "Admin/moderator/viewer only."
     ),
 )
@@ -95,8 +103,28 @@ async def get_reported_entities_route(
         alias="status",
         description="Filter by report status: under_review, actioned, or rejected.",
     ),
+    sort: ReportedEntitySort = Query(
+        ReportedEntitySort.report_count,
+        description=(
+            "Sort column. report_count (default, highest first), created_at "
+            "(first report time), updated_at (last report update), or "
+            "latest_reported_at (newest report)."
+        ),
+    ),
+    order: ReportedEntityOrder = Query(
+        ReportedEntityOrder.desc,
+        description="Sort direction. desc = highest/newest first (default); asc = lowest/oldest first.",
+    ),
     moderator_id: UUID | None = Query(None),
-    current_user=Depends(get_current_moderator_or_viewer),
+    search: str | None = Query(
+        default=None,
+        description=(
+            "Search reported entities. Post: author first/last name or post content. "
+            "User: first/last name or university. Comment: commenter first/last name "
+            "or comment text."
+        ),
+    ),
+    current_user=Depends(require_signed_moderator_or_viewer),
     db: AsyncSession = Depends(get_session),
     pagination: PaginationParams = Depends(),
 ) -> ReportedEntityListResponse:
@@ -108,6 +136,9 @@ async def get_reported_entities_route(
         page=pagination.page,
         page_size=pagination.pageSize,
         viewer_user_id=current_user.id,
+        sort=sort,
+        order=order,
+        search=search,
     )
 
 
@@ -120,7 +151,7 @@ async def get_reported_entities_route(
 )
 async def get_report_details_admin_route(
     report_id: UUID,
-    current_user=Depends(get_current_moderator_or_viewer),
+    current_user=Depends(require_signed_moderator_or_viewer),
     db: AsyncSession = Depends(get_session),
 ) -> ReportResponse:
     _ = current_user
@@ -134,12 +165,17 @@ async def get_report_details_admin_route(
     summary="Review report",
     description=(
         "Update a report's status and add moderator comments. "
-        "Admin/moderator only. Pass report_id in the JSON body."
+        "Admin/moderator/viewer only. Pass report_id in the JSON body."
     ),
 )
 async def review_report_admin_route(
     payload: ReportReviewRequest,
-    current_user=Depends(get_current_moderator),
+    current_user=Depends(require_signed_moderator_or_viewer),
     db: AsyncSession = Depends(get_session),
 ) -> ReportResponse:
-    return await review_report_admin_service(db, current_user.id, payload)
+    return await review_report_admin_service(
+        db,
+        current_user.id,
+        payload,
+        actor_role=current_user.role,
+    )

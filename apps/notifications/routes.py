@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Annotated
 from uuid import UUID
@@ -10,10 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
 from apps.notifications.schemas import (
     AdminCampaignListResponse,
+    AdminNotificationListResponse,
     CreateCampaignRequest,
     CreateCampaignResponse,
     DeleteCampaignRequest,
     DeleteCampaignResponse,
+    MarkAdminNotificationReadResponse,
     MarkAllNotificationsReadResponse,
     MarkNotificationReadResponse,
     NotificationListResponse,
@@ -27,7 +30,6 @@ from apps.notifications.schemas import (
 from apps.notifications.services import (
     create_campaign,
     delete_campaign,
-    dispatch_campaign,
     get_preferences,
     list_campaigns,
     list_notifications,
@@ -36,10 +38,15 @@ from apps.notifications.services import (
     update_campaign,
     update_preferences,
 )
+from apps.notifications.tasks import enqueue_campaign_dispatch
 from common.enums import NotificationCampaignStatus, NotificationCampaignType
+from apps.administration.dependencies import (
+    require_signed_admin,
+    require_signed_moderator,
+)
 from core.database.session import get_session
 from core.push import normalize_platform, send_push_to_device
-from core.security.auth import get_current_admin, get_current_app_user
+from core.security.auth import get_current_app_user
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +163,9 @@ async def update_notification_preferences_route(
     description=(
         "Return in-app notifications for the authenticated user, newest first. "
         "When both page and pageSize are omitted, all notifications are returned. "
-        "Use is_read=false to return unread items only, or is_read=true for read items."
+        "Use is_read=false to return unread items only, or is_read=true for read items. "
+        "When in-app notifications are disabled in preferences, items are empty and "
+        "data.reason contains a code and message; otherwise data.reason is an empty object."
     ),
 )
 async def list_my_notifications_route(
@@ -223,7 +232,7 @@ async def mark_notification_read_route(
     ),
 )
 async def admin_list_notification_campaigns(
-    current_user: Annotated[User, Depends(get_current_admin)],
+    current_user: Annotated[User, Depends(require_signed_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
@@ -253,8 +262,9 @@ async def admin_list_notification_campaigns(
     status_code=status.HTTP_200_OK,
     summary="Create a notification campaign",
     description=(
-        "Create an immediate ANNOUNCEMENT or TOPIC campaign, then dispatch processing "
-        "(audience, in-app notifications, and Firebase push). "
+        "Create an immediate ANNOUNCEMENT or TOPIC campaign, then queue dispatch "
+        "processing asynchronously (audience, in-app notifications, and Firebase push). "
+        "Poll the campaign list for status transitions from DRAFT to SENT or FAILED. "
         "ANNOUNCEMENT: omit targets (or send []). "
         "TOPIC: provide targets as a list of {type, values} filters "
         "(UNIVERSITY, MAJOR, MINOR, EDUCATION_LEVEL, COUNTRY, INTERESTS, HASHTAGS). "
@@ -263,20 +273,25 @@ async def admin_list_notification_campaigns(
 )
 async def admin_create_notification_campaign(
     payload: CreateCampaignRequest,
-    current_user: Annotated[User, Depends(get_current_admin)],
+    current_user: Annotated[User, Depends(require_signed_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> CreateCampaignResponse:
     result = await create_campaign(
         db,
         admin_user_id=current_user.id,
         payload=payload,
+        actor_role=current_user.role,
     )
     if result.status and result.data is not None:
         try:
-            await dispatch_campaign(db, result.data.id)
+            await asyncio.to_thread(
+                enqueue_campaign_dispatch,
+                result.data.id,
+                actor_role=current_user.role,
+            )
         except Exception:
             logger.exception(
-                "dispatch_campaign failed for campaign_id=%s",
+                "Failed to publish campaign dispatch campaign_id=%s",
                 result.data.id,
             )
     return result
@@ -295,11 +310,15 @@ async def admin_create_notification_campaign(
 )
 async def admin_update_notification_campaign(
     payload: UpdateCampaignRequest,
-    current_user: Annotated[User, Depends(get_current_admin)],
+    current_user: Annotated[User, Depends(require_signed_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> UpdateCampaignResponse:
-    _ = current_user
-    return await update_campaign(db, payload=payload)
+    return await update_campaign(
+        db,
+        payload=payload,
+        actor_user_id=current_user.id,
+        actor_role=current_user.role,
+    )
 
 
 @router.delete(
@@ -314,11 +333,15 @@ async def admin_update_notification_campaign(
 )
 async def admin_delete_notification_campaign(
     payload: DeleteCampaignRequest,
-    current_user: Annotated[User, Depends(get_current_admin)],
+    current_user: Annotated[User, Depends(require_signed_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> DeleteCampaignResponse:
-    _ = current_user
-    return await delete_campaign(db, campaign_id=payload.id)
+    return await delete_campaign(
+        db,
+        campaign_id=payload.id,
+        actor_user_id=current_user.id,
+        actor_role=current_user.role,
+    )
 
 
 @router.post(
@@ -349,7 +372,7 @@ async def test_push_route(
     if not tokens:
         return error_response(
             "No active FCM tokens found for this user",
-            data={"user_id": str(current_user.id), "token_count": 0},
+            data={"user_id": str(current_user.id), "token_count": 0},  # nosec B105 -- integer counter, not a password
             response_cls=TestNotificationResponse,
         )
 
@@ -373,3 +396,117 @@ async def test_push_route(
         },
         response_cls=TestNotificationResponse,
     )
+
+
+@router.get(
+    "/admin/notification",
+    response_model=AdminNotificationListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List activity log notifications for admin",
+    description=(
+        "Return activity log notifications for admin/moderators, newest first. "
+        "When both page and pageSize are omitted, all matching notifications are returned. "
+        "Use is_read=false for unread items only, or is_read=true for read items. "
+        "If moderator_id is provided, lists notifications associated to that moderator only. "
+        "Notifications created prior to account registration date are excluded."
+    ),
+)
+async def list_admin_activity_notifications_route(
+    current_user: Annotated[User, Depends(require_signed_moderator)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    page: int | None = Query(default=None, ge=1),
+    pageSize: int | None = Query(default=None, ge=1, le=200),
+    is_read: bool | None = Query(
+        default=None,
+        description="Filter by read state. Omit to return all notifications.",
+    ),
+    moderator_id: UUID | None = Query(
+        default=None,
+        description="Filter notifications associated to a specific moderator ID.",
+    ),
+) -> AdminNotificationListResponse:
+    from apps.administration.services.admin_activity_log_service import (
+        list_admin_notifications_service,
+    )
+    from common.responses import success_response
+
+    data = await list_admin_notifications_service(
+        db,
+        current_user=current_user,
+        moderator_id=moderator_id,
+        is_read=is_read,
+        page=page,
+        page_size=pageSize,
+    )
+    return success_response(
+        "Admin notifications fetched successfully.",
+        data,
+        response_cls=AdminNotificationListResponse,
+    )
+
+
+@router.patch(
+    "/admin/notification/read-all",
+    response_model=MarkAllNotificationsReadResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Mark all admin notifications as read",
+    description="Mark every unread admin activity log notification as read.",
+)
+async def mark_all_admin_notifications_read_route(
+    current_user: Annotated[User, Depends(require_signed_moderator)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    moderator_id: UUID | None = Query(
+        default=None,
+        description="Optional moderator ID filter.",
+    ),
+) -> MarkAllNotificationsReadResponse:
+    from apps.administration.services.admin_activity_log_service import (
+        mark_all_admin_notifications_as_read,
+    )
+    from common.responses import success_response
+
+    updated = await mark_all_admin_notifications_as_read(
+        db,
+        current_user=current_user,
+        moderator_id=moderator_id,
+    )
+    return success_response(
+        "All admin notifications marked as read.",
+        {"updated_count": updated},
+        response_cls=MarkAllNotificationsReadResponse,
+    )
+
+
+@router.patch(
+    "/admin/notification/{notification_id}/read",
+    response_model=MarkAdminNotificationReadResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Mark an admin notification as read",
+    description="Mark a single admin activity log notification as read.",
+)
+async def mark_admin_notification_read_route(
+    notification_id: UUID,
+    current_user: Annotated[User, Depends(require_signed_moderator)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> MarkAdminNotificationReadResponse:
+    from apps.administration.services.admin_activity_log_service import (
+        mark_admin_notification_as_read,
+    )
+    from common.responses import error_response, success_response
+
+    _ = current_user
+    result = await mark_admin_notification_as_read(
+        db,
+        notification_id=notification_id,
+    )
+    if result is None:
+        return error_response(
+            "Notification not found.",
+            response_cls=MarkAdminNotificationReadResponse,
+        )
+    return success_response(
+        "Admin notification marked as read.",
+        result,
+        response_cls=MarkAdminNotificationReadResponse,
+    )
+

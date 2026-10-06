@@ -293,9 +293,9 @@ async def create_report_service(
             await db.execute(select(Comment).where(Comment.id == payload.entity_id))
         ).scalar_one_or_none()
         if comment is None:
-            return error_response("Comment does not exist", response_cls=ApiResponse)
+            return error_response("Comment does not exist.", response_cls=ApiResponse)
         if comment.is_deleted:
-            return error_response("Cannot report a soft-deleted comment", response_cls=ApiResponse)
+            return error_response("Cannot report a soft-deleted comment.", response_cls=ApiResponse)
         post = (
             await db.execute(select(Post).where(Post.id == comment.post_id))
         ).scalar_one_or_none()
@@ -305,7 +305,7 @@ async def create_report_service(
     )
     if existing is not None:
         return error_response(
-            "You have already reported this entity",
+            "You have already reported this entity.",
             response_cls=ApiResponse,
         )
 
@@ -719,10 +719,16 @@ async def _apply_actioned_report_to_entity(
 
         if was_counted:
             from apps.profiles.services.profile_stats_service import (
-                decrement_posts_count_for_user,
+                sync_posts_count_for_visibility_change,
             )
 
-            await decrement_posts_count_for_user(db, post.author_user_id)
+            await sync_posts_count_for_visibility_change(
+                db,
+                post_id=post.id,
+                author_user_id=post.author_user_id,
+                was_counted=True,
+                now_counted=False,
+            )
 
         from apps.moderation.services import record_moderation_history
 

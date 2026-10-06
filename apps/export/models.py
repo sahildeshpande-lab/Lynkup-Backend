@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, String, Text, BigInteger
+from sqlalchemy import BigInteger, Column, DateTime, Integer, String, Text
 from sqlmodel import Field, SQLModel
 
 from apps.export.enums import DataExportStatus
@@ -49,6 +49,18 @@ class DataExportRequest(SQLModel, table=True):
     error_message: str | None = Field(
         default=None,
         sa_column=Column(Text, nullable=True),
+    )
+    attempt_count: int = Field(
+        default=0,
+        sa_column=Column(Integer, nullable=False, server_default="0"),
+    )
+    lease_owner: str | None = Field(
+        default=None,
+        sa_column=Column(String(255), nullable=True),
+    )
+    lease_expires_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
     )
     created_at: datetime = Field(
         default_factory=utc_now,

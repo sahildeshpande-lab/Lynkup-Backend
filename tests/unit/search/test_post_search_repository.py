@@ -195,7 +195,7 @@ def test_build_search_filters_query_matches_author_name():
     ).lower()
     assert "first_name" in compiled
     assert "last_name" in compiled
-    # Names use whole-word regex (~* + \y); major/minor in the same OR use ilike.
+    # Names use prefix regex (~* + leading \y); major/minor in the same OR use ilike.
     assert "~*" in compiled
     assert "sahil" in compiled
     assert "major" in compiled
@@ -212,6 +212,21 @@ def test_word_boundary_match_escapes_regex_metacharacters():
     )
     assert "\\y" in compiled
     assert "C\\+\\+" in compiled or "C++" not in compiled.replace("\\+", "")
+
+
+def test_word_boundary_match_is_prefix_not_full_word():
+    from sqlalchemy.dialects import postgresql
+
+    from apps.feed.db_models import Post
+
+    clause = repo._word_boundary_match(Post.content["caption"].astext, "managem")
+    compiled = str(
+        clause.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "managem" in compiled
+    assert "\\y" in compiled
+    assert "managem\\y" not in compiled
+    assert "managem\\\\y" not in compiled
 
 
 def test_build_search_filters_excludes_current_user_posts():
@@ -307,4 +322,133 @@ def test_academic_interest_match_clause_builds_or_across_selected_interests():
     )
     assert " OR " in compiled.upper()
     assert "academic_interests" in compiled.lower()
+
+
+def _compile_search_filters(**overrides) -> str:
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.orm import aliased
+
+    from apps.accounts.db_models import User
+    from apps.profiles.db_models.profile_db_model import Profile
+
+    author_profile = aliased(Profile, name="author_profile")
+    author_user = aliased(User, name="author_user")
+    params = {
+        "current_user_id": uuid.uuid4(),
+        "connected_author_ids": set(),
+        "query": None,
+        "hashtag": None,
+        "academic_interest": None,
+        "university_name": None,
+        "major": None,
+        "minor": None,
+        "country": None,
+        "edu_level": None,
+        "author_profile": author_profile,
+        "author_user": author_user,
+    }
+    params.update(overrides)
+    filters = repo._build_search_filters(**params)
+    return " ".join(
+        str(f.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        for f in filters
+    ).lower()
+
+
+def test_program_fields_match_clause_ors_multiple_majors():
+    from sqlalchemy.dialects import postgresql
+
+    from apps.profiles.db_models.profile_db_model import Profile
+
+    clause = repo._program_fields_match_clause(
+        Profile.major,
+        ["Computer Science", "Information Technology"],
+    )
+    assert clause is not None
+    compiled = str(
+        clause.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).lower()
+    assert "computer science" in compiled
+    assert "information technology" in compiled
+    assert " or " in compiled
+
+
+def test_program_fields_match_clause_single_value_matches_existing_clause():
+    from sqlalchemy.dialects import postgresql
+
+    from apps.profiles.db_models.profile_db_model import Profile
+
+    single = repo._program_field_match_clause(Profile.major, "Computer Science")
+    multi = repo._program_fields_match_clause(Profile.major, "Computer Science")
+    assert str(single.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})) == str(
+        multi.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+
+
+def test_build_search_filters_major_list_ors_selected_values():
+    compiled = _compile_search_filters(major=["Computer Science", "IT"])
+    assert "major" in compiled
+    assert "computer science" in compiled
+    assert "%it%" in compiled
+    assert " or " in compiled
+
+
+def test_build_search_filters_minor_list_ors_selected_values():
+    compiled = _compile_search_filters(minor=["AI", "Data Science"])
+    assert "minor" in compiled
+    assert "ai" in compiled
+    assert "data science" in compiled
+    assert " or " in compiled
+
+
+def test_build_search_filters_to_all_skips_only_that_filter():
+    compiled = _compile_search_filters(
+        hashtag=["python", "fastapi"],
+        hashtag_to_all=True,
+        university_name=["123"],
+        university_to_all=False,
+        major=["Computer Science"],
+        major_to_all=True,
+    )
+    assert "python" not in compiled
+    assert "fastapi" not in compiled
+    assert "computer science" not in compiled
+    assert "123" in compiled
+
+
+def test_build_search_filters_to_all_false_keeps_existing_restrictions():
+    compiled = _compile_search_filters(
+        hashtag=["python"],
+        hashtag_to_all=False,
+        academic_interest=["AI"],
+        country=["IN"],
+        edu_level=["Bachelors"],
+    )
+    assert "python" in compiled
+    assert "ai" in compiled
+    assert "iso_code" in compiled
+    assert "bachelors" in compiled
+
+
+def test_build_search_filters_each_to_all_is_independent():
+    compiled = _compile_search_filters(
+        hashtag=["python"],
+        hashtag_to_all=True,
+        academic_interest=["AI"],
+        academic_interest_to_all=False,
+        university_name=["State University"],
+        university_to_all=True,
+        minor=["Data Science"],
+        minor_to_all=False,
+        country=["IN"],
+        country_to_all=True,
+        edu_level=["Bachelors"],
+        edu_level_to_all=False,
+    )
+    assert "python" not in compiled
+    assert "state university" not in compiled
+    assert "iso_code" not in compiled
+    assert "ai" in compiled
+    assert "data science" in compiled
+    assert "bachelors" in compiled
 

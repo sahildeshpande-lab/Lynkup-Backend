@@ -60,8 +60,9 @@ async def test_update_moderation_words_replaces_entire_list() -> None:
                 session,
             )
             assert first == {
-                "profanityWords": ["badword", "another"],
+                "profanityWords": ["another", "badword"],
             }
+
 
             second = await update_moderation_words(
                 UpdateModerationWordsRequest(

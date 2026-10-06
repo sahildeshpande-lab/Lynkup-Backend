@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, String, text, UniqueConstraint, CheckConstraint
+from sqlalchemy import Column, DateTime, Index, String, text, UniqueConstraint, CheckConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -30,4 +30,5 @@ class ConnectionRequest(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("sender_user_id", "receiver_user_id", "status", name="uq_connection_requests_sender_receiver_status"),
         CheckConstraint("sender_user_id != receiver_user_id", name="chk_connection_request_not_self"),
+        Index("ix_connection_requests_receiver_user_id_status", "receiver_user_id", "status"),
     )

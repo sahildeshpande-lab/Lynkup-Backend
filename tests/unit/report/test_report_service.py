@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
 
 import pytest
 
-from common.enums import PostState, ReportEntityType, ReportStatus, UserStatus
+from common.enums import (
+    PostState,
+    ReportEntityType,
+    ReportStatus,
+    ReportedEntityOrder,
+    ReportedEntitySort,
+    UserStatus,
+)
 from apps.report.schemas import ReportCreateRequest, ReportReviewRequest
 from apps.report.services import report_service as svc
 
@@ -74,6 +81,7 @@ async def test_create_report_user_success(mock_db, scalar_result):
     with (
         patch.object(svc, "_resolve_report_moderator_id", AsyncMock(return_value=moderator_id)),
         patch.object(svc, "create_report", AsyncMock(return_value=_report())) as create_report,
+        patch.object(svc, "_apply_user_report_threshold", AsyncMock(return_value=False)),
     ):
         response = await svc.create_report_service(db, reporter_id, payload)
 
@@ -120,6 +128,7 @@ async def test_create_report_post_success(mock_db, scalar_result):
     reporter_id = uuid.uuid4()
     post_moderator_id = uuid.uuid4()
     post = _post(moderator_id=post_moderator_id)
+    revision = SimpleNamespace(id=uuid.uuid4())
     payload = ReportCreateRequest(
         entity_type=ReportEntityType.post,
         entity_id=post.id,
@@ -133,7 +142,13 @@ async def test_create_report_post_success(mock_db, scalar_result):
             "_resolve_report_moderator_id",
             AsyncMock(return_value=post_moderator_id),
         ),
+        patch.object(
+            svc,
+            "get_latest_post_revision",
+            AsyncMock(return_value=revision),
+        ),
         patch.object(svc, "create_report", AsyncMock(return_value=_report())) as create_report,
+        patch.object(svc, "_apply_post_report_threshold", AsyncMock(return_value=False)),
     ):
         response = await svc.create_report_service(db, reporter_id, payload)
 
@@ -141,6 +156,7 @@ async def test_create_report_post_success(mock_db, scalar_result):
     assert response.message == "Report submitted successfully."
     create_report.assert_awaited_once()
     assert create_report.await_args.kwargs["moderator_id"] == post_moderator_id
+    assert create_report.await_args.kwargs["post_revision_id"] == revision.id
 
 
 @pytest.mark.asyncio
@@ -174,6 +190,7 @@ async def test_create_report_comment_success(mock_db, scalar_result):
     with (
         patch.object(svc, "_resolve_report_moderator_id", AsyncMock(return_value=moderator_id)),
         patch.object(svc, "create_report", AsyncMock(return_value=_report())) as create_report,
+        patch.object(svc, "_apply_comment_report_threshold", AsyncMock(return_value=False)),
     ):
         response = await svc.create_report_service(db, reporter_id, payload)
 
@@ -202,6 +219,7 @@ async def test_create_report_soft_deleted_comment(mock_db, scalar_result):
 async def test_create_report_duplicate_prevention(mock_db, scalar_result):
     reporter_id = uuid.uuid4()
     post = _post()
+    revision = SimpleNamespace(id=uuid.uuid4())
     payload = ReportCreateRequest(
         entity_type=ReportEntityType.post,
         entity_id=post.id,
@@ -209,10 +227,28 @@ async def test_create_report_duplicate_prevention(mock_db, scalar_result):
     )
     db = mock_db(scalar_result(post), scalar_result(_report()))
 
-    response = await svc.create_report_service(db, reporter_id, payload)
+    with patch.object(svc, "get_latest_post_revision", AsyncMock(return_value=revision)):
+        response = await svc.create_report_service(db, reporter_id, payload)
     assert response.status is False
     assert "already reported" in response.message.lower()
 
+
+@pytest.mark.asyncio
+async def test_create_report_post_requires_revision(mock_db, scalar_result):
+    reporter_id = uuid.uuid4()
+    post = _post()
+    payload = ReportCreateRequest(
+        entity_type=ReportEntityType.post,
+        entity_id=post.id,
+        reason="Spam content",
+    )
+    db = mock_db(scalar_result(post))
+
+    with patch.object(svc, "get_latest_post_revision", AsyncMock(return_value=None)):
+        response = await svc.create_report_service(db, reporter_id, payload)
+
+    assert response.status is False
+    assert "revision not found" in response.message.lower()
 
 @pytest.mark.asyncio
 async def test_create_report_invalid_entity(mock_db, scalar_result):
@@ -319,9 +355,185 @@ async def test_get_reported_entities_success(mock_db):
     assert response.data.items[0].status == ReportStatus.under_review
     assert response.data.items[0].moderator_name == "Mod Name"
     assert fetch_rows.await_args.kwargs["status"] == ReportStatus.under_review
+    assert fetch_rows.await_args.kwargs["sort"] == ReportedEntitySort.report_count
+    assert fetch_rows.await_args.kwargs["order"] == ReportedEntityOrder.desc
     assert count_rows.await_args.kwargs["status"] == ReportStatus.under_review
     summary_rows.assert_awaited_once()
     assert summary_rows.await_args.kwargs["entity_type"] == ReportEntityType.post
+
+
+@pytest.mark.asyncio
+async def test_get_reported_entities_sorts_by_latest_reported_at(mock_db):
+    db = mock_db()
+    viewer_id = uuid.uuid4()
+
+    with patch(
+        "apps.report.services.report_service.fetch_reported_entity_rows",
+        AsyncMock(return_value=[]),
+    ) as fetch_rows, patch(
+        "apps.report.services.report_service.count_reported_entities",
+        AsyncMock(return_value=0),
+    ), patch(
+        "apps.report.services.report_service.count_reported_entities_summary_by_status",
+        AsyncMock(
+            return_value={
+                "under_review": 0,
+                "actioned": 0,
+                "rejected": 0,
+            }
+        ),
+    ), patch(
+        "apps.report.services.report_service._load_entities_for_queue",
+        AsyncMock(return_value={}),
+    ), patch(
+        "apps.report.services.report_service._batch_moderator_names",
+        AsyncMock(return_value={}),
+    ):
+        response = await svc.get_reported_entities(
+            db,
+            entity_type=ReportEntityType.post,
+            page=1,
+            page_size=20,
+            viewer_user_id=viewer_id,
+            sort=ReportedEntitySort.latest_reported_at,
+        )
+
+    assert response.status is True
+    assert fetch_rows.await_args.kwargs["sort"] == ReportedEntitySort.latest_reported_at
+    assert fetch_rows.await_args.kwargs["order"] == ReportedEntityOrder.desc
+
+
+@pytest.mark.asyncio
+async def test_get_reported_entities_sorts_by_created_at_asc(mock_db):
+    db = mock_db()
+    viewer_id = uuid.uuid4()
+
+    with patch(
+        "apps.report.services.report_service.fetch_reported_entity_rows",
+        AsyncMock(return_value=[]),
+    ) as fetch_rows, patch(
+        "apps.report.services.report_service.count_reported_entities",
+        AsyncMock(return_value=0),
+    ), patch(
+        "apps.report.services.report_service.count_reported_entities_summary_by_status",
+        AsyncMock(
+            return_value={
+                "under_review": 0,
+                "actioned": 0,
+                "rejected": 0,
+            }
+        ),
+    ), patch(
+        "apps.report.services.report_service._load_entities_for_queue",
+        AsyncMock(return_value={}),
+    ), patch(
+        "apps.report.services.report_service._batch_moderator_names",
+        AsyncMock(return_value={}),
+    ):
+        response = await svc.get_reported_entities(
+            db,
+            entity_type=ReportEntityType.post,
+            page=1,
+            page_size=20,
+            viewer_user_id=viewer_id,
+            sort=ReportedEntitySort.created_at,
+            order=ReportedEntityOrder.asc,
+        )
+
+    assert response.status is True
+    assert fetch_rows.await_args.kwargs["sort"] == ReportedEntitySort.created_at
+    assert fetch_rows.await_args.kwargs["order"] == ReportedEntityOrder.asc
+
+
+@pytest.mark.asyncio
+async def test_get_reported_entities_forwards_search(mock_db):
+    db = mock_db()
+    viewer_id = uuid.uuid4()
+
+    with patch(
+        "apps.report.services.report_service.fetch_reported_entity_rows",
+        AsyncMock(return_value=[]),
+    ) as fetch_rows, patch(
+        "apps.report.services.report_service.count_reported_entities",
+        AsyncMock(return_value=0),
+    ) as count_rows, patch(
+        "apps.report.services.report_service.count_reported_entities_summary_by_status",
+        AsyncMock(return_value={"under_review": 0, "actioned": 0, "rejected": 0}),
+    ), patch(
+        "apps.report.services.report_service._load_entities_for_queue",
+        AsyncMock(return_value={}),
+    ), patch(
+        "apps.report.services.report_service._batch_moderator_names",
+        AsyncMock(return_value={}),
+    ):
+        await svc.get_reported_entities(
+            db,
+            entity_type=ReportEntityType.comment,
+            page=1,
+            page_size=9,
+            viewer_user_id=viewer_id,
+            search="jane",
+        )
+
+    assert fetch_rows.await_args.kwargs["search"] == "jane"
+    assert count_rows.await_args.kwargs["search"] == "jane"
+
+
+def test_reported_entity_search_clause_is_none_for_blank():
+    from apps.report.repositories.report_repository import _reported_entity_search_clause
+
+    assert _reported_entity_search_clause(ReportEntityType.post, None) is None
+    assert _reported_entity_search_clause(ReportEntityType.post, "  ") is None
+    assert _reported_entity_search_clause(None, "jane") is None
+
+
+def test_reported_entity_search_clause_post_matches_name_and_content():
+    from sqlalchemy.dialects import postgresql
+
+    from apps.report.repositories.report_repository import _reported_entity_search_clause
+
+    clause = _reported_entity_search_clause(ReportEntityType.post, "jane")
+    sql = str(
+        clause.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).lower()
+    assert "ilike" in sql
+    assert "%jane%" in sql
+    assert "first_name" in sql
+    assert "last_name" in sql
+    assert "caption" in sql
+    assert "content_html" in sql
+
+
+def test_reported_entity_search_clause_user_matches_name_and_university():
+    from sqlalchemy.dialects import postgresql
+
+    from apps.report.repositories.report_repository import _reported_entity_search_clause
+
+    clause = _reported_entity_search_clause(ReportEntityType.user, "mit")
+    sql = str(
+        clause.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).lower()
+    assert "ilike" in sql
+    assert "%mit%" in sql
+    assert "first_name" in sql
+    assert "last_name" in sql
+    assert "university" in sql or "name" in sql
+
+
+def test_reported_entity_search_clause_comment_matches_name_and_text():
+    from sqlalchemy.dialects import postgresql
+
+    from apps.report.repositories.report_repository import _reported_entity_search_clause
+
+    clause = _reported_entity_search_clause(ReportEntityType.comment, "spam")
+    sql = str(
+        clause.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).lower()
+    assert "ilike" in sql
+    assert "%spam%" in sql
+    assert "first_name" in sql
+    assert "last_name" in sql
+    assert "comment_text" in sql
 
 
 @pytest.mark.asyncio
@@ -353,6 +565,7 @@ async def test_review_report_admin_success(mock_db, scalar_result):
     assert response.data.moderator_info.first_name == "Admin"
     assert response.data.moderator_name == "Admin User"
     apply_action.assert_awaited_once()
+    assert apply_action.await_args.kwargs["admin_comment"] == "Resolved"
     db.commit.assert_awaited_once()
 
 
@@ -397,16 +610,32 @@ async def test_apply_actioned_report_flags_post(mock_db, scalar_result):
     moderator_id = uuid.uuid4()
 
     with patch(
-        "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
+        "apps.profiles.services.profile_stats_service.sync_posts_count_for_visibility_change",
         AsyncMock(),
-    ) as dec:
-        error = await svc._apply_actioned_report_to_entity(db, report, moderator_id=moderator_id)
+    ) as sync_count, patch(
+        "apps.moderation.services.record_moderation_history",
+        AsyncMock(),
+    ) as history:
+        error = await svc._apply_actioned_report_to_entity(
+            db,
+            report,
+            moderator_id=moderator_id,
+            admin_comment="  Action taken on the post  ",
+        )
 
     assert error is None
     assert post.state == PostState.flagged
     assert post.moderator_id == moderator_id
     assert post.is_moderator_reviewed is True
-    dec.assert_awaited_once_with(db, post.author_user_id)
+    sync_count.assert_awaited_once_with(
+        db,
+        post_id=post.id,
+        author_user_id=post.author_user_id,
+        was_counted=True,
+        now_counted=False,
+    )
+    history.assert_awaited_once()
+    assert history.await_args.kwargs["comment"] == "Action taken on the post"
     db.add.assert_called()
 
 
@@ -422,14 +651,14 @@ async def test_apply_actioned_report_flags_post_skips_decrement_when_already_fla
     moderator_id = uuid.uuid4()
 
     with patch(
-        "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
+        "apps.profiles.services.profile_stats_service.sync_posts_count_for_visibility_change",
         AsyncMock(),
-    ) as dec:
+    ) as sync_count:
         error = await svc._apply_actioned_report_to_entity(db, report, moderator_id=moderator_id)
 
     assert error is None
     assert post.state == PostState.flagged
-    dec.assert_not_called()
+    sync_count.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -442,14 +671,14 @@ async def test_apply_actioned_report_flags_post_skips_decrement_for_draft(mock_d
     moderator_id = uuid.uuid4()
 
     with patch(
-        "apps.profiles.services.profile_stats_service.decrement_posts_count_for_user",
+        "apps.profiles.services.profile_stats_service.sync_posts_count_for_visibility_change",
         AsyncMock(),
-    ) as dec:
+    ) as sync_count:
         error = await svc._apply_actioned_report_to_entity(db, report, moderator_id=moderator_id)
 
     assert error is None
     assert post.state == PostState.flagged
-    dec.assert_not_called()
+    sync_count.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -537,3 +766,233 @@ async def test_apply_actioned_report_skips_already_deleted_comment(mock_db):
     assert error is None
     update_count.assert_not_awaited()
     mark_deleted.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_review_report_fallback_to_entity_id(mock_db):
+    report_id = uuid.uuid4()
+    entity_id = uuid.uuid4()
+    report = _report()
+    report.id = report_id
+    report.entity_id = entity_id
+    reporter_user = _user()
+    reporter_profile = SimpleNamespace(first_name="John", last_name="Doe")
+    row = (report, reporter_user, reporter_profile, None, None)
+
+    db = mock_db()
+
+    with patch(
+        "apps.report.services.report_service.get_report_by_id",
+        AsyncMock(side_effect=[None, row, row])
+    ) as mock_get_by_id, patch(
+        "apps.report.services.report_service._build_report_review_metadata",
+        AsyncMock(return_value={})
+    ), patch(
+        "apps.report.services.report_service.update_report",
+        AsyncMock()
+    ) as mock_update, patch(
+        "apps.administration.services.admin_activity_log_service.create_admin_activity_log",
+        AsyncMock()
+    ), patch(
+        "apps.report.services.report_service.count_reports_by_entity_keys",
+        AsyncMock(return_value={})
+    ), patch(
+        "apps.report.services.report_service.get_previous_report_comments",
+        AsyncMock(return_value=[])
+    ):
+        db_execute_result = MagicMock()
+        db_execute_result.scalars.return_value.all.return_value = [report]
+        db.execute = AsyncMock(return_value=db_execute_result)
+
+        payload = ReportReviewRequest(
+            report_id=entity_id,
+            status=ReportStatus.rejected,
+            admin_comment="Verified",
+        )
+        response = await svc.review_report_admin_service(
+            db,
+            uuid.uuid4(),
+            payload,
+            actor_role="superadmin"
+        )
+
+    assert response.status is True
+    assert response.message == "Report reviewed successfully"
+    assert mock_get_by_id.call_count == 3
+    assert mock_get_by_id.call_args_list[0][0][1] == entity_id
+    assert mock_get_by_id.call_args_list[1][0][1] == report.id
+    assert mock_get_by_id.call_args_list[2][0][1] == report.id
+
+
+@pytest.mark.asyncio
+async def test_review_report_invalid_report_id_returns_soft_error(mock_db):
+    db = mock_db()
+    db_execute_result = MagicMock()
+    db_execute_result.scalars.return_value.all.return_value = []
+    db.execute = AsyncMock(return_value=db_execute_result)
+
+    payload = ReportReviewRequest(
+        report_id=uuid.uuid4(),
+        status=ReportStatus.actioned,
+        admin_comment="action on post",
+    )
+
+    with patch(
+        "apps.report.services.report_service.get_report_by_id",
+        AsyncMock(return_value=None),
+    ):
+        response = await svc.review_report_admin_service(
+            db,
+            current_admin_id=uuid.uuid4(),
+            payload=payload,
+        )
+
+    assert response.status is False
+    assert response.message == "Inappropiate report id"
+    assert response.data is None
+
+
+@pytest.mark.asyncio
+async def test_review_report_actions_single_report_and_notifies_author_once(mock_db):
+    post_id = uuid.uuid4()
+    author_id = uuid.uuid4()
+    admin_id = uuid.uuid4()
+    post = _post(state=PostState.published, author_user_id=author_id)
+    post.id = post_id
+
+    report1 = _report()
+    report1.entity_id = post_id
+    reporter_user = _user()
+    reporter_profile = SimpleNamespace(first_name="Alice", last_name="Smith")
+    row = (report1, reporter_user, reporter_profile, None, None)
+
+    db = mock_db()
+    # Mock db.execute to return post
+    post_scalar = MagicMock()
+    post_scalar.scalar_one_or_none.return_value = post
+    db.execute = AsyncMock(return_value=post_scalar)
+
+    with (
+        patch("apps.report.services.report_service.get_report_by_id", AsyncMock(return_value=row)),
+        patch("apps.report.services.report_service._build_report_review_metadata", AsyncMock(return_value={})),
+        patch("apps.report.services.report_service._apply_actioned_report_to_entity", AsyncMock(return_value=None)),
+        patch("apps.report.services.report_service.update_report", AsyncMock(return_value=report1)) as mock_update,
+        patch("apps.administration.services.admin_activity_log_service.create_admin_activity_log", AsyncMock()) as mock_activity_log,
+        patch("apps.notifications.services.notify_post_author", AsyncMock()) as mock_notify,
+        patch(
+            "apps.report.services.report_service.count_reports_by_entity_keys",
+            AsyncMock(return_value={(ReportEntityType.post, post_id): 3}),
+        ),
+        patch("apps.report.services.report_service.get_previous_report_comments", AsyncMock(return_value=[])),
+    ):
+        payload = ReportReviewRequest(
+            report_id=report1.id,
+            status=ReportStatus.actioned,
+            admin_comment="Flagged inappropriate content",
+        )
+        response = await svc.review_report_admin_service(
+            db,
+            admin_id,
+            payload,
+            actor_role="moderator",
+        )
+
+    assert response.status is True
+    mock_update.assert_awaited_once_with(
+        db,
+        report_id=report1.id,
+        status=ReportStatus.actioned,
+        admin_comment="Flagged inappropriate content",
+        moderator_id=admin_id,
+    )
+    # Verify exactly 1 admin activity log was created
+    mock_activity_log.assert_awaited_once()
+    # Verify exactly 1 notification was sent to author
+    mock_notify.assert_awaited_once_with(
+        db,
+        post_id=post_id,
+        author_user_id=author_id,
+        notification_type="POST_FLAGGED",
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_report_moderator_reuses_open_report_moderator(mock_db, scalar_result):
+    entity_id = uuid.uuid4()
+    existing_mod_id = uuid.uuid4()
+    db = mock_db(scalar_result(existing_mod_id))
+
+    mod_id = await svc._resolve_report_moderator_id(
+        db,
+        entity_type=ReportEntityType.user,
+        entity_id=entity_id,
+    )
+
+    assert mod_id == existing_mod_id
+
+
+@pytest.mark.asyncio
+async def test_resolve_report_moderator_assigns_round_robin_when_no_open_report(mock_db, scalar_result):
+    entity_id = uuid.uuid4()
+    assigned_mod_id = uuid.uuid4()
+    db = mock_db(scalar_result(None))
+
+    with patch(
+        "apps.report.services.report_service.assign_next_moderator_round_robin",
+        AsyncMock(return_value=assigned_mod_id),
+    ) as mock_rr:
+        mod_id = await svc._resolve_report_moderator_id(
+            db,
+            entity_type=ReportEntityType.user,
+            entity_id=entity_id,
+        )
+
+    assert mod_id == assigned_mod_id
+    mock_rr.assert_awaited_once_with(db)
+
+
+@pytest.mark.asyncio
+async def test_create_report_on_repost_resolves_to_original_post(mock_db, scalar_result):
+    reporter_id = uuid.uuid4()
+    repost_id = uuid.uuid4()
+    original_post = _post()
+    repost = SimpleNamespace(id=repost_id, post_id=original_post.id, is_deleted=False)
+    revision = SimpleNamespace(id=uuid.uuid4(), post_id=original_post.id)
+    moderator_id = uuid.uuid4()
+
+    payload = ReportCreateRequest(
+        entity_type=ReportEntityType.post,
+        entity_id=repost_id,
+        reason="Inappropriate Content",
+    )
+
+    # 1. Post lookup by repost_id -> None
+    # 2. Repost lookup by repost_id -> repost
+    # 3. Post lookup by repost.post_id -> original_post
+    # 4. Duplicate report check -> None
+    db = mock_db(
+        scalar_result(None),
+        scalar_result(repost),
+        scalar_result(original_post),
+        scalar_result(None),
+    )
+
+    with (
+        patch.object(svc, "get_latest_post_revision", AsyncMock(return_value=revision)),
+        patch.object(svc, "_resolve_report_moderator_id", AsyncMock(return_value=moderator_id)),
+        patch.object(svc, "create_report", AsyncMock(return_value=_report())) as mock_create_report,
+        patch.object(svc, "_apply_post_report_threshold", AsyncMock(return_value=False)),
+    ):
+        response = await svc.create_report_service(db, reporter_id, payload)
+
+    assert response.status is True
+    assert response.message == "Report submitted successfully."
+    mock_create_report.assert_awaited_once()
+    assert mock_create_report.await_args.kwargs["entity_id"] == original_post.id
+    assert mock_create_report.await_args.kwargs["entity_type"] == ReportEntityType.post
+    assert mock_create_report.await_args.kwargs["post_revision_id"] == revision.id
+    db.commit.assert_awaited_once()
+
+
+
+

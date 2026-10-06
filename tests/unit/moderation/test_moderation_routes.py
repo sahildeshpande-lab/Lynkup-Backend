@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+from uuid import uuid4
+
 from fastapi.testclient import TestClient
 
 from apps.moderation import routes as moderation_routes
 from core.database.session import get_session
+from core.security.auth import get_current_superadmin
 from entrypoints.api import app
 
 client = TestClient(app)
@@ -17,12 +21,18 @@ async def _override_session():
     yield _NoopSession()
 
 
+async def _override_superadmin():
+    return MagicMock(id=uuid4(), role="superadmin", email="superadmin@example.com")
+
+
 def setup_module() -> None:
     app.dependency_overrides[get_session] = _override_session
+    app.dependency_overrides[get_current_superadmin] = _override_superadmin
 
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_session, None)
+    app.dependency_overrides.pop(get_current_superadmin, None)
 
 
 def test_get_moderation_words_route(monkeypatch) -> None:
@@ -44,8 +54,10 @@ def test_get_moderation_words_route(monkeypatch) -> None:
 
 
 def test_update_moderation_words_route(monkeypatch) -> None:
-    async def _mock_update(payload, _db):
+    async def _mock_update(payload, _db, *, actor_user_id=None, actor_role=None):
         assert payload.profanityWords == ["word2"]
+        assert actor_user_id is not None
+        assert actor_role == "superadmin"
         return {"profanityWords": ["word2"]}
 
     monkeypatch.setattr(moderation_routes, "update_moderation_words", _mock_update)

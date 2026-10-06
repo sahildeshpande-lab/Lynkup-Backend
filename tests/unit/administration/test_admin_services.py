@@ -4,7 +4,7 @@ import pytest
 import uuid
 import jwt
 from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 from fastapi import HTTPException
 from sqlmodel import select
 from sqlalchemy.orm import selectinload
@@ -12,34 +12,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.database.session import async_session_factory, engine
 from core.database.init import init_db
 
-from apps.accounts.db_models import User, Role, UserRole, RefreshToken
+from apps.accounts.db_models import User, Role, UserRole, RefreshToken, ConsentRecord, PasswordResetToken
 from apps.profiles.db_models import Profile
 from common.enums import UserStatus, OnboardingStatus, EducationLevel
 
 from apps.accounts.schemas import EmailSignupRequest, RefreshTokenRequest
 from apps.administration.schemas import (
     AdminUserActionRequest,
+    AdminResetPasswordRequest,
     ChangePasswordRequest,
     AdminUserCreateRequest,
     AdminLoginRequest,
+    AdminSignupRequest,
 )
 
 from apps.administration.services import (
     admin_token,
     admin_signin,
+    admin_signup,
     list_users,
     export_users,
     admin_create_user,
     admin_get_user,
     admin_delete_user,
     admin_update_user_status,
+    admin_reset_password,
     change_password,
     PASSWORD_HASHER,
     _generate_admin_tokens,
 )
 from common.enums import AdminUserStatus, inactive_account_message
 from common.exceptions import ApiError
-from apps.accounts.services import JWT_SECRET, JWT_ALGORITHM, _generate_tokens
+from apps.accounts.services import ACCESS_TOKEN_EXPIRE_MINUTES, JWT_SECRET, JWT_ALGORITHM, _generate_tokens
 
 
 
@@ -54,6 +58,7 @@ async def test_admin_token_success(monkeypatch) -> None:
             user = User(
                 firebase_uid=uid,
                 email="user_admin_token_test@example.com",
+                password_hash=PASSWORD_HASHER.hash("AdminPassword123!"),
                 role="superadmin",
                 status="active",
             )
@@ -61,13 +66,20 @@ async def test_admin_token_success(monkeypatch) -> None:
             await session.commit()
             await session.refresh(user)
             
-            # Generate actual tokens
-            _access, refresh = _generate_admin_tokens(user)
-            
+            from apps.administration.services.session_service import create_admin_session
+
+            admin_session = await create_admin_session(session, user)
+            await session.commit()
+            # Generate actual tokens bound to independent session_id
+            _access, refresh, jti = _generate_admin_tokens(user, session_id=admin_session.id)
+            admin_session.refresh_jti = jti
+            await session.commit()
+
         async with async_session_factory() as session:
             payload = RefreshTokenRequest(refreshToken=refresh)
             res = await admin_token(payload, session)
             assert "access_token" in res
+            assert "refresh_token" in res
             assert res["token_type"] == "bearer"
     finally:
         await engine.dispose()
@@ -111,6 +123,64 @@ async def test_list_users() -> None:
 
 
 @pytest.mark.asyncio
+async def test_admin_lists_include_deleting_status_users(monkeypatch) -> None:
+    from apps.administration.services import user_management_service as ums
+    from common.enums import UserStatus
+
+    deleting_user = {
+        "email": "deleting_user@example.com",
+        "status": UserStatus.deleting.value,
+        "is_deleted": True,
+    }
+    deleting_mod = {
+        "email": "deleting_mod@example.com",
+        "status": UserStatus.deleting.value,
+        "is_deleted": True,
+    }
+    deleting_viewer = {
+        "email": "deleting_viewer@example.com",
+        "status": UserStatus.deleting.value,
+        "is_deleted": True,
+    }
+
+    async def _fake_fetch(_db, page=None, page_size=None, search=None, role=None, *args, **kwargs):
+        if role == "user":
+            return [deleting_user]
+        if role == "moderator":
+            return [deleting_mod]
+        if role == "viewer":
+            return [deleting_viewer]
+        return []
+
+
+    class _Scalar:
+        def scalar_one(self):
+            return 1
+
+    class _Session:
+        async def execute(self, stmt):
+            compiled = str(stmt)
+            assert "deleting" in compiled.lower() or "is_deleted" in compiled.lower()
+            return _Scalar()
+
+    monkeypatch.setattr(ums, "_fetch_users_with_details", _fake_fetch)
+
+    db = _Session()
+    users = await ums.list_users(page=1, page_size=10, db=db)
+    moderators = await ums.list_moderators(page=1, page_size=10, db=db)
+    viewers = await ums.list_viewer(page=1, page_size=10, db=db)
+
+    assert users["items"][0]["email"] == "deleting_user@example.com"
+    assert users["items"][0]["status"] == "deleting"
+    assert moderators["items"][0]["email"] == "deleting_mod@example.com"
+    assert viewers["items"][0]["email"] == "deleting_viewer@example.com"
+
+    clause = str(ums._admin_visible_users_clause().compile(compile_kwargs={"literal_binds": True}))
+    assert "deleting" in clause
+    assert "is_deleted" in clause
+
+
+@pytest.mark.asyncio
 async def test_admin_create_user_via_signup_removed_uses_admin_create_user(monkeypatch) -> None:
     """Public admin signup was removed; superadmin creates users via admin_create_user."""
     try:
@@ -128,7 +198,6 @@ async def test_admin_create_user_via_signup_removed_uses_admin_create_user(monke
             "apps.administration.services.user_management_service.create_firebase_user",
             _mock_create_firebase_user,
         )
-
         email = f"user_admin_create_{uuid.uuid4()}@example.com"
         payload = AdminUserCreateRequest(
             firstName="John",
@@ -226,6 +295,14 @@ async def test_admin_create_user_creates_firebase_account(monkeypatch) -> None:
             assert user.firebase_uid == firebase_uid
             assert user.password_hash is not None
             assert user.role == "user"
+
+            consent_stmt = select(ConsentRecord).where(ConsentRecord.user_id == user.id)
+            consents = (await session.execute(consent_stmt)).scalars().all()
+            assert len(consents) == 1
+            assert consents[0].consent_type == "terms_and_conditions"
+            assert consents[0].granted is True
+            assert consents[0].ip_address is None
+            assert consents[0].consented_at is not None
     finally:
         await engine.dispose()
 
@@ -271,6 +348,116 @@ async def test_admin_change_password_updates_firebase_for_firebase_user(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_admin_reset_password_allows_regular_app_user(monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+    token_val = str(uuid.uuid4())
+    user_id = uuid.uuid4()
+
+    user = User(
+        id=user_id,
+        firebase_uid="firebase-app-user",
+        email="app_user_reset@example.com",
+        password_hash=PASSWORD_HASHER.hash("OldPassword123!"),
+        status=UserStatus.active,
+    )
+    user.roles = []
+
+    reset_token = PasswordResetToken(
+        user_id=user_id,
+        token=token_val,
+        expires_at=now + timedelta(minutes=30),
+    )
+
+    execute_results = iter(
+        [
+            MagicMock(scalar_one_or_none=MagicMock(return_value=reset_token)),
+            MagicMock(scalar_one_or_none=MagicMock(return_value=user)),
+            MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),
+        ]
+    )
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(side_effect=lambda *_args, **_kwargs: next(execute_results))
+
+    firebase_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "core.auth.services.update_firebase_password",
+        lambda uid, password: firebase_calls.append((uid, password)),
+    )
+    monkeypatch.setattr("core.auth.services.revoke_firebase_tokens", lambda _uid: None)
+
+    res = await admin_reset_password(
+        AdminResetPasswordRequest(token=token_val, new_password="NewPassword123!"),
+        mock_db,
+    )
+
+    assert res.status is True
+    assert user.role == "user"
+    assert PASSWORD_HASHER.verify("NewPassword123!", user.password_hash)
+    assert firebase_calls == [("firebase-app-user", "NewPassword123!")]
+
+
+@pytest.mark.asyncio
+async def test_admin_reset_password_succeeds_when_firebase_user_missing(monkeypatch) -> None:
+    from firebase_admin import auth
+
+    now = datetime.now(timezone.utc)
+    token_val = str(uuid.uuid4())
+    stale_uid = "stale-firebase-uid"
+    user_id = uuid.uuid4()
+
+    user = User(
+        id=user_id,
+        firebase_uid=stale_uid,
+        email="moderator_reset@example.com",
+        password_hash=PASSWORD_HASHER.hash("OldPassword123!"),
+        status=UserStatus.active,
+    )
+    moderator_role = Role(id=uuid.uuid4(), name="moderator")
+    user.roles = [UserRole(user_id=user_id, role_id=moderator_role.id, role=moderator_role)]
+
+    reset_token = PasswordResetToken(
+        user_id=user_id,
+        token=token_val,
+        expires_at=now + timedelta(minutes=30),
+    )
+
+    execute_results = iter(
+        [
+            MagicMock(scalar_one_or_none=MagicMock(return_value=reset_token)),
+            MagicMock(scalar_one_or_none=MagicMock(return_value=user)),
+            MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),
+        ]
+    )
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(side_effect=lambda *_args, **_kwargs: next(execute_results))
+
+    def _raise_user_not_found(_uid, _password):
+        raise auth.UserNotFoundError(
+            "No user record found for the given identifier (USER_NOT_FOUND)."
+        )
+
+    monkeypatch.setattr("core.auth.services.update_firebase_password", _raise_user_not_found)
+    revoked_uids: list[str] = []
+    monkeypatch.setattr(
+        "core.auth.services.revoke_firebase_tokens",
+        lambda uid: revoked_uids.append(uid),
+    )
+
+    res = await admin_reset_password(
+        AdminResetPasswordRequest(token=token_val, new_password="NewPassword123!"),
+        mock_db,
+    )
+
+    assert res.status is True
+    assert res.message == "Password reset successful"
+    assert PASSWORD_HASHER.verify("NewPassword123!", user.password_hash)
+    assert user.firebase_uid is None
+    assert revoked_uids == []
+    assert reset_token.used_at is not None
+    mock_db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_admin_change_password_local_user_does_not_call_firebase(monkeypatch) -> None:
     try:
         await init_db()
@@ -306,6 +493,246 @@ async def test_admin_change_password_local_user_does_not_call_firebase(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_admin_change_password_success_with_different_new_password(monkeypatch) -> None:
+    original_hash = PASSWORD_HASHER.hash("OldPassword123!")
+    user = User(
+        firebase_uid="firebase-uid-admin-success",
+        email="admin_success_pw@example.com",
+        password_hash=original_hash,
+        status=UserStatus.active,
+    )
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(
+        return_value=MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[]))))
+    )
+
+    firebase_calls: list[tuple[str, str]] = []
+    revoked_uids: list[str] = []
+    monkeypatch.setattr(
+        "core.auth.services.update_firebase_password",
+        lambda uid, password: firebase_calls.append((uid, password)),
+    )
+    monkeypatch.setattr(
+        "core.auth.services.revoke_firebase_tokens",
+        lambda uid: revoked_uids.append(uid),
+    )
+
+    res = await change_password(
+        ChangePasswordRequest(
+            current_password="OldPassword123!",
+            new_password="NewPassword123!",
+        ),
+        user,
+        mock_db,
+    )
+
+    assert res.status is True
+    assert res.message == "Password updated successfully. Please sign in again."
+    assert res.data is None
+    assert user.password_hash != original_hash
+    assert PASSWORD_HASHER.verify("NewPassword123!", user.password_hash)
+    assert firebase_calls == [("firebase-uid-admin-success", "NewPassword123!")]
+    assert revoked_uids == ["firebase-uid-admin-success"]
+    mock_db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_admin_change_password_rejects_incorrect_current_password(monkeypatch) -> None:
+    original_hash = PASSWORD_HASHER.hash("OldPassword123!")
+    user = User(
+        firebase_uid="firebase-uid-admin-wrong",
+        email="admin_wrong_pw@example.com",
+        password_hash=original_hash,
+        status=UserStatus.active,
+    )
+    mock_db = AsyncMock()
+
+    firebase_calls: list[tuple[str, str]] = []
+    revoked_uids: list[str] = []
+    monkeypatch.setattr(
+        "core.auth.services.update_firebase_password",
+        lambda uid, password: firebase_calls.append((uid, password)),
+    )
+    monkeypatch.setattr(
+        "core.auth.services.revoke_firebase_tokens",
+        lambda uid: revoked_uids.append(uid),
+    )
+
+    res = await change_password(
+        ChangePasswordRequest(
+            current_password="WrongPassword123!",
+            new_password="NewPassword123!",
+        ),
+        user,
+        mock_db,
+    )
+
+    assert res.status is False
+    assert res.message == "existing password does not match"
+    assert res.data is None
+    assert user.password_hash == original_hash
+    assert firebase_calls == []
+    assert revoked_uids == []
+    mock_db.execute.assert_not_awaited()
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_admin_change_password_rejects_same_new_password(monkeypatch) -> None:
+    original_hash = PASSWORD_HASHER.hash("Password123")
+    user = User(
+        firebase_uid="firebase-uid-admin-same",
+        email="admin_same_pw@example.com",
+        password_hash=original_hash,
+        status=UserStatus.active,
+    )
+    mock_db = AsyncMock()
+
+    firebase_calls: list[tuple[str, str]] = []
+    revoked_uids: list[str] = []
+    monkeypatch.setattr(
+        "core.auth.services.update_firebase_password",
+        lambda uid, password: firebase_calls.append((uid, password)),
+    )
+    monkeypatch.setattr(
+        "core.auth.services.revoke_firebase_tokens",
+        lambda uid: revoked_uids.append(uid),
+    )
+
+    res = await change_password(
+        ChangePasswordRequest(
+            current_password="Password123",
+            new_password="Password123",
+        ),
+        user,
+        mock_db,
+    )
+
+    assert res.status is False
+    assert res.message == "New password cannot be the same as current password"
+    assert res.data is None
+    assert user.password_hash == original_hash
+    assert firebase_calls == []
+    assert revoked_uids == []
+    mock_db.execute.assert_not_awaited()
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_admin_change_password_invalidates_all_sessions() -> None:
+    from apps.administration.services.auth_service import validate_admin_session_token
+
+    user_id = uuid.uuid4()
+    user = User(
+        id=user_id,
+        email="admin_session_invalidate@example.com",
+        password_hash=PASSWORD_HASHER.hash("OldPassword123!"),
+        status=UserStatus.active,
+    )
+    user.role = "moderator"
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(
+        return_value=MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[]))))
+    )
+
+    old_access, old_refresh, _jti = _generate_admin_tokens(user, session_id=uuid.uuid4())
+    old_access_decoded = jwt.decode(old_access, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    old_refresh_decoded = jwt.decode(old_refresh, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+
+    res = await change_password(
+        ChangePasswordRequest(
+            current_password="OldPassword123!",
+            new_password="NewPassword123!",
+        ),
+        user,
+        mock_db,
+    )
+
+    assert res.status is True
+    assert res.data is None
+
+    with pytest.raises(ApiError, match="Session expired"):
+        validate_admin_session_token(old_access_decoded, user)
+
+    with pytest.raises(ApiError, match="Session expired"):
+        validate_admin_session_token(old_refresh_decoded, user)
+
+
+@pytest.mark.asyncio
+async def test_admin_token_rejects_refresh_after_password_change(monkeypatch) -> None:
+    user_id = uuid.uuid4()
+    user = User(
+        id=user_id,
+        email="admin_refresh_invalidate@example.com",
+        password_hash=PASSWORD_HASHER.hash("Password123!"),
+        status=UserStatus.active,
+    )
+    user.role = "superadmin"
+    user.roles = []
+
+    _access, refresh, _jti = _generate_admin_tokens(user, session_id=uuid.uuid4())
+    user.password_hash = PASSWORD_HASHER.hash("NewPassword123!")
+
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(
+        return_value=MagicMock(
+            scalar_one_or_none=MagicMock(return_value=user),
+        )
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_token(RefreshTokenRequest(refreshToken=refresh), mock_db)
+
+    assert exc.value.status_code == 401
+    assert "Session expired" in str(exc.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_admin_reset_password_invalidates_existing_admin_sessions(monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+    token_val = str(uuid.uuid4())
+    user_id = uuid.uuid4()
+    original_hash = PASSWORD_HASHER.hash("OldPassword123!")
+
+    user = User(
+        id=user_id,
+        email="staff_reset@example.com",
+        password_hash=original_hash,
+        status=UserStatus.active,
+    )
+    user.roles = []
+    _old_access, _old_refresh, _jti = _generate_admin_tokens(user, session_id=uuid.uuid4())
+
+    reset_token = PasswordResetToken(
+        user_id=user_id,
+        token=token_val,
+        expires_at=now + timedelta(minutes=30),
+    )
+
+    execute_results = iter(
+        [
+            MagicMock(scalar_one_or_none=MagicMock(return_value=reset_token)),
+            MagicMock(scalar_one_or_none=MagicMock(return_value=user)),
+            MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),
+            MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),
+        ]
+    )
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(side_effect=lambda *_args, **_kwargs: next(execute_results))
+    monkeypatch.setattr("core.auth.services.revoke_firebase_tokens", lambda _uid: None)
+
+    res = await admin_reset_password(
+        AdminResetPasswordRequest(token=token_val, new_password="NewPassword123!"),
+        mock_db,
+    )
+
+    assert res.status is True
+    assert user.password_hash != original_hash
+    new_access, _new_refresh, _jti = _generate_admin_tokens(user, session_id=uuid.uuid4())
+    assert new_access != _old_access
+
+
+@pytest.mark.asyncio
 async def test_admin_get_user_not_found() -> None:
     try:
         await init_db()
@@ -315,6 +742,158 @@ async def test_admin_get_user_not_found() -> None:
             assert exc.value.status_code == 404
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_list_users_includes_moderation_notes(monkeypatch) -> None:
+    from apps.administration.services import user_management_service as ums
+    from common.enums import ReportEntityType
+
+    user_id = uuid.uuid4()
+    other_id = uuid.uuid4()
+
+    async def _fake_fetch(_db, page=None, page_size=None, search=None, role=None, *args, **kwargs):
+        return [
+            {"id": str(user_id), "email": "with_notes@example.com", "moderation_notes": "Spam / harassment"},
+            {"id": str(other_id), "email": "no_notes@example.com", "moderation_notes": None},
+        ]
+
+
+    class _Scalar:
+        def scalar_one(self):
+            return 2
+
+    class _Session:
+        async def execute(self, stmt):
+            return _Scalar()
+
+    monkeypatch.setattr(ums, "_fetch_users_with_details", _fake_fetch)
+
+    res = await ums.list_users(page=1, page_size=10, db=_Session())
+    assert res["items"][0]["moderation_notes"] == "Spam / harassment"
+    assert res["items"][1]["moderation_notes"] is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_users_with_details_attaches_moderation_notes(monkeypatch) -> None:
+    from apps.administration.services import user_management_service as ums
+    from common.enums import ReportEntityType
+
+    user_id = uuid.uuid4()
+    user = User(
+        id=user_id,
+        email=f"list_notes_{user_id}@example.com",
+        firebase_uid=f"fb-{user_id}",
+        status=UserStatus.suspended,
+    )
+
+    class _Row:
+        User = user
+        Profile = None
+        university_name = None
+        country_name = None
+
+    class _Result:
+        def all(self):
+            return [_Row()]
+
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_Result())
+
+    with (
+        patch.object(
+            ums,
+            "build_user_base_response",
+            AsyncMock(return_value={"id": str(user_id), "email": user.email}),
+        ),
+        patch(
+            "apps.moderation.repositories.get_latest_comments_by_entity_ids",
+            AsyncMock(return_value={user_id: "Spam / harassment"}),
+        ) as get_notes,
+    ):
+        items = await ums._fetch_users_with_details(db, page=1, page_size=10, role="user")
+
+    assert items[0]["moderation_notes"] == "Spam / harassment"
+    get_notes.assert_awaited_once()
+    assert get_notes.await_args.kwargs["entity_type"] == ReportEntityType.user
+    assert get_notes.await_args.kwargs["entity_ids"] == [user_id]
+
+
+@pytest.mark.asyncio
+async def test_admin_get_user_includes_latest_moderation_notes() -> None:
+    from apps.administration.services import user_management_service as svc
+    from apps.moderation.db_models import ModerationHistory
+    from common.enums import ReportEntityType
+
+    user_id = uuid.uuid4()
+    user = User(
+        id=user_id,
+        email=f"notes_{user_id}@example.com",
+        firebase_uid=f"fb-{user_id}",
+        status=UserStatus.suspended,
+    )
+    history = ModerationHistory(
+        entity_type=ReportEntityType.user,
+        entity_id=user_id,
+        action="suspended",
+        comment="Spam / harassment",
+    )
+
+    user_result = MagicMock()
+    user_result.scalar_one_or_none.return_value = user
+    profile_result = MagicMock()
+    profile_result.scalar_one_or_none.return_value = None
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[user_result, profile_result])
+
+    with (
+        patch.object(svc, "build_user_base_response", AsyncMock(return_value={"id": str(user_id)})),
+        patch(
+            "apps.moderation.repositories.get_latest",
+            AsyncMock(return_value=history),
+        ) as get_latest,
+    ):
+        result = await svc.admin_get_user(str(user_id), db)
+
+    assert result["user"]["moderation_notes"] == "Spam / harassment"
+    get_latest.assert_awaited_once()
+    assert get_latest.await_args.kwargs["entity_type"] == ReportEntityType.user
+    assert get_latest.await_args.kwargs["entity_id"] == user_id
+
+
+@pytest.mark.asyncio
+async def test_admin_get_user_moderation_notes_null_when_no_history() -> None:
+    from apps.administration.services import user_management_service as svc
+    from common.enums import ReportEntityType
+
+    user_id = uuid.uuid4()
+    user = User(
+        id=user_id,
+        email=f"no_notes_{user_id}@example.com",
+        firebase_uid=f"fb-{user_id}",
+        status=UserStatus.active,
+    )
+
+    user_result = MagicMock()
+    user_result.scalar_one_or_none.return_value = user
+    profile_result = MagicMock()
+    profile_result.scalar_one_or_none.return_value = None
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[user_result, profile_result])
+
+    with (
+        patch.object(svc, "build_user_base_response", AsyncMock(return_value={"id": str(user_id)})),
+        patch(
+            "apps.moderation.repositories.get_latest",
+            AsyncMock(return_value=None),
+        ) as get_latest,
+    ):
+        result = await svc.admin_get_user(str(user_id), db)
+
+    assert result["user"]["moderation_notes"] is None
+    get_latest.assert_awaited_once()
+    assert get_latest.await_args.kwargs["entity_type"] == ReportEntityType.user
 
 
 @pytest.mark.asyncio
@@ -442,6 +1021,7 @@ async def test_admin_actions(monkeypatch) -> None:
     try:
         await init_db()
         monkeypatch.setattr("core.auth.services.revoke_firebase_tokens", lambda *args: None)
+        monkeypatch.setattr("core.auth.services.delete_firebase_user", lambda *args: None)
         monkeypatch.setattr("core.auth.services.disable_firebase_user", lambda *args: None)
         monkeypatch.setattr("core.auth.services.enable_firebase_user", lambda *args: None)
         monkeypatch.setattr(
@@ -466,7 +1046,7 @@ async def test_admin_actions(monkeypatch) -> None:
         async with async_session_factory() as session:
             del_res = await admin_delete_user(str(user.id), "user", session)
             assert del_res["deleted"] is True
-            assert del_res["status"] == "deleting"
+            assert del_res["status"] == "Deleting"
             assert "user" in del_res
             assert del_res["user"]["is_deleted"] is True
             db_user = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
@@ -481,7 +1061,7 @@ async def test_admin_actions(monkeypatch) -> None:
                 moderator_id=user.id,
                 comment="Spam / harassment",
             )
-            assert sus_res["status"] == "suspended"
+            assert sus_res["status"] == "Suspended"
             
         # Test ban user
         async with async_session_factory() as session:
@@ -492,7 +1072,7 @@ async def test_admin_actions(monkeypatch) -> None:
                 moderator_id=user.id,
                 comment="Repeated abuse",
             )
-            assert ban_res["status"] == "banned"
+            assert ban_res["status"] == "Banned"
             
     finally:
         await engine.dispose()
@@ -563,30 +1143,27 @@ async def test_admin_signin_invalid_credentials() -> None:
 
 @pytest.mark.asyncio
 async def test_admin_signin_non_superadmin() -> None:
-    try:
-        await init_db()
-        email = f"admin_user_{uuid.uuid4()}@example.com"
-        async with async_session_factory() as session:
-            user = User(
-                email=email,
-                password_hash=PASSWORD_HASHER.hash("AdminPassword123!"),
-                status=UserStatus.active,
-            )
-            session.add(user)
-            await session.commit()
-            await session.refresh(user)
-            
-            from apps.accounts.services import assign_user_role
-            await assign_user_role(session, user, "user")
-            await session.commit()
+    email = f"admin_user_{uuid.uuid4()}@example.com"
+    user = User(
+        email=email,
+        password_hash=PASSWORD_HASHER.hash("AdminPassword123!"),
+        status=UserStatus.active,
+    )
+    user.roles = []
 
-        async with async_session_factory() as session:
-            payload = AdminLoginRequest(email=email, password="AdminPassword123!")
-            res = await admin_signin(payload, session)
-            assert res.status is False
-            assert "Forbidden" in res.message
-    finally:
-        await engine.dispose()
+    async def mock_execute(_stmt):
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = user
+        return mock_result
+
+    db = AsyncMock()
+    db.execute = mock_execute
+
+    payload = AdminLoginRequest(email=email, password="AdminPassword123!")
+    with pytest.raises(HTTPException) as exc_info:
+        await admin_signin(payload, db)
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Forbidden: Admin access required"
 
 
 @pytest.mark.asyncio
@@ -642,19 +1219,30 @@ async def test_admin_token_expiration_rules() -> None:
             stmt = select(User).options(selectinload(User.roles)).where(User.id == user.id)
             user = (await session.execute(stmt)).scalar_one()
 
-        # Generate tokens
-        access_token, refresh_token = _generate_admin_tokens(user)
+        # Generate tokens bound to an independent session UUID
+        from core.auth.config import settings as auth_settings
+
+        session_id = uuid.uuid4()
+        access_token, refresh_token, jti = _generate_admin_tokens(user, session_id=session_id)
         
-        # Decode access token and verify exp is in ~1 day
+        # Decode access token and verify admin TTL + independent session_id
         decoded_access = jwt.decode(access_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         exp_time = datetime.fromtimestamp(decoded_access["exp"], tz=timezone.utc)
         now = datetime.now(timezone.utc)
         diff = exp_time - now
-        assert abs(diff.total_seconds() - 86400) < 60  # close to 24 hours (1 day)
+        expected_access = auth_settings.admin_access_token_expire_minutes * 60
+        assert abs(diff.total_seconds() - expected_access) < 60
+        assert decoded_access["session_id"] == str(session_id)
+        assert decoded_access["session_id"] != str(user.id)
 
-        # Decode refresh token and verify exp is NOT in refresh payload
+        # Refresh tokens must expire and carry a rotatable jti
         decoded_refresh = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        assert "exp" not in decoded_refresh
+        assert "exp" in decoded_refresh
+        assert decoded_refresh["jti"] == jti
+        assert decoded_refresh["session_id"] == str(session_id)
+        refresh_exp = datetime.fromtimestamp(decoded_refresh["exp"], tz=timezone.utc)
+        expected_refresh = auth_settings.admin_refresh_token_expire_minutes * 60
+        assert abs((refresh_exp - now).total_seconds() - expected_refresh) < 60
     finally:
         await engine.dispose()
 
@@ -687,8 +1275,9 @@ async def test_admin_update_user_status_history_then_notify_then_firebase() -> N
         call_order.append("firebase")
 
     db = AsyncMock()
-    db_result = AsyncMock()
-    db_result.scalar_one_or_none = lambda: user
+    db_result = MagicMock()
+    db_result.scalar_one_or_none.return_value = user
+    db_result.first.return_value = None
     db.execute = AsyncMock(return_value=db_result)
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
@@ -703,6 +1292,10 @@ async def test_admin_update_user_status_history_then_notify_then_firebase() -> N
             "apps.notifications.services.notify_account_status",
             AsyncMock(side_effect=_notify),
         ) as notify,
+        patch(
+            "apps.administration.services.admin_activity_log_service.create_admin_activity_log",
+            AsyncMock(),
+        ),
         patch(
             "core.auth.services.disable_firebase_user",
             side_effect=_disable,
@@ -720,7 +1313,7 @@ async def test_admin_update_user_status_history_then_notify_then_firebase() -> N
             comment="Spam / harassment",
         )
 
-    assert result["status"] == "suspended"
+    assert result["status"] == "Suspended"
     assert call_order == ["history", "notify", "firebase"]
     history.assert_awaited_once()
     assert history.await_args.kwargs["action"] == "suspended"
@@ -730,3 +1323,136 @@ async def test_admin_update_user_status_history_then_notify_then_firebase() -> N
     assert notify.await_args.kwargs["reason"] == "Spam / harassment"
     assert notify.await_args.kwargs["sender_user_id"] == moderator_id
     assert user.status == UserStatus.suspended
+
+
+@pytest.mark.asyncio
+async def test_admin_update_user_status_clears_queue_counts() -> None:
+    from common.enums import ReportEntityType
+    from apps.administration.services import user_management_service as svc
+    user_id = uuid.uuid4()
+    moderator_id = uuid.uuid4()
+    user = User(id=user_id, email="reported_user@example.com", status=UserStatus.active)
+    user.roles = []
+
+    db = AsyncMock()
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = user
+    exec_result.first.return_value = None
+    db.execute.return_value = exec_result
+
+    with (
+        patch.object(svc, "build_user_base_response", AsyncMock(return_value={"userId": str(user_id)})),
+        patch("apps.report.repositories.report_repository.clear_entity_report_queue_counts", AsyncMock()) as clear_counts,
+        patch("apps.moderation.services.record_moderation_history", AsyncMock()),
+        patch("apps.notifications.services.notify_account_status", AsyncMock()),
+        patch("apps.administration.services.admin_activity_log_service.create_admin_activity_log", AsyncMock()),
+        patch("core.auth.services.disable_firebase_user", lambda *_a, **_k: None),
+    ):
+        result = await admin_update_user_status(
+            str(user_id),
+            AdminUserStatus.banned,
+            db,
+            moderator_id=moderator_id,
+            comment="Banned for reports",
+        )
+
+    assert result["status"] == "Banned"
+    clear_counts.assert_awaited_once_with(
+        db,
+        entity_type=ReportEntityType.user,
+        entity_id=user_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_admin_signup_rejects_role_not_in_db(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "apps.administration.services.auth_service.auth_settings",
+        SimpleNamespace(is_disposable_email_enabled=False),
+    )
+
+    caller = User(id=uuid.uuid4(), email="creator@example.com", status=UserStatus.active)
+    caller.role = "superadmin"
+
+    payload = AdminSignupRequest(
+        firstName="Admin",
+        lastName="User",
+        email=f"admin_{uuid.uuid4()}@example.com",
+        password="Secret123",
+        role="superadmin",
+    )
+
+    async def mock_execute(_stmt):
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        return mock_result
+
+    db = AsyncMock()
+    db.execute = mock_execute
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_signup(payload, db, current_user=caller)
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "Forbidden: Admin access required"
+
+
+@pytest.mark.asyncio
+async def test_admin_signup_rejects_non_staff_role(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "apps.administration.services.auth_service.auth_settings",
+        SimpleNamespace(is_disposable_email_enabled=False),
+    )
+
+    caller = User(id=uuid.uuid4(), email="creator@example.com", status=UserStatus.active)
+    caller.role = "superadmin"
+
+    payload = AdminSignupRequest(
+        firstName="Admin",
+        lastName="User",
+        email=f"admin_{uuid.uuid4()}@example.com",
+        password="Secret123",
+        role="user",
+    )
+
+    async def mock_execute(_stmt):
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        return mock_result
+
+    db = AsyncMock()
+    db.execute = mock_execute
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_signup(payload, db, current_user=caller)
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "Forbidden: Admin access required"
+
+
+@pytest.mark.asyncio
+async def test_admin_signup_rejects_non_superadmin_caller(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "apps.administration.services.auth_service.auth_settings",
+        SimpleNamespace(is_disposable_email_enabled=False),
+    )
+    caller = User(id=uuid.uuid4(), email="mod@example.com", status=UserStatus.active)
+    caller.role = "moderator"
+    payload = AdminSignupRequest(
+        firstName="Admin",
+        lastName="User",
+        email=f"admin_{uuid.uuid4()}@example.com",
+        password="Secret123",
+        role="viewer",
+    )
+    with pytest.raises(HTTPException) as exc:
+        await admin_signup(payload, AsyncMock(), current_user=caller)
+    assert exc.value.status_code == 403
+    assert "Superadmin" in str(exc.value.detail)
+

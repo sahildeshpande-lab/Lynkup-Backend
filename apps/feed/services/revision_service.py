@@ -169,6 +169,13 @@ async def list_post_revisions_service(
     if post is None:
         raise ApiError("Post not found")
 
+    post_status = (
+        post.state.value
+        if hasattr(post.state, "value")
+        else str(post.state)
+    ) if post.state is not None else None
+    moderation_notes = getattr(post, "moderation_notes", None)
+
     EditorProfile = aliased(Profile)
     stmt = (
         select(PostRevision, User, EditorProfile)
@@ -190,6 +197,8 @@ async def list_post_revisions_service(
                 "post_id": revision.post_id,
                 "editor_user_id": revision.editor_user_id,
                 "editor_name": _resolve_editor_name(editor_profile, editor_user),
+                "status": post_status,
+                "moderation_notes": moderation_notes,
                 "content": revision.content,
                 "media": revision.media or [],
                 "changes": _content_changes(revision.content, previous_content),
