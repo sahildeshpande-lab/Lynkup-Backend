@@ -251,10 +251,8 @@ async def admin_signin(
 ) -> ApiResponse:
     from apps.administration.services.signing_service import validate_origin
     from apps.administration.services.signing_store import consume_keyed_rate_limit
-    from core.request_signing import require_web_client_type
 
     if request is not None:
-        require_web_client_type(request)
         validate_origin(request)
 
     email = payload.email.lower()

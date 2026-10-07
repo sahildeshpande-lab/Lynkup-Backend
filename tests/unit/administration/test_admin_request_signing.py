@@ -1041,7 +1041,7 @@ async def test_login_rate_limit_blocks_excess(monkeypatch):
 
     payload = AdminLoginRequest(email="anyone@example.com", password="x")
     request = SimpleNamespace(
-        headers={"origin": TEST_ALLOWED_ORIGIN, "X-Client-Type": "web"},
+        headers={"origin": TEST_ALLOWED_ORIGIN},
         client=SimpleNamespace(host="1.2.3.4"),
         state=SimpleNamespace(),
     )

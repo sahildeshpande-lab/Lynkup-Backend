@@ -90,10 +90,8 @@ async def _audit(
 async def register_pending_signing_key(public_key: str, *, request: Request | None = None) -> ApiResponse:
     """Pre-login public-key registration. Does NOT accept user_id/session_id."""
     from apps.administration.services.signing_store import consume_keyed_rate_limit
-    from core.request_signing import require_web_client_type
 
     if request is not None:
-        require_web_client_type(request)
         validate_origin(request)
 
     ip = _client_ip(request) or "unknown"

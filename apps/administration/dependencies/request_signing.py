@@ -13,7 +13,7 @@ from apps.administration.services.signing_service import (
 )
 from common.exceptions import ApiError
 from core.database.session import get_session
-from core.request_signing import require_web_client_type
+from core.request_signing import CLIENT_TYPE_WEB, mark_client_type
 from core.security.auth import get_current_admin
 
 
@@ -24,17 +24,17 @@ def require_admin_origin(request: Request) -> None:
 
 async def require_admin_signed_request(
     request: Request,
-    _client_type: str = Depends(require_web_client_type),
     _origin: None = Depends(require_admin_origin),
     current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
 ) -> User:
-    """Validate client-type (web), Origin, JWT+session, RSA signature, nonce.
+    """Validate Origin, JWT+session, RSA signature, nonce.
 
+    Client type is inferred as web from admin JWT + RSA — no X-Client-Type header.
     SESSION_ID for canonicalization comes only from the authenticated admin
     session on ``request.state`` — never from user.id or client input.
     """
-    _ = _client_type
+    mark_client_type(request, CLIENT_TYPE_WEB)
     session_id = getattr(request.state, "admin_session_id", None)
     if session_id is None:
         raise ApiError(GENERIC_AUTH_FAILURE)

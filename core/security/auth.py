@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import timedelta
+from typing import Collection
+from uuid import UUID
 
 from fastapi import Depends, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -18,9 +21,12 @@ from apps.accounts.services.common_service import (
 )
 from common.enums import UserStatus, inactive_account_message
 from common.exceptions import ApiError
+from core.request_signing import CLIENT_TYPE_MOBILE, CLIENT_TYPE_WEB, mark_client_type
 import jwt
 
 ACCESS_TOKEN_TTL = timedelta(minutes=auth_settings.access_token_expire_minutes)
+
+_STAFF_ROLES = frozenset({"moderator", "viewer", "superadmin"})
 
 bearer_scheme = HTTPBearer(
     scheme_name="BearerAuth",
@@ -28,6 +34,16 @@ bearer_scheme = HTTPBearer(
     description="Send the Kampulynk access token as: Bearer <token>",
     auto_error=False,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedRequest:
+    """Result of :func:`authenticate_request` for shared (web + mobile) routes."""
+
+    client_type: str
+    user_id: UUID
+    role: str
+    user: User
 
 
 def get_bearer_token(
@@ -54,6 +70,153 @@ def _ensure_active_user(user: User) -> None:
         raise ApiError(_inactive_account_message(user.status))
     if user.status not in (UserStatus.active, UserStatus.pending):
         raise ApiError(_inactive_account_message(user.status))
+
+
+def _peek_local_access_claims(token: str) -> dict | None:
+    """Return decoded local access JWT claims, or None if not a local access token."""
+    try:
+        decoded = jwt.decode(
+            token,
+            auth_settings.jwt_secret,
+            algorithms=[auth_settings.jwt_algorithm],
+        )
+    except Exception:
+        return None
+    if decoded.get("type") != "access":
+        return None
+    return decoded
+
+
+def _has_admin_jwt(claims: dict | None, role: str | None) -> bool:
+    """True when Bearer looks like a web-admin access token (staff + session_id)."""
+    if not claims or not role:
+        return False
+    return role in _STAFF_ROLES and bool(claims.get("session_id"))
+
+
+async def _load_user_by_id(db: AsyncSession, user_id: str | None) -> User | None:
+    if not user_id:
+        return None
+    stmt = select(User).options(selectinload(User.roles)).where(User.id == user_id)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def _authenticate_web_admin(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials,
+    db: AsyncSession,
+) -> AuthenticatedRequest:
+    """Web: admin JWT → session → Origin/timestamp/nonce/RSA signature."""
+    from apps.administration.services.signing_service import verify_signed_admin_request
+
+    admin = await get_current_admin(request, credentials, db)
+    session_id = getattr(request.state, "admin_session_id", None)
+    if session_id is None:
+        raise ApiError("Session expired. Please sign in again.")
+
+    verified = await verify_signed_admin_request(
+        request,
+        admin,
+        db,
+        session_id=session_id,
+        skip_origin=False,
+    )
+    mark_client_type(request, CLIENT_TYPE_WEB)
+    return AuthenticatedRequest(
+        client_type=CLIENT_TYPE_WEB,
+        user_id=verified.id,
+        role=verified.role,
+        user=verified,
+    )
+
+
+async def _verify_mobile_identity(
+    credentials: HTTPAuthorizationCredentials,
+    db: AsyncSession,
+) -> User:
+    """Resolve mobile/app user from local user JWT or Firebase ID token."""
+    return await get_current_user(credentials, db)
+
+
+async def _verify_mobile_request_proof(request: Request, user: User) -> None:
+    """Mobile request proof: timestamp + nonce + HMAC.
+
+    Not enforced yet — identity-only until mobile HMAC signing ships.
+    """
+    _ = (request, user)
+
+
+async def _authenticate_mobile(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials,
+    db: AsyncSession,
+) -> AuthenticatedRequest:
+    """Mobile: Firebase/user JWT (+ future timestamp/nonce/HMAC)."""
+    user = await _verify_mobile_identity(credentials, db)
+    if user.role != "user":
+        # Staff must use the web admin JWT + RSA path on shared routes.
+        raise ApiError("Session expired. Please sign in again.")
+    await _verify_mobile_request_proof(request, user)
+    mark_client_type(request, CLIENT_TYPE_MOBILE)
+    return AuthenticatedRequest(
+        client_type=CLIENT_TYPE_MOBILE,
+        user_id=user.id,
+        role=user.role,
+        user=user,
+    )
+
+
+async def authenticate_request(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None,
+    db: AsyncSession,
+    *,
+    allowed_roles: Collection[str] | None = None,
+) -> AuthenticatedRequest:
+    """Single entrypoint for shared-route auth (web admin RSA vs mobile).
+
+    Flow
+    ----
+    1. If Bearer is an admin access JWT (staff + ``session_id``):
+       verify JWT → session → timestamp/nonce/RSA → ``client_type=web``.
+    2. Else if Bearer is Firebase / app-user JWT:
+       verify identity → (future HMAC) → ``client_type=mobile``.
+    3. Otherwise reject.
+    """
+    if not credentials:
+        raise ApiError("Missing access token")
+
+    claims = _peek_local_access_claims(credentials.credentials)
+    peeked_user: User | None = None
+    if claims is not None:
+        peeked_user = await _load_user_by_id(db, claims.get("sub"))
+
+    if peeked_user is not None and _has_admin_jwt(claims, peeked_user.role):
+        if allowed_roles is not None and peeked_user.role not in allowed_roles:
+            raise ApiError("Insufficient permissions")
+        auth = await _authenticate_web_admin(request, credentials, db)
+    elif peeked_user is not None and peeked_user.role in _STAFF_ROLES:
+        # Staff JWT without session_id cannot use the mobile branch.
+        if allowed_roles is not None and peeked_user.role not in allowed_roles:
+            raise ApiError("Insufficient permissions")
+        raise ApiError("Session expired. Please sign in again.")
+    elif peeked_user is not None and peeked_user.role == "user":
+        _ensure_active_user(peeked_user)
+        await _verify_mobile_request_proof(request, peeked_user)
+        mark_client_type(request, CLIENT_TYPE_MOBILE)
+        auth = AuthenticatedRequest(
+            client_type=CLIENT_TYPE_MOBILE,
+            user_id=peeked_user.id,
+            role=peeked_user.role,
+            user=peeked_user,
+        )
+    else:
+        # Firebase / non-local Bearer → mobile identity path.
+        auth = await _authenticate_mobile(request, credentials, db)
+
+    if allowed_roles is not None and auth.role not in allowed_roles:
+        raise ApiError("Insufficient permissions")
+    return auth
 
 
 async def get_current_user(
@@ -157,69 +320,19 @@ async def get_current_app_user(
     return user
 
 
-async def _authenticate_admin_on_common_route(
-    request: Request,
-    credentials: HTTPAuthorizationCredentials,
-    db: AsyncSession,
-) -> User:
-    """Admin branch for shared routes: optional X-Client-Type + admin JWT + RSA signing.
-
-    App-user callers never enter this path — they use Firebase / user JWT only.
-    """
-    from apps.administration.services.signing_service import verify_signed_admin_request
-    from core.request_signing import require_web_client_type
-
-    # Soft when CLIENT_TYPE_ENFORCE=false; encrypted "web" required when enforce+key set.
-    require_web_client_type(request)
-    admin = await get_current_admin(request, credentials, db)
-    session_id = getattr(request.state, "admin_session_id", None)
-    if session_id is None:
-        raise ApiError("Session expired. Please sign in again.")
-    return await verify_signed_admin_request(
-        request,
-        admin,
-        db,
-        session_id=session_id,
-        skip_origin=False,
-    )
-
-
 async def get_current_user_or_superadmin(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
     db: AsyncSession = Depends(get_session),
 ) -> User:
-    """Shared routes: app users via Firebase/user JWT; superadmin via client-type + RSA."""
-    if not credentials:
-        raise ApiError("Missing access token")
-
-    try:
-        decoded = jwt.decode(
-            credentials.credentials,
-            auth_settings.jwt_secret,
-            algorithms=[auth_settings.jwt_algorithm],
-        )
-        if decoded.get("type") == "access":
-            stmt = select(User).options(selectinload(User.roles)).where(User.id == decoded.get("sub"))
-            user = (await db.execute(stmt)).scalar_one_or_none()
-            if user is not None:
-                if user.role == "superadmin":
-                    return await _authenticate_admin_on_common_route(request, credentials, db)
-                if user.role == "user":
-                    _ensure_active_user(user)
-                    return user
-                raise ApiError("Insufficient permissions")
-    except ApiError:
-        raise
-    except Exception:  # nosec B110 -- fall through to generic user auth
-        pass
-
-    user = await get_current_user(credentials, db)
-    if user.role == "user":
-        return user
-    if user.role == "superadmin":
-        raise ApiError("Session expired. Please sign in again.")
-    raise ApiError("Insufficient permissions")
+    """Shared routes: app users (mobile) or superadmin (web RSA)."""
+    auth = await authenticate_request(
+        request,
+        credentials,
+        db,
+        allowed_roles=frozenset({"user", "superadmin"}),
+    )
+    return auth.user
 
 
 async def get_current_user_moderator_or_superadmin(
@@ -227,41 +340,14 @@ async def get_current_user_moderator_or_superadmin(
     credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
     db: AsyncSession = Depends(get_session),
 ) -> User:
-    """Shared routes: app users via Firebase/user JWT; staff via client-type + RSA."""
-    if not credentials:
-        raise ApiError("Missing access token")
-
-    staff_roles = ("moderator", "viewer", "superadmin")
-    try:
-        decoded = jwt.decode(
-            credentials.credentials,
-            auth_settings.jwt_secret,
-            algorithms=[auth_settings.jwt_algorithm],
-        )
-        if decoded.get("type") == "access":
-            stmt = select(User).options(selectinload(User.roles)).where(User.id == decoded.get("sub"))
-            user = (await db.execute(stmt)).scalar_one_or_none()
-            if user is not None:
-                if user.role in staff_roles:
-                    admin = await _authenticate_admin_on_common_route(request, credentials, db)
-                    if admin.role not in staff_roles:
-                        raise ApiError("Insufficient permissions")
-                    return admin
-                if user.role == "user":
-                    _ensure_active_user(user)
-                    return user
-                raise ApiError("Insufficient permissions")
-    except ApiError:
-        raise
-    except Exception:  # nosec B110 -- fall through to generic user auth
-        pass
-
-    user = await get_current_user(credentials, db)
-    if user.role == "user":
-        return user
-    if user.role in staff_roles:
-        raise ApiError("Session expired. Please sign in again.")
-    raise ApiError("Insufficient permissions")
+    """Shared routes: app users (mobile) or staff (web RSA)."""
+    auth = await authenticate_request(
+        request,
+        credentials,
+        db,
+        allowed_roles=frozenset({"user", "moderator", "viewer", "superadmin"}),
+    )
+    return auth.user
 
 
 async def get_current_moderator(

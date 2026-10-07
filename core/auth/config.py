@@ -76,19 +76,6 @@ class AuthSettings(BaseSettings):
     # Empty list rejects all signed requests.
     admin_allowed_origins: str = Field(default="", alias="ADMIN_ALLOWED_ORIGINS")
 
-    # X-Client-Type: FE RSA-OAEP-encrypts "web"|"mobile"; BE decrypts with this key.
-    # Public SPKI base64 lives on FE (NEXT_PUBLIC_CLIENT_TYPE_PUBLIC_KEY).
-    client_type_rsa_private_key_pem: str | None = Field(
-        default=None,
-        alias="CLIENT_TYPE_RSA_PRIVATE_KEY_PEM",
-    )
-    client_type_rsa_private_key_path: str | None = Field(
-        default=None,
-        alias="CLIENT_TYPE_RSA_PRIVATE_KEY_PATH",
-    )
-    # When true (and a private key is loaded), X-Client-Type ciphertext is required.
-    client_type_enforce: bool = Field(default=False, alias="CLIENT_TYPE_ENFORCE")
-
     @property
     def admin_allowed_origin_list(self) -> list[str]:
         return [
