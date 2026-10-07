@@ -35,52 +35,66 @@ async def lifespan(app: FastAPI):
 
     from core.email.config import settings as email_settings
 
-    logger.info("[%s] Importing recommendation model registry...", _timestamp())
-    from apps.recommendations.services import algorithm as recommendation_algorithm
-    from apps.recommendations.services.model_registry import get_registry
-
-    logger.info("[%s] Recommendation model registry imported successfully.", _timestamp())
-
-    def _initialize_recommendation_models_in_thread() -> None:
-        thread_logger = logging.getLogger(__name__)
-        thread_logger.info(
-            "[%s] Recommendation model initialization worker thread started.",
+    # Skip spaCy/KeyBERT/torch warm-up so low-memory Render instances can boot
+    # for admin RSA auth testing. Re-enable when ML deps are restored in requirements.
+    skip_recommendation_models = True
+    if skip_recommendation_models:
+        logger.warning(
+            "[%s] Skipping recommendation model initialization "
+            "(spaCy/KeyBERT disabled for lean deploy).",
             _timestamp(),
         )
-        recommendation_algorithm.initialize_models()
-        thread_logger.info(
-            "[%s] Recommendation model initialization worker thread finished.",
-            _timestamp(),
-        )
+        app.state.recommendation_models = None
+    else:
+        logger.info("[%s] Importing recommendation model registry...", _timestamp())
+        from apps.recommendations.services import algorithm as recommendation_algorithm
+        from apps.recommendations.services.model_registry import get_registry
 
-    models_init_started = time.perf_counter()
-    try:
         logger.info(
-            "[%s] Submitting spaCy and KeyBERT initialization to worker thread...",
+            "[%s] Recommendation model registry imported successfully.",
             _timestamp(),
         )
-        await asyncio.to_thread(_initialize_recommendation_models_in_thread)
+
+        def _initialize_recommendation_models_in_thread() -> None:
+            thread_logger = logging.getLogger(__name__)
+            thread_logger.info(
+                "[%s] Recommendation model initialization worker thread started.",
+                _timestamp(),
+            )
+            recommendation_algorithm.initialize_models()
+            thread_logger.info(
+                "[%s] Recommendation model initialization worker thread finished.",
+                _timestamp(),
+            )
+
+        models_init_started = time.perf_counter()
+        try:
+            logger.info(
+                "[%s] Submitting spaCy and KeyBERT initialization to worker thread...",
+                _timestamp(),
+            )
+            await asyncio.to_thread(_initialize_recommendation_models_in_thread)
+            logger.info(
+                "[%s] Recommendation models initialized during startup (%.2f sec).",
+                _timestamp(),
+                time.perf_counter() - models_init_started,
+            )
+        except Exception:
+            logger.exception(
+                "[%s] Recommendation model initialization failed during application "
+                "startup after %.2f sec.",
+                _timestamp(),
+                time.perf_counter() - models_init_started,
+            )
+            raise
+
+        app.state.recommendation_models = get_registry()
+
         logger.info(
-            "[%s] Recommendation models initialized during startup (%.2f sec).",
+            "[%s] Recommendation startup phase completed (Total: %.2f sec).",
             _timestamp(),
-            time.perf_counter() - models_init_started,
+            time.perf_counter() - startup_started,
         )
-    except Exception:
-        logger.exception(
-            "[%s] Recommendation model initialization failed during application startup "
-            "after %.2f sec.",
-            _timestamp(),
-            time.perf_counter() - models_init_started,
-        )
-        raise
-
-    app.state.recommendation_models = get_registry()
-
-    logger.info(
-        "[%s] Recommendation startup phase completed (Total: %.2f sec).",
-        _timestamp(),
-        time.perf_counter() - startup_started,
-    )
 
     if email_settings.is_sendgrid_configured:
         logger.info("SendGrid email delivery is configured.")
