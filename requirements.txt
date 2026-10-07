@@ -3,6 +3,7 @@ uvicorn[standard]
 sqlmodel
 # Pin is below (ddtrace==4.14.0); avoid installing twice.
 # ddtrace
+sqlalchemy[asyncio]
 rapidfuzz
 sqlalchemy
 asyncpg
