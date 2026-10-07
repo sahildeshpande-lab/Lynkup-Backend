@@ -1,8 +1,6 @@
 fastapi
 uvicorn[standard]
 sqlmodel
-# Pin is below (ddtrace==4.14.0); avoid installing twice.
-# ddtrace
 sqlalchemy[asyncio]
 rapidfuzz
 sqlalchemy
@@ -55,9 +53,11 @@ pydantic-settings
 disposable-email-domains
 alembic
 bleach
-pandas
-openpyxl
+# Spreadsheet imports — not needed for admin RSA auth testing on small Render instances.
+# pandas
+# openpyxl
 # Large / unused on admin-auth-only deploys
 # pysonar
 # lingua-language-detector>=2.0.0
-ddtrace==4.14.0
+# Datadog APM — optional for lean auth-only deploys (api soft-imports it)
+# ddtrace==4.14.0

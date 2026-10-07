@@ -33,11 +33,33 @@ async def test_lifespan_starts_without_scheduler(monkeypatch) -> None:
 
     monkeypatch.setattr("core.lifespan.db_settings", MagicMock(auto_init_db=False))
     monkeypatch.setattr("core.email.config.settings", MagicMock(is_sendgrid_configured=True))
+    monkeypatch.setattr(
+        "apps.recommendations.config.settings",
+        MagicMock(load_models_on_startup=False),
+    )
     init_mock = _patch_recommendation_init(monkeypatch)
 
     async with lifespan(app):
         assert hasattr(app.state, "recommendation_models")
         assert app.state.recommendation_models.is_ready is False
+
+    init_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_loads_recommendation_models_when_enabled(monkeypatch) -> None:
+    app = FastAPI()
+
+    monkeypatch.setattr("core.lifespan.db_settings", MagicMock(auto_init_db=False))
+    monkeypatch.setattr("core.email.config.settings", MagicMock(is_sendgrid_configured=True))
+    monkeypatch.setattr(
+        "apps.recommendations.config.settings",
+        MagicMock(load_models_on_startup=True),
+    )
+    init_mock = _patch_recommendation_init(monkeypatch)
+
+    async with lifespan(app):
+        assert hasattr(app.state, "recommendation_models")
 
     init_mock.assert_called_once()
 
@@ -55,6 +77,10 @@ async def test_lifespan_runs_init_db_when_enabled(monkeypatch) -> None:
     monkeypatch.setattr("core.lifespan.init_db", init_db_mock)
     monkeypatch.setattr("core.email.config.settings", MagicMock(is_sendgrid_configured=False))
     monkeypatch.setattr(
+        "apps.recommendations.config.settings",
+        MagicMock(load_models_on_startup=False),
+    )
+    monkeypatch.setattr(
         "core.lifespan.run_db_migrations_programmatically",
         migrations_mock,
     )
@@ -64,4 +90,4 @@ async def test_lifespan_runs_init_db_when_enabled(monkeypatch) -> None:
         pass
 
     init_db_mock.assert_awaited_once()
-    init_mock.assert_called_once()
+    init_mock.assert_not_called()

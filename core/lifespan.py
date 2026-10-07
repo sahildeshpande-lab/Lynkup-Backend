@@ -34,45 +34,56 @@ async def lifespan(app: FastAPI):
         logger.info(f"Initialized database at {db_settings.db_host}")
 
     from core.email.config import settings as email_settings
-
-    logger.info("[%s] Importing recommendation model registry...", _timestamp())
-    from apps.recommendations.services import algorithm as recommendation_algorithm
+    from apps.recommendations.config import settings as recommendation_settings
     from apps.recommendations.services.model_registry import get_registry
 
-    logger.info("[%s] Recommendation model registry imported successfully.", _timestamp())
+    if recommendation_settings.load_models_on_startup:
+        logger.info("[%s] Importing recommendation model registry...", _timestamp())
+        from apps.recommendations.services import algorithm as recommendation_algorithm
 
-    def _initialize_recommendation_models_in_thread() -> None:
-        thread_logger = logging.getLogger(__name__)
-        thread_logger.info(
-            "[%s] Recommendation model initialization worker thread started.",
-            _timestamp(),
-        )
-        recommendation_algorithm.initialize_models()
-        thread_logger.info(
-            "[%s] Recommendation model initialization worker thread finished.",
+        logger.info(
+            "[%s] Recommendation model registry imported successfully.",
             _timestamp(),
         )
 
-    models_init_started = time.perf_counter()
-    try:
+        def _initialize_recommendation_models_in_thread() -> None:
+            thread_logger = logging.getLogger(__name__)
+            thread_logger.info(
+                "[%s] Recommendation model initialization worker thread started.",
+                _timestamp(),
+            )
+            recommendation_algorithm.initialize_models()
+            thread_logger.info(
+                "[%s] Recommendation model initialization worker thread finished.",
+                _timestamp(),
+            )
+
+        models_init_started = time.perf_counter()
+        try:
+            logger.info(
+                "[%s] Submitting spaCy and KeyBERT initialization to worker thread...",
+                _timestamp(),
+            )
+            await asyncio.to_thread(_initialize_recommendation_models_in_thread)
+            logger.info(
+                "[%s] Recommendation models initialized during startup (%.2f sec).",
+                _timestamp(),
+                time.perf_counter() - models_init_started,
+            )
+        except Exception:
+            logger.exception(
+                "[%s] Recommendation model initialization failed during application "
+                "startup after %.2f sec.",
+                _timestamp(),
+                time.perf_counter() - models_init_started,
+            )
+            raise
+    else:
         logger.info(
-            "[%s] Submitting spaCy and KeyBERT initialization to worker thread...",
+            "[%s] Skipping spaCy/KeyBERT startup load "
+            "(RECOMMENDATION_LOAD_MODELS_ON_STARTUP=false).",
             _timestamp(),
         )
-        await asyncio.to_thread(_initialize_recommendation_models_in_thread)
-        logger.info(
-            "[%s] Recommendation models initialized during startup (%.2f sec).",
-            _timestamp(),
-            time.perf_counter() - models_init_started,
-        )
-    except Exception:
-        logger.exception(
-            "[%s] Recommendation model initialization failed during application startup "
-            "after %.2f sec.",
-            _timestamp(),
-            time.perf_counter() - models_init_started,
-        )
-        raise
 
     app.state.recommendation_models = get_registry()
 

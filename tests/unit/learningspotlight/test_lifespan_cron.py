@@ -226,7 +226,8 @@ async def test_lifespan_does_not_start_in_process_scheduler() -> None:
     assert "scheduler.start" not in source
 
     with patch("core.lifespan.db_settings.auto_init_db", False), patch(
-        "apps.recommendations.services.algorithm.initialize_models"
+        "apps.recommendations.config.settings",
+        MagicMock(load_models_on_startup=False),
     ):
         async with lifespan(app):
             assert hasattr(app.state, "recommendation_models")
