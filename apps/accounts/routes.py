@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database.session import get_session
 from core.security.auth import get_current_user
+from core.security.mobile.dependencies import require_mobile_request_security
 from apps.accounts.db_models import User
 from common.enums import SocialProvider
 
@@ -156,7 +157,7 @@ async def logout(
 
 @router.post("/logout-all", response_model=ApiResponse)
 async def logout_all(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     return ApiResponse(message="logged out from all devices", data=await services.logout_all(current_user, db))

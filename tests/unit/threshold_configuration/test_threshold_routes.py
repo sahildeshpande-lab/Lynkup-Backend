@@ -8,7 +8,6 @@ from core.database.session import get_session
 from core.security.auth import get_current_moderator_or_viewer
 from entrypoints.api import app
 from apps.threshold_configuration.schemas import ModerationThresholdsData
-from apps.administration.dependencies import require_signed_moderator_or_viewer
 
 
 client = TestClient(app)
@@ -45,13 +44,11 @@ async def _override_admin():
 def setup_module() -> None:
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_admin
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_admin
 
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
-    app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
 
 
 def test_get_admin_threshold_route(monkeypatch) -> None:
@@ -97,11 +94,9 @@ def test_get_admin_threshold_route_viewer(monkeypatch) -> None:
 
     monkeypatch.setattr(threshold_routes, "get_moderation_thresholds", _mock_get)
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_viewer
     try:
         response = client.get("/api/v1/admin/threshold")
         assert response.status_code == 200
         assert response.json()["status"] is True
     finally:
         app.dependency_overrides[get_current_moderator_or_viewer] = _override_admin
-        app.dependency_overrides[require_signed_moderator_or_viewer] = _override_admin

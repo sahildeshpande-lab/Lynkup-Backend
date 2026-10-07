@@ -1,9 +1,7 @@
 from __future__ import annotations
-
 from datetime import datetime, timedelta, timezone
-from uuid import UUID, uuid4
+from uuid import UUID
 import hashlib
-import logging
 import jwt
 from fastapi import HTTPException, status
 from pwdlib import PasswordHash
@@ -11,38 +9,26 @@ from pwdlib.hashers.bcrypt import BcryptHasher
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-
-from apps.accounts.db_models import SecurityEventType, User, UserRole
-from apps.accounts.services.common_service import (
-    get_role_from_db,
-    _normalize_role_name,
-    log_security_event,
-)
+from apps.accounts.db_models import User, UserRole
+from apps.accounts.services.common_service import get_role_from_db, _normalize_role_name
 from apps.administration.services.session_service import (
     create_admin_session,
     require_active_admin_session,
-    require_admin_session_for_refresh,
     revoke_admin_session,
-    set_admin_session_refresh_jti,
 )
 from common.enums import OnboardingStatus, UserStatus, RegistrationType, inactive_account_message
 from common.exceptions import ApiError
-from core.auth.config import settings as auth_settings
 from ..schemas import AdminLoginRequest, AdminSignupRequest
 from apps.accounts.schemas import ApiResponse, RefreshTokenRequest
-from apps.accounts.services import JWT_ALGORITHM, JWT_SECRET
+from apps.accounts.services import ACCESS_TOKEN_EXPIRE_MINUTES, JWT_ALGORITHM, JWT_SECRET
 from apps.profiles.services import build_user_base_response
 from apps.profiles.db_models import Profile
-
 PASSWORD_HASHER = PasswordHash((BcryptHasher(),))
 
 from .user_management_service import _coerce_uuid
 
-logger = logging.getLogger(__name__)
-
 ADMIN_AUTH_ALLOWED_ROLES = frozenset({"superadmin", "moderator", "viewer"})
 ADMIN_ACCESS_FORBIDDEN_MESSAGE = "Forbidden: Admin access required"
-GENERIC_LOGIN_FAILURE = "Incorrect Username or Password."
 
 
 def _ensure_admin_role(role: str) -> None:
@@ -60,7 +46,6 @@ def _ensure_admin_account_active(user: User) -> None:
     if user.status in (UserStatus.suspended, UserStatus.banned):
         raise ApiError(inactive_account_message(user.status))
 
-
 def _admin_password_fingerprint(password_hash: str | None) -> str:
     if not password_hash:
         return ""
@@ -75,59 +60,16 @@ def validate_admin_session_token(decoded: dict, user: User) -> None:
         raise ApiError("Session expired. Please sign in again.")
 
 
-def _client_ip(request) -> str | None:
-    if request is None:
-        return None
-    forwarded = getattr(request, "headers", {}).get("x-forwarded-for") if hasattr(request, "headers") else None
-    if forwarded:
-        return str(forwarded).split(",")[0].strip() or None
-    client = getattr(request, "client", None)
-    if client is not None:
-        return getattr(client, "host", None)
-    return None
-
-
-async def _log_admin_auth_event(
-    db: AsyncSession,
-    *,
-    user_id: UUID | None,
-    event_type: SecurityEventType,
-    request=None,
-    metadata: dict | None = None,
-) -> None:
-    if user_id is None:
-        return
-    try:
-        await log_security_event(
-            db,
-            user_id,
-            event_type,
-            event_metadata=metadata,
-            ip_address=_client_ip(request),
-        )
-    except Exception:
-        logger.exception("Failed to write admin auth security event")
-
-
-def _generate_admin_tokens(
-    user: User,
-    *,
-    session_id: UUID,
-    refresh_jti: str | None = None,
-) -> tuple[str, str, str]:
+def _generate_admin_tokens(user: User, *, session_id: UUID) -> tuple[str, str]:
     """Mint admin access + refresh JWTs bound to an independent session UUID.
 
-    Returns ``(access_token, refresh_token, refresh_jti)``.
-    Persist the returned jti on ``admin_sessions.refresh_jti`` at login and refresh.
+    ``session_id`` must be a random admin_sessions.id — never user_id or the
+    refresh-token string. Refresh preserves the same session_id.
     """
     now = datetime.now(timezone.utc)
-    access_minutes = max(1, int(auth_settings.admin_access_token_expire_minutes))
-    refresh_minutes = max(1, int(auth_settings.admin_refresh_token_expire_minutes))
-    access_expiry = now + timedelta(minutes=access_minutes)
-    refresh_expiry = now + timedelta(minutes=refresh_minutes)
+    access_expiry = now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     password_fingerprint = _admin_password_fingerprint(user.password_hash)
     session_claim = str(session_id)
-    jti = refresh_jti or uuid4().hex
 
     access_payload = {
         "sub": str(user.id),
@@ -147,15 +89,13 @@ def _generate_admin_tokens(
         "type": "refresh",
         "session_id": session_claim,
         "pf": password_fingerprint,
-        "jti": jti,
-        "exp": int(refresh_expiry.timestamp()),
         "iat": int(now.timestamp()),
     }
 
     access_token = jwt.encode(access_payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
     refresh_token = jwt.encode(refresh_payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-    return access_token, refresh_token, jti
 
+    return access_token, refresh_token
 
 async def admin_me(
     current_user: User,
@@ -185,7 +125,6 @@ async def admin_me(
         },
     )
 
-
 async def admin_token(payload: RefreshTokenRequest, db: AsyncSession) -> dict:
     try:
         decoded = jwt.decode(payload.refreshToken, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -198,10 +137,6 @@ async def admin_token(payload: RefreshTokenRequest, db: AsyncSession) -> dict:
     if not user_id or decoded.get("type") not in (None, "refresh"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
 
-    jti = decoded.get("jti")
-    if not jti:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
-
     user = (
         await db.execute(select(User).options(selectinload(User.roles)).where(User.id == _coerce_uuid(user_id)))
     ).scalar_one_or_none()
@@ -211,7 +146,7 @@ async def admin_token(payload: RefreshTokenRequest, db: AsyncSession) -> dict:
     _ensure_admin_account_active(user)
     try:
         validate_admin_session_token(decoded, user)
-        session = await require_admin_session_for_refresh(
+        session = await require_active_admin_session(
             db,
             decoded.get("session_id"),
             user_id=user.id,
@@ -219,29 +154,9 @@ async def admin_token(payload: RefreshTokenRequest, db: AsyncSession) -> dict:
     except ApiError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.message) from exc
 
-    if not session.refresh_jti or session.refresh_jti != jti:
-        await revoke_admin_session(db, session, revoke_keys=True, emit_event=True)
-        await _log_admin_auth_event(
-            db,
-            user_id=user.id,
-            event_type=SecurityEventType.TOKEN_REVOKED,
-            metadata={
-                "session_id": str(session.id),
-                "reason": "refresh_token_reuse",
-            },
-        )
-        await db.commit()
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
-
-    access_token, refresh_token, new_jti = _generate_admin_tokens(user, session_id=session.id)
-    await set_admin_session_refresh_jti(db, session, new_jti)
-    await db.commit()
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer",  # nosec B105 -- token type constant, not a password
-    }
-
+    # Preserve the same independent session_id; do not create a new session.
+    access_token, _refresh_token = _generate_admin_tokens(user, session_id=session.id)
+    return {"access_token": access_token, "token_type": "bearer"}  # nosec B105 -- token type constant, not a password
 
 async def admin_signin(
     payload: AdminLoginRequest,
@@ -249,71 +164,19 @@ async def admin_signin(
     *,
     request=None,
 ) -> ApiResponse:
-    from apps.administration.services.signing_service import validate_origin
-    from apps.administration.services.signing_store import consume_keyed_rate_limit
-
-    if request is not None:
-        validate_origin(request)
-
-    email = payload.email.lower()
-    ip = _client_ip(request) or "unknown"
-    rate_key = f"login:{ip}:{email}"
-    allowed = await consume_keyed_rate_limit(
-        rate_key,
-        limit=int(auth_settings.admin_signing_rate_limit_requests),
-        window_seconds=int(auth_settings.admin_signing_rate_limit_window_seconds),
-    )
-    if not allowed:
-        # Avoid enumeration: same message as bad credentials when no user id known.
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many login attempts. Please try again later.",
-        )
-
-    stmt = select(User).options(selectinload(User.roles)).where(User.email == email)
+    stmt = select(User).options(selectinload(User.roles)).where(User.email == payload.email.lower())
     user = (await db.execute(stmt)).scalar_one_or_none()
     if not user:
-        return ApiResponse(status=False, message=GENERIC_LOGIN_FAILURE, data=None)
+        return ApiResponse(status=False, message="Incorrect Username or Password.", data=None)
 
     if not user.password_hash or not PASSWORD_HASHER.verify(payload.password, user.password_hash):
-        await _log_admin_auth_event(
-            db,
-            user_id=user.id,
-            event_type=SecurityEventType.LOGIN_FAILED,
-            request=request,
-            metadata={"reason": "invalid_credentials"},
-        )
-        await db.commit()
-        return ApiResponse(status=False, message=GENERIC_LOGIN_FAILURE, data=None)
+        return ApiResponse(status=False, message="Incorrect Username or Password.", data=None)
 
-    try:
-        _ensure_admin_role(user.role)
-    except HTTPException:
-        await _log_admin_auth_event(
-            db,
-            user_id=user.id,
-            event_type=SecurityEventType.LOGIN_FAILED,
-            request=request,
-            metadata={"reason": "invalid_role"},
-        )
-        await db.commit()
-        raise
+    _ensure_admin_role(user.role)
 
-    try:
-        _ensure_admin_account_active(user)
-    except ApiError as exc:
-        await _log_admin_auth_event(
-            db,
-            user_id=user.id,
-            event_type=SecurityEventType.LOGIN_FAILED,
-            request=request,
-            metadata={"reason": "inactive_account", "detail": exc.message},
-        )
-        await db.commit()
-        raise
+    _ensure_admin_account_active(user)
 
-    refresh_jti = uuid4().hex
-    session = await create_admin_session(db, user, refresh_jti=refresh_jti)
+    session = await create_admin_session(db, user)
 
     bound_key_id = None
     if payload.keyId is not None:
@@ -327,27 +190,14 @@ async def admin_signin(
             request=request,
         )
 
-    access_token, refresh_token, _jti = _generate_admin_tokens(
-        user,
-        session_id=session.id,
-        refresh_jti=refresh_jti,
-    )
-
-    await _log_admin_auth_event(
-        db,
-        user_id=user.id,
-        event_type=SecurityEventType.LOGIN_SUCCESS,
-        request=request,
-        metadata={"session_id": str(session.id)},
-    )
     await db.commit()
 
     profile = (await db.execute(select(Profile).where(Profile.user_id == user.id))).scalar_one_or_none()
     user_data = await build_user_base_response(user, profile, db)
+    access_token, refresh_token = _generate_admin_tokens(user, session_id=session.id)
     data = {
         "accessToken": access_token,
         "refreshToken": refresh_token,
-        "sessionId": str(session.id),
         "user": user_data,
         "emailSent": False,
     }
@@ -385,26 +235,11 @@ async def admin_logout(
     )
 
 
-async def admin_signup(
-    payload: AdminSignupRequest,
-    db: AsyncSession,
-    *,
-    current_user: User,
-) -> ApiResponse:
-    """Create a staff account. Caller must be an authenticated superadmin.
-
-    Does not mint tokens for the new account (avoids switching the creator session).
-    Only a superadmin may create another superadmin.
-    """
-    if _normalize_role_name(getattr(current_user, "role", "")) != "superadmin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Forbidden: Superadmin access required",
-        )
-
+async def admin_signup(payload: AdminSignupRequest, db: AsyncSession):
     email = payload.email.lower()
 
     from common.email_validation import validate_disposable_email
+    from core.auth.config import settings as auth_settings
 
     try:
         validate_disposable_email(
@@ -414,6 +249,7 @@ async def admin_signup(
     except ApiError as exc:
         return ApiResponse(status=False, message=str(exc.message), data=None)
 
+    # Check duplicate email
     stmt = select(User).where(User.email == email)
     existing_user = (await db.execute(stmt)).scalar_one_or_none()
     if existing_user:
@@ -421,13 +257,6 @@ async def admin_signup(
 
     role_str = _normalize_role_name(payload.role)
     _ensure_admin_role(role_str)
-
-    # Only superadmin can create superadmin; other staff roles are allowed for superadmin creators.
-    if role_str == "superadmin" and _normalize_role_name(current_user.role) != "superadmin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Forbidden: Cannot create superadmin",
-        )
 
     role_obj = await get_role_from_db(db, role_str)
     if role_obj is None:
@@ -458,7 +287,7 @@ async def admin_signup(
         first_name=payload.firstName,
         last_name=payload.lastName,
         completeness_score=0,
-        updated_at=now,
+        updated_at=now
     )
     db.add(profile)
     await db.flush()
@@ -470,6 +299,7 @@ async def admin_signup(
     except Exception:  # nosec B110 -- best-effort profile creation
         pass
 
+    session = await create_admin_session(db, user)
     await db.commit()
     await db.refresh(user)
     await db.refresh(profile)
@@ -478,22 +308,13 @@ async def admin_signup(
     user = (await db.execute(stmt_user)).scalar_one()
 
     user_data = await build_user_base_response(user, profile, db)
-    await _log_admin_auth_event(
-        db,
-        user_id=current_user.id,
-        event_type=SecurityEventType.ROLE_CHANGED,
-        metadata={
-            "action": "admin_signup",
-            "created_user_id": str(user.id),
-            "role": role_str,
-        },
-    )
-    await db.commit()
-
+    access_token, refresh_token = _generate_admin_tokens(user, session_id=session.id)
     return ApiResponse(
         status=True,
         message="Signup successful",
         data={
+            "accessToken": access_token,
+            "refreshToken": refresh_token,
             "user": user_data,
             "emailSent": False,
         },

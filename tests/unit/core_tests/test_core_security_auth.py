@@ -231,7 +231,7 @@ async def test_get_current_admin_paths(monkeypatch) -> None:
         status=AdminSessionStatus.ACTIVE.value,
     )
 
-    access_token, _refresh_token, _jti = _generate_admin_tokens(admin, session_id=session_id)
+    access_token, _refresh_token = _generate_admin_tokens(admin, session_id=session_id)
     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=access_token)
     request = SimpleNamespace(state=SimpleNamespace())
 

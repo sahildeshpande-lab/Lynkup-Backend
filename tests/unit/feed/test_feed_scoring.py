@@ -205,11 +205,14 @@ def test_feed_ordering_keeps_academic_and_connected_matches():
     ]
     max_match = max(int(post.is_match) for post in posts)
     visible = [post for post in posts if max_match == 0 or post.is_match]
-    ordered = sorted(
-        visible,
-        key=lambda post: (-post.engagement, -post.created_at.timestamp()),
-    )
-    assert [post.id for post in ordered] == ["B", "C", "A"]
+    # Previous engagement-score order (kept for reference):
+    # ordered = sorted(
+    #     visible,
+    #     key=lambda post: (-post.engagement, -post.created_at.timestamp()),
+    # )
+    # assert [post.id for post in ordered] == ["B", "C", "A"]
+    ordered = sorted(visible, key=lambda post: -post.created_at.timestamp())
+    assert [post.id for post in ordered] == ["C", "B", "A"]
 
 
 def test_feed_ordering_falls_back_to_all_visible_when_no_matches():
@@ -366,15 +369,16 @@ def test_encode_decode_cursor_roundtrip():
 
     post_id = uuid.uuid4()
     created_at = datetime(2026, 7, 18, 12, 30, 0, tzinfo=timezone.utc)
-    cursor = encode_cursor(engagement_score=9, created_at=created_at, post_id=post_id)
+    # cursor = encode_cursor(engagement_score=9, created_at=created_at, post_id=post_id)
+    cursor = encode_cursor(created_at=created_at, post_id=post_id)
     decoded = decode_cursor(cursor)
-    assert decoded["engagement_score"] == 9
+    # assert decoded["engagement_score"] == 9
     assert decoded["created_at"] == created_at
     assert decoded["id"] == post_id
 
 
 def test_decode_cursor_accepts_legacy_relevance_payload():
-    """Old clients may still send cursors that include relevance; ignore it."""
+    """Old clients may still send cursors that include relevance/engagement; ignore them."""
     import base64
     import json
 
@@ -392,10 +396,11 @@ def test_decode_cursor_accepts_legacy_relevance_payload():
         json.dumps(legacy, separators=(",", ":"), sort_keys=True).encode("utf-8")
     ).decode("ascii")
     decoded = decode_cursor(cursor)
-    assert decoded["engagement_score"] == 9
+    # assert decoded["engagement_score"] == 9
     assert decoded["created_at"] == created_at
     assert decoded["id"] == post_id
     assert "relevance" not in decoded
+    assert "engagement_score" not in decoded
 
 
 def test_decode_cursor_rejects_malformed():

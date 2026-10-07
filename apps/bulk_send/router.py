@@ -18,7 +18,7 @@ from common.exceptions import ApiError
 from common.pagination import OptionalPaginationParams
 from common.responses import error_response, success_response
 from core.database.session import get_session
-from apps.administration.dependencies import require_signed_admin
+from core.security.auth import get_current_admin
 
 router = APIRouter(prefix="/admin/bulk-send", tags=["Bulk Send Email"])
 
@@ -31,7 +31,7 @@ router = APIRouter(prefix="/admin/bulk-send", tags=["Bulk Send Email"])
 )
 async def upload_bulk_attachment(
     file: UploadFile = File(...),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
     service: BulkSendService = Depends(get_bulk_send_service),
 ) -> AttachmentUploadResponse:
     try:
@@ -63,7 +63,7 @@ async def upload_bulk_attachment(
 )
 async def create_bulk_campaign(
     payload: CreateBulkCampaignRequest,
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
     service: BulkSendService = Depends(get_bulk_send_service),
 ) -> CreateCampaignResponse:
@@ -86,7 +86,7 @@ async def create_bulk_campaign(
     summary="List bulk email campaigns",
 )
 async def list_bulk_campaigns(
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
     service: BulkSendService = Depends(get_bulk_send_service),
     page: int = Query(default=1, ge=1),
@@ -115,7 +115,7 @@ async def list_bulk_campaigns(
 )
 async def get_bulk_campaign(
     campaign_id: UUID,
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
     service: BulkSendService = Depends(get_bulk_send_service),
     pagination: OptionalPaginationParams = Depends(),

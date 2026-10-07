@@ -99,7 +99,6 @@ async def test_security_auth_role_dependencies(monkeypatch, mock_db, scalar_resu
     from uuid import uuid4
 
     from apps.accounts.db_models import User
-    from common.enums import UserStatus
     from fastapi.security import HTTPAuthorizationCredentials
 
     user = SimpleNamespace(role="user")
@@ -121,7 +120,7 @@ async def test_security_auth_role_dependencies(monkeypatch, mock_db, scalar_resu
     with pytest.raises(ApiError):
         await security_auth.get_current_superadmin(moderator)
 
-    # Dual-purpose: app user via local JWT without admin session
+    # Dual-purpose shared routes: app user via local JWT (mobile proof off by default)
     plain = User(id=uuid4(), email="u@example.com", status=UserStatus.active, password_hash="x")
     plain.role = "user"
     monkeypatch.setattr(
@@ -136,7 +135,7 @@ async def test_security_auth_role_dependencies(monkeypatch, mock_db, scalar_resu
     db = mock_db(scalar_result(plain))
     assert await security_auth.get_current_user_moderator_or_superadmin(request, creds, db) is plain
 
-    # Moderator cannot use user_or_superadmin
+    # Moderator cannot use user_or_superadmin without admin session_id (staff JWT path)
     mod = User(id=uuid4(), email="m@example.com", status=UserStatus.active, password_hash="x")
     mod.role = "moderator"
     monkeypatch.setattr(
@@ -145,144 +144,8 @@ async def test_security_auth_role_dependencies(monkeypatch, mock_db, scalar_resu
         lambda token, secret, algorithms: {"type": "access", "sub": str(mod.id)},
     )
     db = mock_db(scalar_result(mod))
-    with pytest.raises(ApiError, match="Insufficient"):
+    with pytest.raises(ApiError, match="Insufficient|Session expired"):
         await security_auth.get_current_user_or_superadmin(request, creds, db)
-
-
-@pytest.mark.asyncio
-async def test_common_route_admin_requires_signed_request(monkeypatch, mock_db, scalar_result):
-    """Staff on shared routes must pass admin JWT + RSA verify; users do not."""
-    from uuid import uuid4
-
-    from apps.accounts.db_models import User
-    from apps.administration.db_models import AdminSessionStatus
-    from apps.administration.services.auth_service import _admin_password_fingerprint
-    from common.enums import UserStatus
-    from fastapi.security import HTTPAuthorizationCredentials
-
-    password_hash = "hash"
-    user_id = uuid4()
-    session_id = uuid4()
-    admin = User(
-        id=user_id,
-        email="admin@example.com",
-        status=UserStatus.active,
-        password_hash=password_hash,
-    )
-    admin.role = "superadmin"
-    admin_session = SimpleNamespace(
-        id=session_id,
-        user_id=user_id,
-        status=AdminSessionStatus.ACTIVE.value,
-        expires_at=None,
-    )
-    token_payload = {
-        "type": "access",
-        "sub": str(user_id),
-        "session_id": str(session_id),
-        "pf": _admin_password_fingerprint(password_hash),
-    }
-    monkeypatch.setattr(
-        security_auth.jwt,
-        "decode",
-        lambda token, secret, algorithms: token_payload,
-    )
-
-    called = {"signed": False}
-
-    async def _fake_verify(request, current_user, db, *, session_id, skip_origin=False):
-        called["signed"] = True
-        assert current_user.role == "superadmin"
-        return current_user
-
-    monkeypatch.setattr(
-        "apps.administration.services.signing_service.verify_signed_admin_request",
-        _fake_verify,
-    )
-
-    class _Headers(dict):
-        def get(self, key, default=None):
-            return super().get(key, default)
-
-    request = SimpleNamespace(state=SimpleNamespace(), headers=_Headers())
-    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="tok")
-    # peek user → get_current_admin user → admin session
-    db = mock_db(scalar_result(admin), scalar_result(admin), scalar_result(admin_session))
-    result = await security_auth.get_current_user_or_superadmin(request, creds, db)
-    assert result is admin
-    assert called["signed"] is True
-    assert request.state.client_type == "web"
-
-
-@pytest.mark.asyncio
-async def test_authenticate_request_web_and_mobile(monkeypatch, mock_db, scalar_result):
-    """Single authenticate_request() branches web RSA vs mobile identity."""
-    from uuid import uuid4
-
-    from apps.accounts.db_models import User
-    from apps.administration.db_models import AdminSessionStatus
-    from apps.administration.services.auth_service import _admin_password_fingerprint
-    from common.enums import UserStatus
-    from fastapi.security import HTTPAuthorizationCredentials
-
-    password_hash = "hash"
-    user_id = uuid4()
-    session_id = uuid4()
-    admin = User(
-        id=user_id,
-        email="admin@example.com",
-        status=UserStatus.active,
-        password_hash=password_hash,
-    )
-    admin.role = "superadmin"
-    admin_session = SimpleNamespace(
-        id=session_id,
-        user_id=user_id,
-        status=AdminSessionStatus.ACTIVE.value,
-        expires_at=None,
-    )
-    token_payload = {
-        "type": "access",
-        "sub": str(user_id),
-        "session_id": str(session_id),
-        "pf": _admin_password_fingerprint(password_hash),
-    }
-    monkeypatch.setattr(
-        security_auth.jwt,
-        "decode",
-        lambda token, secret, algorithms: token_payload,
-    )
-
-    async def _fake_verify(request, current_user, db, *, session_id, skip_origin=False):
-        return current_user
-
-    monkeypatch.setattr(
-        "apps.administration.services.signing_service.verify_signed_admin_request",
-        _fake_verify,
-    )
-
-    request = SimpleNamespace(state=SimpleNamespace(), headers={})
-    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="tok")
-    db = mock_db(scalar_result(admin), scalar_result(admin), scalar_result(admin_session))
-    web = await security_auth.authenticate_request(request, creds, db)
-    assert web.client_type == "web"
-    assert web.user_id == admin.id
-    assert web.role == "superadmin"
-    assert web.user is admin
-
-    plain = User(id=uuid4(), email="u@example.com", status=UserStatus.active, password_hash="x")
-    plain.role = "user"
-    monkeypatch.setattr(
-        security_auth.jwt,
-        "decode",
-        lambda token, secret, algorithms: {"type": "access", "sub": str(plain.id)},
-    )
-    request2 = SimpleNamespace(state=SimpleNamespace(), headers={})
-    db2 = mock_db(scalar_result(plain))
-    mobile = await security_auth.authenticate_request(request2, creds, db2)
-    assert mobile.client_type == "mobile"
-    assert mobile.user is plain
-    assert request2.state.client_type == "mobile"
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,6 @@ from apps.profiles.services.graduation_email_service import process_graduation_c
 from apps.profiles.services.response_service import alumni_status
 from common.enums import OnboardingStatus, UserStatus
 from core.email_service import GRADUATION_COMPLETION_PURPOSE, process_pending_emails
-from apps.administration.dependencies import require_signed_admin
 
 _SCHEMA_SQL = """
 CREATE TABLE users (
@@ -450,7 +449,6 @@ async def test_manual_graduation_runcron_queues_celery_worker(monkeypatch) -> No
         yield AsyncMock()
 
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
     app.dependency_overrides[get_session] = _override_db
 
     with (

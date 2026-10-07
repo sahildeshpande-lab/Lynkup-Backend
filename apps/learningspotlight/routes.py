@@ -40,9 +40,9 @@ from apps.learningspotlight.services.spotlight_persistence_service import (
 from common.enums import UserListStatus
 from common.pagination import OptionalPaginationParams
 from common.schemas import ApiResponse
-from apps.administration.dependencies import require_signed_admin
 from core.database.session import get_session
-from core.security.auth import get_current_user
+from core.security.auth import get_current_admin, get_current_user
+from core.security.mobile.dependencies import require_mobile_request_security
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ router = APIRouter(tags=["Learning Spotlight"])
 
 @router.get("/learning-spotlight", response_model=ApiResponse)
 async def get_current_learning_spotlight(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: AsyncSession = Depends(get_session),
     service: SpotlightPersistenceService = Depends(SpotlightPersistenceService),
 ) -> ApiResponse:
@@ -80,7 +80,7 @@ async def get_current_learning_spotlight(
 @router.patch("/learning-spotlight/read", response_model=ApiResponse)
 async def mark_learning_spotlight_read(
     payload: SpotlightReadRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: AsyncSession = Depends(get_session),
     service: SpotlightPersistenceService = Depends(SpotlightPersistenceService),
 ) -> ApiResponse:
@@ -119,7 +119,7 @@ async def mark_learning_spotlight_read(
 @router.patch("/learning-spotlight/save", response_model=ApiResponse)
 async def update_learning_spotlight_saved_status(
     payload: SpotlightSaveRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: AsyncSession = Depends(get_session),
     service: SpotlightPersistenceService = Depends(SpotlightPersistenceService),
 ) -> ApiResponse:
@@ -146,7 +146,7 @@ async def update_learning_spotlight_saved_status(
 @router.patch("/learning-spotlight/feedback", response_model=ApiResponse)
 async def submit_learning_spotlight_feedback(
     payload: SpotlightFeedbackRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: AsyncSession = Depends(get_session),
     service: SpotlightPersistenceService = Depends(SpotlightPersistenceService),
 ) -> ApiResponse:
@@ -167,7 +167,7 @@ async def submit_learning_spotlight_feedback(
 
 @router.get("/learning-spotlight/saved", response_model=ApiResponse)
 async def get_saved_learning_spotlight_papers(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: AsyncSession = Depends(get_session),
     service: SpotlightPersistenceService = Depends(SpotlightPersistenceService),
 ) -> ApiResponse:
@@ -183,7 +183,7 @@ async def get_saved_learning_spotlight_papers(
 @router.post("/papers/{paper_id}/summarize", response_model=ApiResponse)
 async def summarize_paper_endpoint(
     paper_id: str,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     payload: PaperSummarizeRequest | None = None,
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
@@ -224,7 +224,7 @@ async def summarize_paper_endpoint(
 @router.post("/papers/{paper_id}/synthesize", response_model=ApiResponse)
 async def synthesize_paper_endpoint(
     paper_id: str,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     payload: PaperSynthesizeRequest | None = None,
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
@@ -267,7 +267,7 @@ async def synthesize_paper_endpoint(
 
 @router.get("/admin/learning-spotlight/users", response_model=ApiResponse)
 async def list_learning_spotlight_users_endpoint(
-    current_admin: Annotated[User, Depends(require_signed_admin)],
+    current_admin: Annotated[User, Depends(get_current_admin)],
     db: AsyncSession = Depends(get_session),
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
@@ -306,7 +306,7 @@ async def list_learning_spotlight_users_endpoint(
 
 @router.get("/admin/learning-spotlight-logs", response_model=ApiResponse)
 async def list_learning_spotlight_logs_endpoint(
-    current_admin: Annotated[User, Depends(require_signed_admin)],
+    current_admin: Annotated[User, Depends(get_current_admin)],
     db: AsyncSession = Depends(get_session),
     user_id: UUID | None = Query(default=None, description="Filter logs by user id."),
     search: str | None = Query(
@@ -369,7 +369,7 @@ async def list_learning_spotlight_logs_endpoint(
 
 @router.post("/admin/spotlight/runcron", response_model=ApiResponse, status_code=202)
 async def manual_run_learning_spotlight_cron(
-    current_admin: Annotated[User, Depends(require_signed_admin)],
+    current_admin: Annotated[User, Depends(get_current_admin)],
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """Queue learning spotlight generation for a Celery worker."""

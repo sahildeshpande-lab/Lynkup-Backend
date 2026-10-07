@@ -17,6 +17,7 @@ from core.security.auth import get_current_app_user
 router = APIRouter(prefix="/share", tags=["Share"])
 
 
+from core.security.mobile.dependencies import require_mobile_request_security
 @router.post(
     "/link",
     response_model=ShareLinkResponse,
@@ -29,7 +30,7 @@ router = APIRouter(prefix="/share", tags=["Share"])
 )
 async def create_share_link(
     payload: ShareLinkRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> ShareLinkResponse:
     return await create_link(db, current_user.id, payload)

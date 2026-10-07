@@ -10,6 +10,8 @@ from core.security.auth import (
     get_current_user,
     get_current_user_moderator_or_superadmin,
 )
+from core.security.mobile.dependencies import get_current_user_or_superadmin_secured, get_current_user_moderator_or_superadmin_secured
+from core.security.mobile.dependencies import require_mobile_request_security
 from apps.accounts.db_models import User
 from common.enums import MediaType
 from common.responses import success_response
@@ -41,7 +43,7 @@ async def upload_post_media(
         description="Upload one or more media files using repeated form field name 'files'.",
     ),
     types: list[MediaType] | None = Form(default=None),
-    current_user: User = Depends(get_current_app_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     data = await upload_post_media_service(
@@ -60,7 +62,7 @@ async def upload_post_media(
 @router.post("/post", response_model=ApiResponse)
 async def save_post(
     payload: SavePostRequest,
-    current_user: User = Depends(get_current_app_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     post = await save_post_service(
@@ -82,7 +84,7 @@ async def save_post(
 @router.get("/posts/{id}", response_model=ApiResponse)
 async def get_post(
     id: UUID,
-    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin_secured),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     viewer_role = (
@@ -121,7 +123,7 @@ async def get_post(
 @router.get("/postrevision", response_model=ApiResponse)
 async def list_post_revisions(
     post_id: UUID = Query(..., description="Post id to fetch content revisions for"),
-    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin_secured),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """Return every content revision snapshot for a post (newest first)."""
@@ -137,7 +139,7 @@ async def list_post_revisions(
 @router.patch("/posts", response_model=ApiResponse)
 async def edit_post(
     payload: EditPostRequest,
-    current_user: User = Depends(get_current_app_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     post = await edit_post_service(
@@ -160,7 +162,7 @@ async def edit_post(
 @router.delete("/posts", response_model=ApiResponse)
 async def delete_post(
     payload: DeletePostRequest,
-    current_user: User = Depends(get_current_app_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     await delete_post_service(
@@ -192,7 +194,7 @@ async def list_user_posts(
     ),
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     block_message = await get_profile_visibility_block_message(
@@ -249,7 +251,7 @@ async def list_user_posts(
 
 @router.get("/draftpost", response_model=ApiResponse)
 async def list_draft_posts(
-    current_user: User = Depends(get_current_app_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     posts = await list_draft_posts_service(
@@ -266,7 +268,7 @@ async def list_draft_posts(
 @router.delete("/draftpost", response_model=ApiResponse)
 async def delete_draft_post(
     payload: DeletePostRequest,
-    current_user: User = Depends(get_current_app_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     await delete_draft_post_service(
@@ -283,7 +285,7 @@ async def get_feed(
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
     cursor: str | None = Query(default=None),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     # Unpaginated response is a bare list — totalItems is unused; skip count SQL.

@@ -16,14 +16,7 @@ from entrypoints.api import app
 from core.database.session import async_session_factory
 from datetime import datetime, timezone, timedelta
 from core.database.init import init_db
-from core.security.auth import (
-    get_current_app_user,
-    get_current_user,
-    get_current_moderator,
-    get_current_moderator_or_viewer,
-    get_current_user_moderator_or_superadmin,
-)
-from apps.administration.dependencies import require_signed_moderator, require_signed_moderator_or_viewer
+from core.security.auth import get_current_app_user, get_current_user, get_current_moderator, get_current_moderator_or_viewer
 from apps.accounts.db_models import TransactionalEmailLog, User
 from apps.accounts.services import assign_user_role
 from apps.feed.db_models import Post, MediaAsset, PostAttachment
@@ -877,7 +870,6 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
         return moderator
 
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_get_current_moderator
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_get_current_moderator
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -900,7 +892,6 @@ async def test_list_reviewed_posts_route_via_test_client(test_users) -> None:
             assert "Reviewed via route" not in filtered_captions
     finally:
         app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
-        app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
 
 
 @pytest.mark.asyncio
@@ -948,7 +939,6 @@ async def test_reviewed_posts_status_filter_without_moderator_id_returns_all(tes
         return SimpleNamespace(id=moderator_a.id, role="moderator")
 
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_get_current_moderator
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_get_current_moderator
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -961,7 +951,6 @@ async def test_reviewed_posts_status_filter_without_moderator_id_returns_all(tes
             assert {"Published by A", "Published by B"}.issubset(captions)
     finally:
         app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
-        app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
 
 
 @pytest.mark.asyncio
@@ -1045,9 +1034,6 @@ async def test_processing_posts_route_filters_for_moderator_and_allows_superadmi
     app.dependency_overrides[get_current_moderator_or_viewer] = (
         lambda: SimpleNamespace(id=moderator_a.id, role="moderator")
     )
-    app.dependency_overrides[require_signed_moderator_or_viewer] = (
-        lambda: SimpleNamespace(id=moderator_a.id, role="moderator")
-    )
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -1059,18 +1045,11 @@ async def test_processing_posts_route_filters_for_moderator_and_allows_superadmi
             assert moderator_body["data"]["items"][0]["moderator_name"] == moderator_a.email
     finally:
         app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
-        app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
 
     app.dependency_overrides[get_current_moderator_or_viewer] = (
         lambda: SimpleNamespace(id=superadmin_id, role="superadmin")
     )
-    app.dependency_overrides[require_signed_moderator_or_viewer] = (
-        lambda: SimpleNamespace(id=superadmin_id, role="superadmin")
-    )
     app.dependency_overrides[get_current_moderator] = (
-        lambda: SimpleNamespace(id=superadmin_id, role="superadmin")
-    )
-    app.dependency_overrides[require_signed_moderator] = (
         lambda: SimpleNamespace(id=superadmin_id, role="superadmin")
     )
     try:
@@ -1083,9 +1062,7 @@ async def test_processing_posts_route_filters_for_moderator_and_allows_superadmi
             assert {"Route assigned to A", "Route assigned to B"}.issubset(captions)
     finally:
         app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
-        app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
         app.dependency_overrides.pop(get_current_moderator, None)
-        app.dependency_overrides.pop(require_signed_moderator, None)
 
 
 @pytest.mark.asyncio
@@ -1573,11 +1550,8 @@ async def test_routes_post_management_flow(test_users) -> None:
         return User(id=user.id, email=user.email, role="moderator")
 
     app.dependency_overrides[get_current_user] = _override_get_current_user
-    app.dependency_overrides[get_current_user_moderator_or_superadmin] = _override_get_current_user
     app.dependency_overrides[get_current_moderator] = _override_get_current_moderator
-    app.dependency_overrides[require_signed_moderator] = _override_get_current_moderator
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_get_current_moderator
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_get_current_moderator
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -1670,11 +1644,8 @@ async def test_routes_post_management_flow(test_users) -> None:
             assert "not found" in body["message"].lower()
     finally:
         app.dependency_overrides.pop(get_current_user, None)
-        app.dependency_overrides.pop(get_current_user_moderator_or_superadmin, None)
         app.dependency_overrides.pop(get_current_moderator, None)
-        app.dependency_overrides.pop(require_signed_moderator, None)
         app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
-        app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
 
 
 @pytest.mark.asyncio

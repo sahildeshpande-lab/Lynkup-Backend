@@ -7,16 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import EmailStr
 from core.database.session import get_session
 from core.security.auth import (
-    get_current_user_or_superadmin,
+    get_current_superadmin,
+    get_current_admin,
+    get_current_moderator,
+    get_current_moderator_or_viewer,
 )
+from core.security.mobile.dependencies import get_current_user_or_superadmin_secured
 from apps.accounts.db_models import User
-from apps.administration.dependencies import (
-    require_admin_signed_request,
-    require_signed_admin,
-    require_signed_moderator,
-    require_signed_moderator_or_viewer,
-    require_signed_superadmin,
-)
+from apps.administration.dependencies import require_admin_signed_request
 from apps.administration.services.signing_service import (
     register_pending_signing_key,
     revoke_signing_key,
@@ -68,14 +66,13 @@ router = APIRouter(tags=["4] Admin Management"])
 @router.post("/auth/admin/signing-keys/register", response_model=ApiResponse)
 async def admin_register_signing_key(
     payload: AdminSigningKeyRegisterRequest,
-    request: Request,
 ) -> ApiResponse:
     """Pre-login public-key registration for Web Admin RSA request signing.
 
     Does not accept user_id. The key is activated only after successful admin login
     that includes the returned keyId.
     """
-    return await register_pending_signing_key(payload.publicKey, request=request)
+    return await register_pending_signing_key(payload.publicKey)
 
 
 @router.post("/auth/admin/login", response_model=AdminAuthResponse)
@@ -91,7 +88,7 @@ async def admin_signin(
 async def admin_logout(
     request: Request,
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_admin_signed_request),
+    current_user: User = Depends(get_current_admin),
 ) -> ApiResponse:
     """Revoke the current admin session and any RSA signing keys bound to it."""
     return await services.admin_logout(current_user, db, request=request)
@@ -101,10 +98,8 @@ async def admin_logout(
 async def admin_signup(
     payload: AdminSignupRequest,
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_superadmin),
 ) -> ApiResponse:
-    """Create staff account. Requires signed request + superadmin."""
-    return await services.admin_signup(payload, db, current_user=current_user)
+    return await services.admin_signup(payload, db)
 
 
 @router.post("/auth/admin/signing-keys/revoke", response_model=ApiResponse)
@@ -112,7 +107,7 @@ async def admin_revoke_signing_key(
     payload: AdminSigningKeyRevokeRequest,
     request: Request,
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_admin_signed_request),
+    current_user: User = Depends(get_current_admin),
 ) -> ApiResponse:
     return await revoke_signing_key(db, current_user, payload.keyId, request=request)
 
@@ -137,10 +132,9 @@ async def admin_token(payload: RefreshTokenRequest, db: AsyncSession = Depends(g
 @router.post("/forgot-password", response_model=ApiResponse)
 async def forgot_password(
     payload: AdminForgotPasswordRequest,
-    request: Request,
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    return await services.admin_forgot_password(payload, db, request=request)
+    return await services.admin_forgot_password(payload, db)
 
 
 @router.post("/reset-password", response_model=ApiResponse)
@@ -155,7 +149,7 @@ async def reset_password(
 async def change_password(
     payload: ChangePasswordRequest,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_admin_signed_request),
+    current_user=Depends(get_current_admin),
 ):
     return await services.change_password(
         payload,
@@ -177,7 +171,7 @@ async def list_users(
         description="Filter users by alumni status (true = alumni only, false = non-alumni only)",
     ),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return ApiResponse(
         message="users listed",
@@ -197,7 +191,7 @@ async def export_users(
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return ApiResponse(message="users exported", data=await services.export_users(page, pageSize, db))
 
@@ -212,7 +206,7 @@ async def list_moderators(
         description="Filter staff by status: Active, Deleted",
     ),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return ApiResponse(
         message="moderators listed",
@@ -230,7 +224,7 @@ async def list_viewers(
         description="Filter staff by status: Active, Deleted",
     ),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return ApiResponse(
         message="viewers listed",
@@ -275,7 +269,7 @@ async def list_admin_activity_logs(
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator),
+    current_user=Depends(get_current_moderator),
 ) -> ApiResponse:
     _ = current_user
     data = await services.list_admin_activity_logs_service(
@@ -297,7 +291,7 @@ async def create_user_by_admin(
     payload: AdminUserCreateRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return await services.admin_create_user(
         payload,
@@ -312,7 +306,7 @@ async def create_user_by_admin(
 async def get_user_by_admin(
     userId: UUID,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return ApiResponse(message="user fetched", data=await services.admin_get_user(userId, db))
 
@@ -321,7 +315,7 @@ async def get_user_by_admin(
 async def delete_users_by_admin(
     payload: AdminDeleteUsersRequest,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_superadmin),
+    current_user=Depends(get_current_superadmin),
 ) -> ApiResponse:
     data = await services.admin_delete_users(
         payload.userIds,
@@ -340,7 +334,7 @@ async def update_user_status_by_admin(
     userId: UUID,
     payload: AdminUserStatusRequest,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator),
+    current_user=Depends(get_current_moderator),
 ) -> ApiResponse:
     return ApiResponse(
         message=f"user {payload.status.value} by admin",
@@ -361,7 +355,7 @@ async def update_user_status_by_admin(
 async def edit_profile(
     payload: AdminEditProfileRequest,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_admin),
+    current_user=Depends(get_current_admin),
 ):
     return await services.admin_edit_profile(
         current_user.id,
@@ -380,7 +374,7 @@ async def admin_onboarding(
     academic_interests: str = Form(...),
     profile_photo: UploadFile | None = File(default=None),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
 ) -> ApiResponse:
     return ApiResponse(
         message="onboarding completed",
@@ -404,7 +398,7 @@ async def admin_onboarding(
 async def update_completeness_weights(
     payload: CompletenessWeightsUpdateRequest,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_superadmin),
+    current_user=Depends(get_current_superadmin),
 ) -> ApiResponse:
     from apps.profiles import services as profiles_services
     data = await profiles_services.update_completeness_weights(
@@ -421,7 +415,7 @@ async def update_user_profile(
     payload: UpdateProfileRequest,
     id: UUID = Query(...),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_superadmin),
+    current_user=Depends(get_current_superadmin),
 ) -> ApiResponse:
     from apps.profiles import services as profiles_services
     data = await profiles_services.update_user_profile_by_admin_service(
@@ -440,7 +434,7 @@ async def list_processing_posts(
     pageSize: int | None = Query(default=None, ge=1, le=200),
     moderator_id: UUID | None = Query(default=None),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     from apps.feed.services import list_processing_posts_service
     role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
@@ -486,7 +480,7 @@ async def list_reviewed_posts(
         description="Sort direction. desc = newest/latest first (default); asc = oldest first.",
     ),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     from apps.feed.services import list_reviewed_posts_by_state_service
     from common.exceptions import ApiError
@@ -529,7 +523,7 @@ async def admin_list_invitations(
         ),
     ),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_admin),
+    current_user=Depends(get_current_admin),
 ) -> ApiResponse:
     """List invitation codes (including expired, converted, and soft-deleted)."""
     from apps.invitations.services import get_all_invitations
@@ -547,7 +541,7 @@ async def admin_list_invitations(
 async def admin_soft_delete_invitation(
     payload: SoftDeleteInvitationRequest,
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
 ) -> ApiResponse:
     """Soft-delete an invitation code. Preserves the row for audit history."""
     from apps.invitations.services import soft_delete_invitation
@@ -563,7 +557,7 @@ async def admin_soft_delete_invitation(
 @router.get("/feature-flags", response_model=ApiResponse)
 async def list_feature_flags(
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user_or_superadmin),
+    current_user: User = Depends(get_current_user_or_superadmin_secured),
 ) -> ApiResponse:
     """Return all platform feature flags for authenticated app users and superadmins."""
     _ = current_user
@@ -577,7 +571,7 @@ async def list_feature_flags(
 async def patch_admin_feature_flag(
     payload: FeatureFlagUpdateRequest,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return ApiResponse(
         message="Feature flag updated successfully",
@@ -598,7 +592,7 @@ async def patch_admin_feature_flag(
 async def create_admin_feature_flag(
     payload: FeatureFlagCreateRequest,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     return ApiResponse(
         message="Feature flag created successfully",
@@ -615,7 +609,7 @@ async def create_admin_feature_flag(
 async def delete_admin_feature_flag(
     flag_id: UUID,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     """Hard-delete a feature flag by id."""
     return ApiResponse(
@@ -633,7 +627,7 @@ async def delete_admin_feature_flag(
 async def admin_publish_or_flag_post(
     payload: AdminPublishPostRequest,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     """
     Moderate a post by setting its state: published, flagged, rejected (soft delete),
@@ -678,7 +672,7 @@ from common.exceptions import ApiError
 async def create_template(
     payload: TemplateCreate,
     db: AsyncSession = Depends(get_session),
-    current_admin: User = Depends(require_signed_admin),
+    current_admin: User = Depends(get_current_admin),
 ) -> ApiResponse:
     """Create a new email template."""
     from apps.administration.services.admin_activity_log_service import (
@@ -738,7 +732,7 @@ async def create_template(
 async def get_templates(
     name: str | None = Query(default=None),
     db: AsyncSession = Depends(get_session),
-    current_admin: User = Depends(require_signed_admin),
+    current_admin: User = Depends(get_current_admin),
 ) -> ApiResponse:
     """List templates or get a specific template by name."""
     if name:
@@ -763,7 +757,7 @@ async def get_templates(
 async def update_template(
     payload: TemplateUpdate,
     db: AsyncSession = Depends(get_session),
-    current_admin: User = Depends(require_signed_admin),
+    current_admin: User = Depends(get_current_admin),
 ) -> ApiResponse:
     """Update template subject, body_html, or status."""
     from apps.administration.services.admin_activity_log_service import (
@@ -835,7 +829,7 @@ async def update_template(
 async def delete_template(
     template_id: UUID,
     db: AsyncSession = Depends(get_session),
-    current_admin: User = Depends(require_signed_admin),
+    current_admin: User = Depends(get_current_admin),
 ) -> ApiResponse:
     """Delete a template by id."""
     from apps.administration.services.admin_activity_log_service import (
@@ -874,7 +868,7 @@ async def delete_template(
 
 @router.post("/admin/graduation/runcron", response_model=ApiResponse, status_code=202)
 async def run_graduation_email_cron(
-    current_admin: User = Depends(require_signed_admin),
+    current_admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """Queue graduation completion email delivery for a Celery worker.

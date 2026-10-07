@@ -20,7 +20,6 @@ from core.database.session import get_session
 from core.security.auth import get_current_admin
 from entrypoints.api import app
 from tests.unit.conftest import FakeScalarResult
-from apps.administration.dependencies import require_signed_admin
 
 client = TestClient(app)
 ADMIN_ID = uuid4()
@@ -50,7 +49,6 @@ class _Session:
 
 def setup_module() -> None:
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
 
     async def _override_session():
         yield _Session()
@@ -60,14 +58,12 @@ def setup_module() -> None:
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_current_admin, None)
-    app.dependency_overrides.pop(require_signed_admin, None)
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_bulk_send_service, None)
 
 
 def test_create_campaign_requires_admin() -> None:
     override = app.dependency_overrides.pop(get_current_admin, None)
-    override = app.dependency_overrides.pop(require_signed_admin, None)
     try:
         response = client.post(
             "/api/v1/admin/bulk-send/campaigns",
@@ -84,7 +80,6 @@ def test_create_campaign_requires_admin() -> None:
     finally:
         if override:
             app.dependency_overrides[get_current_admin] = override
-            app.dependency_overrides[require_signed_admin] = override
 
 
 def test_create_campaign_success(monkeypatch) -> None:

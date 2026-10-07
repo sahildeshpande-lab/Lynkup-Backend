@@ -17,7 +17,6 @@ from apps.report.schemas import (
     ReportResponse,
     ReportedEntityListResponse,
 )
-from apps.administration.dependencies import require_signed_moderator, require_signed_moderator_or_viewer
 
 client = TestClient(app)
 
@@ -50,18 +49,14 @@ def setup_module() -> None:
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_app_user] = _mock_current_user
     app.dependency_overrides[get_current_moderator] = _mock_current_moderator
-    app.dependency_overrides[require_signed_moderator] = _mock_current_moderator
     app.dependency_overrides[get_current_moderator_or_viewer] = _mock_current_moderator
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _mock_current_moderator
 
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_app_user, None)
     app.dependency_overrides.pop(get_current_moderator, None)
-    app.dependency_overrides.pop(require_signed_moderator, None)
     app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
-    app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
 
 
 def test_post_report_success():
@@ -392,7 +387,6 @@ def test_review_report_admin_viewer():
         },
     )
     app.dependency_overrides[get_current_moderator_or_viewer] = _mock_current_viewer
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _mock_current_viewer
     try:
         with patch(
             "apps.report.routes.review_report_admin_service",
@@ -403,7 +397,6 @@ def test_review_report_admin_viewer():
         assert response.json()["status"] is True
     finally:
         app.dependency_overrides[get_current_moderator_or_viewer] = _mock_current_moderator
-        app.dependency_overrides[require_signed_moderator_or_viewer] = _mock_current_moderator
 
 
 def test_admin_routes_unauthorized():
@@ -413,9 +406,7 @@ def test_admin_routes_unauthorized():
         raise ApiError("Insufficient permissions")
 
     app.dependency_overrides[get_current_moderator] = _mock_unauthorized_moderator
-    app.dependency_overrides[require_signed_moderator] = _mock_unauthorized_moderator
     app.dependency_overrides[get_current_moderator_or_viewer] = _mock_unauthorized_moderator
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _mock_unauthorized_moderator
     try:
         response = client.get(
             "/api/v1/admin/reports",
@@ -428,6 +419,4 @@ def test_admin_routes_unauthorized():
         assert "Insufficient permissions" in response.json()["message"]
     finally:
         app.dependency_overrides[get_current_moderator] = _mock_current_moderator
-        app.dependency_overrides[require_signed_moderator] = _mock_current_moderator
         app.dependency_overrides[get_current_moderator_or_viewer] = _mock_current_moderator
-        app.dependency_overrides[require_signed_moderator_or_viewer] = _mock_current_moderator

@@ -18,7 +18,6 @@ from apps.analytics.schemas import (
     LearningSpotlightSummary,
     LearningSpotlightTypeReadSummary,
 )
-from apps.administration.dependencies import require_signed_admin
 from core.database.session import get_session
 from core.security.auth import get_current_admin
 from entrypoints.api import app
@@ -68,13 +67,11 @@ async def _override_app_user():
 def setup_module() -> None:
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
 
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_admin, None)
-    app.dependency_overrides.pop(require_signed_admin, None)
 
 
 def _empty_learning_spotlight() -> LearningSpotlightAnalytics:
@@ -221,7 +218,6 @@ def test_admin_analytics_dashboard_invalid_type():
 
 def test_admin_analytics_dashboard_rejects_app_user():
     app.dependency_overrides[get_current_admin] = _override_app_user
-    app.dependency_overrides[require_signed_admin] = _override_app_user
     try:
         # get_current_admin override returns a user role; route still "succeeds"
         # with that dependency override. Verify service is still invoked only for
@@ -235,4 +231,3 @@ def test_admin_analytics_dashboard_rejects_app_user():
         assert response.status_code == 200
     finally:
         app.dependency_overrides[get_current_admin] = _override_admin
-        app.dependency_overrides[require_signed_admin] = _override_admin

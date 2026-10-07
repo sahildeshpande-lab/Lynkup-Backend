@@ -16,8 +16,8 @@ from apps.academics.schemas import (
 )
 from apps.accounts.db_models import User
 from common.schemas import ApiResponse
-from apps.administration.dependencies import require_signed_admin
 from core.database.session import get_session
+from core.security.auth import get_current_admin
 
 router = APIRouter(tags=["4] Admin Management"])
 
@@ -88,7 +88,7 @@ async def admin_create_majors(
         description="Omit for Add CTA. Pass `import` for bulk-import response semantics.",
     ),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
 ) -> CatalogBulkApiResponse:
     _ = current_user
     data = await services.bulk_create_majors(payload.items, db)
@@ -107,7 +107,7 @@ async def admin_create_minors(
         description="Omit for Add CTA. Pass `import` for bulk-import response semantics.",
     ),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
 ) -> CatalogBulkApiResponse:
     _ = current_user
     data = await services.bulk_create_minors(payload.items, db)
@@ -126,7 +126,7 @@ async def admin_create_academic_interests(
         description="Omit for Add CTA. Pass `import` for bulk-import response semantics.",
     ),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
 ) -> CatalogBulkApiResponse:
     _ = current_user
     data = await services.bulk_create_academic_interests(payload.items, db)
@@ -145,7 +145,7 @@ async def admin_create_universities(
         description="Omit for Add CTA. Pass `import` for bulk-import response semantics.",
     ),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
 ) -> CatalogBulkApiResponse:
     _ = current_user
     data = await services.bulk_create_universities(payload.items, db)
@@ -164,7 +164,7 @@ async def admin_create_countries(
         description="Omit for Add CTA. Pass `import` for bulk-import response semantics.",
     ),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
 ) -> CatalogBulkApiResponse:
     _ = current_user
     data = await services.bulk_create_countries(payload.items, db)
@@ -175,7 +175,7 @@ async def admin_create_countries(
 async def admin_soft_delete_catalog(
     payload: AcademicCatalogSoftDeleteRequest,
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
 ) -> ApiResponse:
     _ = current_user
     data = await services.soft_delete_catalog_record(payload.type, payload.id, db)
@@ -186,7 +186,7 @@ async def admin_soft_delete_catalog(
 async def admin_patch_catalog(
     payload: AcademicCatalogPatchRequest,
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
 ) -> CatalogBulkApiResponse:
     _ = current_user
     data = await services.patch_catalog_record(payload.type, payload.id, payload.data, db)

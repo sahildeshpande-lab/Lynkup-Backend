@@ -415,6 +415,7 @@ async def test_dispatch_announcement_creates_single_broadcast(mock_db) -> None:
     db = mock_db()
     campaign = _campaign(campaign_type=NotificationCampaignType.announcement)
     recipients = [uuid4(), uuid4(), uuid4()]
+    user_a, user_b = recipients[0], recipients[1]
 
     with (
         patch.object(admin_svc, "get_campaign_for_dispatch", AsyncMock(return_value=campaign)),
@@ -449,13 +450,28 @@ async def test_dispatch_announcement_creates_single_broadcast(mock_db) -> None:
         ) as broadcast,
         patch.object(
             admin_svc,
-            "get_active_push_targets_for_users",
-            AsyncMock(return_value=[("t1", "android"), ("t2", "android")]),
+            "filter_users_eligible_for_push",
+            AsyncMock(return_value=[user_a, user_b]),
+        ),
+        patch.object(
+            admin_svc,
+            "get_active_push_targets_grouped_by_user",
+            AsyncMock(
+                return_value={
+                    user_a: [("t1", "android")],
+                    user_b: [("t2", "android")],
+                }
+            ),
+        ),
+        patch.object(
+            admin_svc,
+            "get_unread_notification_counts_for_users",
+            AsyncMock(return_value={user_a: 5, user_b: 12}),
         ),
         patch.object(
             admin_svc,
             "send_push_to_devices",
-            AsyncMock(return_value={"successful_count": 2, "failed_count": 0}),
+            AsyncMock(return_value={"successful_count": 1, "failed_count": 0}),
         ) as push,
         patch.object(
             admin_svc,
@@ -476,11 +492,14 @@ async def test_dispatch_announcement_creates_single_broadcast(mock_db) -> None:
     broadcast.assert_awaited_once()
     assert broadcast.await_args.kwargs["campaign_id"] == campaign.id
     assert broadcast.await_args.kwargs["owner_user_id"] == campaign.created_by_admin_id
-    push.assert_awaited_once()
-    fcm_data = push.await_args.args[3]
+    assert push.await_count == 2
+    badges = {call.kwargs.get("badge") for call in push.await_args_list}
+    assert badges == {5, 12}
+    fcm_data = push.await_args_list[0].args[3]
     assert fcm_data["notification_type"] == "ANNOUNCEMENT"
     assert "deep_link" in fcm_data
     assert json.loads(fcm_data["deep_link"]) == {"screen": "notifications"}
+    assert "unread_count" in fcm_data
 
 
 @pytest.mark.asyncio
@@ -533,13 +552,30 @@ async def test_dispatch_topic_sends_one_deduped_token_push_per_recipient(mock_db
         ) as broadcast,
         patch.object(
             admin_svc,
-            "get_active_push_targets_for_users",
-            AsyncMock(return_value=[("t1", "android"), ("t2", "android")]),
+            "filter_users_eligible_for_push",
+            AsyncMock(return_value=recipient_ids),
+        ),
+        patch.object(
+            admin_svc,
+            "get_active_push_targets_grouped_by_user",
+            AsyncMock(
+                return_value={
+                    recipient_ids[0]: [("t1", "android")],
+                    recipient_ids[1]: [("t2", "android")],
+                }
+            ),
         ) as load_tokens,
         patch.object(
             admin_svc,
+            "get_unread_notification_counts_for_users",
+            AsyncMock(
+                return_value={recipient_ids[0]: 3, recipient_ids[1]: 7},
+            ),
+        ),
+        patch.object(
+            admin_svc,
             "send_push_to_devices",
-            AsyncMock(return_value={"successful_count": 2, "failed_count": 0}),
+            AsyncMock(return_value={"successful_count": 1, "failed_count": 0}),
         ) as token_push,
         patch.object(
             admin_svc,
@@ -576,7 +612,8 @@ async def test_dispatch_topic_sends_one_deduped_token_push_per_recipient(mock_db
     assert set(stored_topics) == firebase_topics
     load_tokens.assert_awaited_once()
     assert load_tokens.await_args.args[1] == recipient_ids
-    token_push.assert_awaited_once()
+    assert token_push.await_count == 2
+    assert {call.kwargs.get("badge") for call in token_push.await_args_list} == {3, 7}
     resolve_users.assert_not_awaited()
 
 
@@ -638,7 +675,7 @@ async def test_dispatch_topic_skips_firebase_topic_fanout_when_no_recipients(
         ),
         patch.object(
             admin_svc,
-            "get_active_push_targets_for_users",
+            "get_active_push_targets_grouped_by_user",
             AsyncMock(),
         ) as load_tokens,
         patch.object(
@@ -1323,9 +1360,18 @@ async def test_dispatch_announcement_skips_push_for_opted_out_users(mock_db) -> 
         ) as filter_push,
         patch.object(
             admin_svc,
-            "get_active_push_targets_for_users",
-            AsyncMock(return_value=[("t1", "android")]),
+            "get_active_push_targets_grouped_by_user",
+            AsyncMock(
+                return_value={
+                    push_eligible[0]: [("t1", "android")],
+                }
+            ),
         ) as load_tokens,
+        patch.object(
+            admin_svc,
+            "get_unread_notification_counts_for_users",
+            AsyncMock(return_value={push_eligible[0]: 1}),
+        ),
         patch.object(
             admin_svc,
             "send_push_to_devices",
@@ -1356,6 +1402,7 @@ async def test_dispatch_announcement_skips_push_for_opted_out_users(mock_db) -> 
     )
     load_tokens.assert_awaited_once_with(db, push_eligible)
     push.assert_awaited_once()
+    assert push.await_args.kwargs.get("badge") == 1
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,6 @@ from apps.administration.db_models.template_db_model import Template
 from core.database.session import get_session
 from core.security.auth import get_current_admin
 from entrypoints.api import app
-from apps.administration.dependencies import require_signed_admin
 
 client = TestClient(app)
 
@@ -112,7 +111,6 @@ def test_template_crud_endpoints(mock_admin, monkeypatch):
     )
 
     app.dependency_overrides[get_current_admin] = lambda: mock_admin
-    app.dependency_overrides[require_signed_admin] = lambda: mock_admin
     app.dependency_overrides[get_session] = lambda: session
 
     try:
@@ -221,7 +219,6 @@ def test_template_crud_endpoints(mock_admin, monkeypatch):
         assert [c["action"] for c in activity_calls] == ["create", "update", "delete"]
     finally:
         app.dependency_overrides.pop(get_current_admin, None)
-        app.dependency_overrides.pop(require_signed_admin, None)
         app.dependency_overrides.pop(get_session, None)
 
 

@@ -314,21 +314,21 @@ async def test_fetch_feed_posts_rebuilds_event_order():
             "repost_id": None,
             "created_at": "t1",
             "event_type": "post",
-            "engagement_score": 10,
+            # "engagement_score": 10,
         },
         {
             "post_id": id_17,
             "repost_id": None,
             "created_at": "t2",
             "event_type": "post",
-            "engagement_score": 9,
+            # "engagement_score": 9,
         },
         {
             "post_id": id_91,
             "repost_id": None,
             "created_at": "t3",
             "event_type": "post",
-            "engagement_score": 8,
+            # "engagement_score": 8,
         },
     ]
 

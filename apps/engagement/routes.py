@@ -45,6 +45,7 @@ from apps.engagement.services import (
 from common.enums import ReactionType
 from core.database.session import get_session
 from core.security.auth import get_current_app_user, get_current_user
+from core.security.mobile.dependencies import require_mobile_request_security
 
 router = APIRouter(tags=["7] Post Engagement"])
 
@@ -61,7 +62,7 @@ router = APIRouter(tags=["7] Post Engagement"])
 )
 async def upsert_post_reaction_route(
     payload: UpsertPostReactionRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> PostReactionResponse:
     return await upsert_post_reaction(db, current_user.id, payload)
@@ -74,7 +75,7 @@ async def upsert_post_reaction_route(
 )
 async def create_post_repost(
     payload: RepostPostRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> RepostResponse:
     return await toggle_repost(db, current_user.id, payload.post_id, payload.is_reposted)
@@ -89,7 +90,7 @@ async def create_post_repost(
 )
 async def share_post_route(
     payload: SharePostRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> ShareResponse:
     return await share_post(db, current_user.id, payload.post_id)
@@ -106,7 +107,7 @@ async def share_post_route(
     ),
 )
 async def list_liked_posts_route(
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
@@ -127,7 +128,7 @@ async def list_liked_posts_route(
     description="Return paginated posts bookmarked by the authenticated user.",
 )
 async def list_post_bookmarks(
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
@@ -147,7 +148,7 @@ async def list_post_bookmarks(
 )
 async def update_post_bookmark(
     payload: BookmarkRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> BookmarkResponse:
     return await update_bookmark(db, current_user.id, payload)
@@ -169,7 +170,7 @@ async def update_post_bookmark(
 )
 async def list_post_reactions(
     post_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
     reaction_type: ReactionType | None = Query(
         default=None,
@@ -206,7 +207,7 @@ async def list_post_reactions(
 )
 async def create_comment_route(
     payload: CreateCommentRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> CommentResponse:
     return await create_post_comment(db, current_user.id, payload)
@@ -225,7 +226,7 @@ async def create_comment_route(
 )
 async def edit_comment_route(
     payload: EditCommentRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> CommentResponse:
     return await edit_post_comment(db, current_user.id, payload)
@@ -244,7 +245,7 @@ async def edit_comment_route(
 )
 async def list_post_comments(
     post_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
@@ -270,7 +271,7 @@ async def list_post_comments(
 )
 async def delete_comment_route(
     payload: DeleteCommentRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> CommentResponse:
     return await delete_comment(db, current_user.id, payload)
@@ -285,7 +286,7 @@ async def delete_comment_route(
 )
 async def upsert_comment_reaction_route(
     payload: UpsertCommentReactionRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> CommentReactionResponse:
     return await upsert_comment_reaction(db, current_user.id, payload)

@@ -19,7 +19,6 @@ from apps.administration.services.admin_activity_log_service import (
     mark_admin_notification_as_read,
     mark_all_admin_notifications_as_read,
 )
-from apps.administration.dependencies import require_signed_moderator
 from core.database.session import get_session
 from core.security.auth import get_current_moderator, get_current_superadmin, get_current_user
 from entrypoints.api import app
@@ -66,13 +65,11 @@ async def _override_moderator():
 def setup_module() -> None:
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_moderator] = _override_moderator
-    app.dependency_overrides[require_signed_moderator] = _override_moderator
 
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_moderator, None)
-    app.dependency_overrides.pop(require_signed_moderator, None)
 
 
 def _notification_item(**overrides) -> dict:

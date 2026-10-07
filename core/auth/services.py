@@ -159,6 +159,8 @@ def send_push_notification(
     title: str,
     body: str,
     data: dict[str, Any] | None = None,
+    *,
+    badge: int | None = None,
 ) -> str:
     """
     Send a single FCM push notification using the existing Firebase Admin app.
@@ -166,6 +168,10 @@ def send_push_notification(
     Returns the Firebase message id on success.
     Invalid-token errors are logged and re-raised so callers can record the token
     without treating it as a fatal process failure.
+
+    When ``badge`` is provided (including ``0``), it is set as Android
+    ``notification_count`` and APNs ``aps.badge`` so launcher/icon badges match
+    the backend unread count for the target user.
     """
     initialize_firebase_app()
 
@@ -173,21 +179,27 @@ def send_push_notification(
     if not token:
         raise ValueError("fcm_token cannot be blank")
 
+    android_notification_kwargs: dict[str, Any] = {
+        "channel_id": "kampulynk_alerts_v3",
+        "sound": "default",
+    }
+    aps_kwargs: dict[str, Any] = {"sound": "default"}
+    if badge is not None:
+        android_notification_kwargs["notification_count"] = int(badge)
+        aps_kwargs["badge"] = int(badge)
+
     message = messaging.Message(
         token=token,
         notification=messaging.Notification(title=title, body=body),
         data=_stringify_fcm_data(data),
-        android=messaging.AndroidConfig
-        (
+        android=messaging.AndroidConfig(
             priority="high",
-            notification=messaging.AndroidNotification
-                (channel_id="kampulynk_alerts_v3",sound="default",
-                ),
-            ),
-        apns=messaging.APNSConfig(headers={
-            "apns-priority": "10",
-        },payload=messaging.APNSPayload
-                                  (aps=messaging.Aps(sound="default")))
+            notification=messaging.AndroidNotification(**android_notification_kwargs),
+        ),
+        apns=messaging.APNSConfig(
+            headers={"apns-priority": "10"},
+            payload=messaging.APNSPayload(aps=messaging.Aps(**aps_kwargs)),
+        ),
     )
 
     try:
@@ -215,12 +227,17 @@ def send_push_notifications(
     title: str,
     body: str,
     data: dict[str, Any] | None = None,
+    *,
+    badge: int | None = None,
 ) -> dict[str, Any]:
     """
     Send the same FCM push to many tokens.
 
     Continues after individual failures. Returns counts and failed tokens so
     NotificationService can deactivate installations later.
+
+    ``badge`` is optional and applied identically to every token (same user's
+    devices share one backend unread count).
     """
     successful_count = 0
     failed_count = 0
@@ -232,7 +249,7 @@ def send_push_notifications(
             continue
 
         try:
-            send_push_notification(token, title, body, data)
+            send_push_notification(token, title, body, data, badge=badge)
             successful_count += 1
         except Exception as exc:
             failed_count += 1
@@ -261,6 +278,10 @@ def send_push_to_topic(
     Publish one FCM notification to a Firebase topic.
 
     Returns the Firebase message id on success.
+
+    Unused in production (token fan-out is used instead). Before enabling for
+    production delivery, implement per-user badge / unread_count semantics —
+    topic publish cannot safely carry one unread count for every subscriber.
     """
     initialize_firebase_app()
 

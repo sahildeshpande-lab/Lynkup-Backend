@@ -69,7 +69,6 @@ from apps.recommendations.services.recommendation_settings_service import (
 from common.enums import SpotlightType
 from core.database.session import get_session
 from core.security.auth import get_current_admin, get_current_user
-from apps.administration.dependencies import require_signed_admin
 
 
 class _FakeResult:
@@ -221,7 +220,6 @@ async def test_non_admin_cannot_update_paper_count(mock_db) -> None:
         yield mock_db()
 
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
     app.dependency_overrides[get_session] = _override_db
 
     transport = ASGITransport(app=app)

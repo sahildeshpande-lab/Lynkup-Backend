@@ -251,6 +251,10 @@ async def init_db() -> None:
             await _ensure_user_posts_list_indexes(conn)
         except Exception:  # nosec B110 -- best-effort schema migration
             pass
+        try:
+            await _ensure_user_installations_mobile_security_schema(conn)
+        except Exception:  # nosec B110 -- best-effort schema migration
+            pass
     try:
         async with engine.begin() as conn:
             await conn.execute(text("DROP TABLE IF EXISTS profile_stats"))
@@ -279,6 +283,43 @@ async def _ensure_user_posts_list_indexes(conn) -> None:
             CREATE INDEX IF NOT EXISTS ix_reposts_user_active_created
             ON reposts (user_id, created_at DESC)
             WHERE is_deleted = false
+            """
+        )
+    )
+
+
+async def _ensure_user_installations_mobile_security_schema(conn) -> None:
+    """Additive mobile security columns on user_installations (existing DBs).
+
+    Schema source of truth remains SQLModel + this ALTER helper (no Alembic
+    revision chain for this project). Does not alter ``is_device_verified``.
+    """
+    columns = (
+        ("mobile_hmac_secret", "TEXT"),
+        ("android_package_name", "VARCHAR(255)"),
+        ("android_certificate_digest", "VARCHAR(128)"),
+        ("android_integrity_level", "VARCHAR(64)"),
+        ("android_last_verified_at", "TIMESTAMPTZ"),
+        ("app_attest_key_id", "VARCHAR(128)"),
+        ("app_attest_public_key", "TEXT"),
+        ("app_attest_environment", "VARCHAR(32)"),
+        ("app_attest_counter", "BIGINT"),
+        ("app_attest_last_verified_at", "TIMESTAMPTZ"),
+    )
+    for name, col_type in columns:
+        await conn.execute(
+            text(
+                f"""
+                ALTER TABLE IF EXISTS user_installations
+                ADD COLUMN IF NOT EXISTS {name} {col_type}
+                """
+            )
+        )
+    await conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_user_installations_app_attest_key_id
+            ON user_installations (app_attest_key_id)
             """
         )
     )

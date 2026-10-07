@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
 from core.database import get_session
 from core.security.auth import get_current_user
+from core.security.mobile.dependencies import require_mobile_request_security
 from common.pagination import paginate_items, paginate_or_all
 from common.responses import error_response, success_response
 from apps.connections.services import (
@@ -45,7 +46,7 @@ router = APIRouter(prefix="", tags=["5] Connection Managements"])
 @router.post("/lynkuprequest", response_model=ApiResponse)
 async def create_connection_request(
     request: ConnectionRequestCreate,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
     return await send_connection_request(db, current_user.id, UUID(request.receiver_user_id))
@@ -54,7 +55,7 @@ async def create_connection_request(
 @router.post("/lynkupresponse", response_model=ApiResponse)
 async def respond_connection_request(
     request: ConnectionRequestRespond,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
     try:
@@ -69,7 +70,7 @@ async def respond_connection_request(
 @router.delete("/lynkupremove", response_model=ApiResponse)
 async def remove_connection(
     request: ConnectionRemoveRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> ApiResponse:
     return await remove_connection_service(db, current_user.id, request.user_id)
@@ -78,7 +79,7 @@ async def remove_connection(
 @router.post("/follow", response_model=ApiResponse)
 async def follow_user(
     payload: FollowRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
     return await follow_user_service(db, current_user.id, UUID(payload.following_user_id))
@@ -87,7 +88,7 @@ async def follow_user(
 @router.delete("/follow", response_model=ApiResponse)
 async def unfollow_user(
     payload: FollowRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
     return await unfollow_user_service(db, current_user.id, UUID(payload.following_user_id))
@@ -96,7 +97,7 @@ async def unfollow_user(
 @router.post("/block", response_model=ApiResponse)
 async def block_user(
     payload: BlockRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
     return await block_user_service(db, current_user.id, UUID(payload.blocked_user_id))
@@ -105,7 +106,7 @@ async def block_user(
 @router.delete("/block", response_model=ApiResponse)
 async def unblock_user(
     payload: BlockRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ):
     return await unblock_user_service(db, current_user.id, UUID(payload.blocked_user_id))
@@ -113,7 +114,7 @@ async def unblock_user(
 
 @router.get("/recommendations/connections", response_model=ApiResponse)
 async def get_connection_recommendations(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
     page: int | None = Query(None, ge=1),
     pageSize: int | None = Query(None, ge=1, le=200),
@@ -146,7 +147,7 @@ async def get_connection_recommendations(
 
 @router.get("/connections/mutual-recommendations", response_model=ApiResponse)
 async def get_mutual_connection_recommendations(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
     page: int | None = Query(None, ge=1),
     pageSize: int | None = Query(None, ge=1, le=200),
@@ -163,7 +164,7 @@ async def get_mutual_connection_recommendations(
 
 @router.get("/connections", response_model=ApiResponse)
 async def list_connections(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
     page: int | None = Query(None, ge=1),
     pageSize: int | None = Query(None, ge=1, le=200),
@@ -178,7 +179,7 @@ async def list_connections(
 
 @router.get("/lynkup", response_model=ApiResponse)
 async def get_pending_requests(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
     page: int | None = Query(None, ge=1),
     pageSize: int | None = Query(None, ge=1, le=200),

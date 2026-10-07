@@ -7,8 +7,8 @@ from apps.accounts.db_models import User
 from apps.imports.enums import ImportType
 from apps.imports.services import import_upload
 from common.schemas import ApiResponse
-from apps.administration.dependencies import require_signed_admin
 from core.database.session import get_session
+from core.security.auth import get_current_admin
 
 router = APIRouter(tags=["4] Admin Management"])
 
@@ -18,7 +18,7 @@ async def admin_import(
     type: ImportType = Form(...),
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
 ) -> ApiResponse:
     data = await import_upload(
         import_type=type,

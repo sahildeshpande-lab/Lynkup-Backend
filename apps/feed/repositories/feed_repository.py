@@ -120,18 +120,25 @@ def _visibility_sql(author_profile_alias: str, author_user_expr: str) -> str:
 # Prefer academic matches (uni/major/minor) and connected users. If none match,
 # show all visible posts. Original posts match the author; reposts match the
 # reposter or original author.
+# Ordering: chronological (created_at; reinstate uses updated_at). Engagement
+# score ranking is retained below as comments for easy rollback.
 _FEED_EVENTS_SQL = f"""
 WITH ranked_posts AS (
     SELECT
         p.id AS post_id,
         CAST(NULL AS uuid) AS repost_id,
-        p.created_at AS created_at,
+        -- Chronological sort key: reinstate bubbles up via updated_at
+        CASE
+            WHEN p.state::text = 'reinstate' THEN p.updated_at
+            ELSE p.created_at
+        END AS created_at,
+        -- p.created_at AS created_at,
         'post' AS event_type,
-        (
-            p.like_count * 3
-            + p.comment_count *2 
-            + p.repost_count
-        ) AS engagement_score,
+        -- (
+        --     p.like_count * 3
+        --     + p.comment_count *2 
+        --     + p.repost_count
+        -- ) AS engagement_score,
         {_feed_match_sql("author_profile", "p.author_user_id")} AS is_match
     FROM posts p
     JOIN profiles author_profile
@@ -153,11 +160,11 @@ WITH ranked_posts AS (
         r.id AS repost_id,
         r.created_at AS created_at,
         'repost' AS event_type,
-        (
-            p.like_count * 3
-            + p.comment_count * 2
-            + p.repost_count 
-        ) AS engagement_score, 
+        -- (
+        --     p.like_count * 3
+        --     + p.comment_count * 2
+        --     + p.repost_count 
+        -- ) AS engagement_score, 
         {_feed_match_sql("reposter_profile", "reposter_profile.user_id", "p.author_user_id")} AS is_match
     FROM reposts r
     JOIN profiles reposter_profile
@@ -190,34 +197,37 @@ SELECT
     ranked_posts.post_id,
     ranked_posts.repost_id,
     ranked_posts.created_at,
-    ranked_posts.event_type,
-    ranked_posts.engagement_score
+    ranked_posts.event_type
+    -- , ranked_posts.engagement_score
 FROM ranked_posts
 CROSS JOIN feed_stats
 WHERE
     (feed_stats.max_match = 0 OR ranked_posts.is_match > 0)
     AND (
         CAST(:has_cursor AS boolean) = false
-        OR ranked_posts.engagement_score < :last_engagement_score
+        -- Engagement-score keyset (previous); \\: escapes so SQLAlchemy ignores binds:
+        -- OR ranked_posts.engagement_score < \\:last_engagement_score
+        -- OR (
+        --     ranked_posts.engagement_score = \\:last_engagement_score
+        --     AND ranked_posts.created_at < \\:last_created_at
+        -- )
+        -- OR (
+        --     ranked_posts.engagement_score = \\:last_engagement_score
+        --     AND ranked_posts.created_at = \\:last_created_at
+        --     AND ranked_posts.post_id < \\:last_post_id
+        -- )
+        OR ranked_posts.created_at < :last_created_at
         OR (
-            ranked_posts.engagement_score = :last_engagement_score
-            AND ranked_posts.created_at < :last_created_at
-        )
-        OR (
-            ranked_posts.engagement_score = :last_engagement_score
-            AND ranked_posts.created_at = :last_created_at
+            ranked_posts.created_at = :last_created_at
             AND ranked_posts.post_id < :last_post_id
         )
     )
 ORDER BY
-    ranked_posts.engagement_score DESC ,
+    -- ranked_posts.engagement_score DESC ,
     ranked_posts.created_at DESC ,
     ranked_posts.post_id DESC 
- 
 
 """
-   # created_at DESC,
-    # post_id DESC
 
 # get user profile
 async def fetch_viewer_profile(db: AsyncSession, user_id: UUID) -> Profile | None:
@@ -331,7 +341,7 @@ async def fetch_feed_posts(
     - Original post events match against the original author.
     - Repost events match against the reposter or the original author.
     - If any visible event matches, academic matches and connected users
-      are returned together, ranked by engagement.
+      are returned together, ranked by created_at (reinstate uses updated_at).
     - If nothing matches, all visible events are returned.
 
     Returns:
@@ -342,14 +352,14 @@ async def fetch_feed_posts(
 
     total_started = time.perf_counter()
 
-    last_engagement_score: int = 0
+    # last_engagement_score: int = 0  # previous engagement-score keyset
     last_created_at: datetime = datetime.min
     last_post_id = UUID(int=0)
     has_cursor = False
 
     if cursor:
         decoded = decode_cursor(cursor)
-        last_engagement_score = decoded["engagement_score"]
+        # last_engagement_score = decoded["engagement_score"]
         last_created_at = decoded["created_at"]
         last_post_id = decoded["id"]
         has_cursor = True
@@ -361,7 +371,7 @@ async def fetch_feed_posts(
     params: dict = {
         "current_user": current_user_id,
         "has_cursor": has_cursor,
-        "last_engagement_score": last_engagement_score,
+        # "last_engagement_score": last_engagement_score,
         "last_created_at": last_created_at,
         "last_post_id": last_post_id,
     }
@@ -410,7 +420,7 @@ async def fetch_feed_posts(
                     "repost_id": repost.id,
                     "reposted_by_profile": reposter_profile,
                     "reposted_at": repost.created_at,
-                    "_cursor_engagement_score": row["engagement_score"],
+                    # "_cursor_engagement_score": row["engagement_score"],
                     "_cursor_created_at": row["created_at"],
                     "_cursor_post_id": row["post_id"],
                 }
@@ -424,7 +434,7 @@ async def fetch_feed_posts(
                     "repost_id": None,
                     "reposted_by_profile": None,
                     "reposted_at": None,
-                    "_cursor_engagement_score": row["engagement_score"],
+                    # "_cursor_engagement_score": row["engagement_score"],
                     "_cursor_created_at": row["created_at"],
                     "_cursor_post_id": row["post_id"],
                 }
@@ -434,13 +444,13 @@ async def fetch_feed_posts(
     if has_more and results:
         last = results[-1]
         next_cursor = encode_cursor(
-            engagement_score=last["_cursor_engagement_score"],
+            # engagement_score=last["_cursor_engagement_score"],
             created_at=last["_cursor_created_at"],
             post_id=last["_cursor_post_id"],
         )
 
     for item in results:
-        item.pop("_cursor_engagement_score", None)
+        # item.pop("_cursor_engagement_score", None)
         item.pop("_cursor_created_at", None)
         item.pop("_cursor_post_id", None)
 

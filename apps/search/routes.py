@@ -11,6 +11,8 @@ from core.security.auth import (
     get_current_user_or_superadmin,
     get_current_user_moderator_or_superadmin,
 )
+from core.security.mobile.dependencies import get_current_user_or_superadmin_secured, get_current_user_moderator_or_superadmin_secured
+from core.security.mobile.dependencies import require_mobile_request_security
 from apps.accounts.db_models import User
 from apps.academics import services as academic_catalog_services
 from apps.academics.schemas import UserAcademicInterestCreate
@@ -42,7 +44,7 @@ async def universities(
     ),
     pagination: OptionalPaginationParams = Depends(),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin_secured),
 ) -> ApiResponse:
     normalized_query = query.strip() if query else ""
 
@@ -70,7 +72,7 @@ async def list_academics_info(
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin_secured),
 ) -> ApiResponse:
     data = await services.get_academics_info(
         query=query,
@@ -101,7 +103,7 @@ async def list_countries(
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin_secured),
 ) -> ApiResponse:
 
     data = await services.list_countries(
@@ -122,7 +124,7 @@ async def list_majors(
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin_secured),
 ) -> ApiResponse:
     data = await services.list_majors(
         query=query,
@@ -140,7 +142,7 @@ async def list_minors(
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin_secured),
 ) -> ApiResponse:
     data = await services.list_minors(
         query=query,
@@ -165,7 +167,7 @@ async def list_test_majors(
     ),
     pagination: OptionalPaginationParams = Depends(),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin_secured),
 ) -> ApiResponse:
     _ = current_user
     data = await academic_catalog_services.list_test_majors(
@@ -193,7 +195,7 @@ async def list_test_minors(
     ),
     pagination: OptionalPaginationParams = Depends(),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin_secured),
 ) -> ApiResponse:
     _ = current_user
     data = await academic_catalog_services.list_test_minors(
@@ -231,7 +233,7 @@ async def list_test_interests(
     ),
     pagination: OptionalPaginationParams = Depends(),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin_secured),
 ) -> ApiResponse:
 
     _ = current_user
@@ -259,7 +261,7 @@ async def list_test_interests(
 async def create_academic_interest(
     payload: AcademicInterestCreate,
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin_secured),
 ) -> ApiResponse:
     data = await services.create_academic_interest(
         name=payload.name,
@@ -277,7 +279,7 @@ async def create_academic_interest(
 async def create_user_academic_interests(
     payload: UserAcademicInterestCreate,
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin_secured),
 ) -> ApiResponse:
     _ = current_user
     data = await academic_catalog_services.create_user_academic_interests(
@@ -310,7 +312,7 @@ async def searchuser(
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_app_user),
+    current_user: User = Depends(require_mobile_request_security),
 ) -> ApiResponse:
     data = await services.search_users(
         current_user=current_user,
@@ -327,7 +329,7 @@ async def searchuser(
 
 async def search_posts(
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user_moderator_or_superadmin),
+    current_user: User = Depends(get_current_user_moderator_or_superadmin_secured),
     query: str | None = Query(
         default=None,
         description=(

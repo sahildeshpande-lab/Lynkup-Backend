@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.database.session import get_session
 from core.auth.dependencies import require_recent_auth
 from core.security.auth import get_bearer_token, get_current_user, get_current_app_user
+from core.security.mobile.dependencies import require_mobile_request_security
 from apps.accounts.db_models import User
 from apps.accounts.schemas import ChangeEmailRequest
 from apps.accounts.services import change_email as change_email_service
@@ -35,7 +36,7 @@ def _require_bearer_token(token: str | None = Depends(get_bearer_token)) -> str:
 @router.get("/myprofile", response_model=ApiResponse)
 async def get_my_profile(
     user_id: UUID | None = Query(default=None, description="Optional user id to fetch another user's profile"),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     service = services.get_my_profile_service
@@ -51,7 +52,7 @@ async def get_my_profile(
 
 @router.get("/users/me/completeness", response_model=ApiResponse)
 async def get_me_completeness(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     return ApiResponse(message="profile completeness fetched", data=await services.get_me_completeness(current_user.id, db))
@@ -60,7 +61,7 @@ async def get_me_completeness(
 @router.patch("/updateprofile", response_model=ApiResponse)
 async def update_profile(
     payload: UpdateProfileRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
 
@@ -78,7 +79,7 @@ async def update_profile(
 
 @router.delete("/users/me/deletion", response_model=ApiResponse)
 async def delete_me(
-    current_user: User = Depends(get_current_app_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     data = await services.delete_user_me(current_user, db)
@@ -88,7 +89,7 @@ async def delete_me(
 @router.patch("/users/me/email", response_model=ApiResponse)
 async def change_email(
     payload: ChangeEmailRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_mobile_request_security),
     _recent_auth: dict = Depends(require_recent_auth),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
@@ -99,7 +100,7 @@ async def change_email(
 @router.post("/users/onboarding", response_model=ApiResponse)
 async def complete_onboarding(
     payload: OnboardingRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     data = await services.complete_onboarding(
@@ -125,7 +126,7 @@ async def complete_onboarding(
 @router.patch("/profilevisibility", response_model=ApiResponse)
 async def update_profile_visibility(
     payload: ProfileVisibilityRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     data = await services.update_profile_visibility_service(

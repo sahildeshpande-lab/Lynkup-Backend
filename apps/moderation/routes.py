@@ -17,6 +17,7 @@ from core.security.auth import (
     get_current_user_moderator_or_superadmin,
 )
 
+from core.security.mobile.dependencies import get_current_user_or_superadmin_secured, get_current_user_moderator_or_superadmin_secured
 router = APIRouter(tags=["Moderation"])
 
 
@@ -47,7 +48,7 @@ async def update_moderation_words_route(
 async def get_moderation_history(
     entity_id: UUID = Query(..., description="Post or user id to fetch moderation history for"),
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_user_moderator_or_superadmin),
+    current_user=Depends(get_current_user_moderator_or_superadmin_secured),
 ) -> ApiResponse:
     """Return moderation history for a post or user entity."""
     _ = current_user

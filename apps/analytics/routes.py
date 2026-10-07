@@ -6,8 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.accounts.db_models import User
 from apps.analytics.schemas import AnalyticsDashboardResponse, AnalyticsDistributionType
 from apps.analytics.services import get_admin_analytics_dashboard
-from apps.administration.dependencies import require_signed_admin
 from core.database.session import get_session
+from core.security.auth import get_current_admin
 
 router = APIRouter(tags=["Admin Analytics"])
 
@@ -26,7 +26,7 @@ async def admin_analytics_dashboard(
         description="Optional demographic distribution: university, country, or major",
     ),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
 ) -> AnalyticsDashboardResponse:
     _ = current_user
     return await get_admin_analytics_dashboard(

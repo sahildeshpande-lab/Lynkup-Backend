@@ -71,15 +71,12 @@ async def test_admin_token_success(monkeypatch) -> None:
             admin_session = await create_admin_session(session, user)
             await session.commit()
             # Generate actual tokens bound to independent session_id
-            _access, refresh, jti = _generate_admin_tokens(user, session_id=admin_session.id)
-            admin_session.refresh_jti = jti
-            await session.commit()
-
+            _access, refresh = _generate_admin_tokens(user, session_id=admin_session.id)
+            
         async with async_session_factory() as session:
             payload = RefreshTokenRequest(refreshToken=refresh)
             res = await admin_token(payload, session)
             assert "access_token" in res
-            assert "refresh_token" in res
             assert res["token_type"] == "bearer"
     finally:
         await engine.dispose()
@@ -635,7 +632,7 @@ async def test_admin_change_password_invalidates_all_sessions() -> None:
         return_value=MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[]))))
     )
 
-    old_access, old_refresh, _jti = _generate_admin_tokens(user, session_id=uuid.uuid4())
+    old_access, old_refresh = _generate_admin_tokens(user, session_id=uuid.uuid4())
     old_access_decoded = jwt.decode(old_access, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     old_refresh_decoded = jwt.decode(old_refresh, JWT_SECRET, algorithms=[JWT_ALGORITHM])
 
@@ -670,7 +667,7 @@ async def test_admin_token_rejects_refresh_after_password_change(monkeypatch) ->
     user.role = "superadmin"
     user.roles = []
 
-    _access, refresh, _jti = _generate_admin_tokens(user, session_id=uuid.uuid4())
+    _access, refresh = _generate_admin_tokens(user, session_id=uuid.uuid4())
     user.password_hash = PASSWORD_HASHER.hash("NewPassword123!")
 
     mock_db = AsyncMock()
@@ -701,7 +698,7 @@ async def test_admin_reset_password_invalidates_existing_admin_sessions(monkeypa
         status=UserStatus.active,
     )
     user.roles = []
-    _old_access, _old_refresh, _jti = _generate_admin_tokens(user, session_id=uuid.uuid4())
+    _old_access, _old_refresh = _generate_admin_tokens(user, session_id=uuid.uuid4())
 
     reset_token = PasswordResetToken(
         user_id=user_id,
@@ -728,7 +725,7 @@ async def test_admin_reset_password_invalidates_existing_admin_sessions(monkeypa
 
     assert res.status is True
     assert user.password_hash != original_hash
-    new_access, _new_refresh, _jti = _generate_admin_tokens(user, session_id=uuid.uuid4())
+    new_access, _new_refresh = _generate_admin_tokens(user, session_id=uuid.uuid4())
     assert new_access != _old_access
 
 
@@ -1220,29 +1217,22 @@ async def test_admin_token_expiration_rules() -> None:
             user = (await session.execute(stmt)).scalar_one()
 
         # Generate tokens bound to an independent session UUID
-        from core.auth.config import settings as auth_settings
-
         session_id = uuid.uuid4()
-        access_token, refresh_token, jti = _generate_admin_tokens(user, session_id=session_id)
+        access_token, refresh_token = _generate_admin_tokens(user, session_id=session_id)
         
-        # Decode access token and verify admin TTL + independent session_id
+        # Decode access token and verify exp + independent session_id
         decoded_access = jwt.decode(access_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         exp_time = datetime.fromtimestamp(decoded_access["exp"], tz=timezone.utc)
         now = datetime.now(timezone.utc)
         diff = exp_time - now
-        expected_access = auth_settings.admin_access_token_expire_minutes * 60
-        assert abs(diff.total_seconds() - expected_access) < 60
+        assert abs(diff.total_seconds() - (ACCESS_TOKEN_EXPIRE_MINUTES * 60)) < 60
         assert decoded_access["session_id"] == str(session_id)
         assert decoded_access["session_id"] != str(user.id)
 
-        # Refresh tokens must expire and carry a rotatable jti
+        # Decode refresh token and verify exp is NOT in refresh payload
         decoded_refresh = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        assert "exp" in decoded_refresh
-        assert decoded_refresh["jti"] == jti
+        assert "exp" not in decoded_refresh
         assert decoded_refresh["session_id"] == str(session_id)
-        refresh_exp = datetime.fromtimestamp(decoded_refresh["exp"], tz=timezone.utc)
-        expected_refresh = auth_settings.admin_refresh_token_expire_minutes * 60
-        assert abs((refresh_exp - now).total_seconds() - expected_refresh) < 60
     finally:
         await engine.dispose()
 
@@ -1369,12 +1359,9 @@ async def test_admin_signup_rejects_role_not_in_db(monkeypatch) -> None:
     from types import SimpleNamespace
 
     monkeypatch.setattr(
-        "apps.administration.services.auth_service.auth_settings",
+        "core.auth.config.settings",
         SimpleNamespace(is_disposable_email_enabled=False),
     )
-
-    caller = User(id=uuid.uuid4(), email="creator@example.com", status=UserStatus.active)
-    caller.role = "superadmin"
 
     payload = AdminSignupRequest(
         firstName="Admin",
@@ -1393,7 +1380,7 @@ async def test_admin_signup_rejects_role_not_in_db(monkeypatch) -> None:
     db.execute = mock_execute
 
     with pytest.raises(HTTPException) as exc:
-        await admin_signup(payload, db, current_user=caller)
+        await admin_signup(payload, db)
 
     assert exc.value.status_code == 401
     assert exc.value.detail == "Forbidden: Admin access required"
@@ -1404,12 +1391,9 @@ async def test_admin_signup_rejects_non_staff_role(monkeypatch) -> None:
     from types import SimpleNamespace
 
     monkeypatch.setattr(
-        "apps.administration.services.auth_service.auth_settings",
+        "core.auth.config.settings",
         SimpleNamespace(is_disposable_email_enabled=False),
     )
-
-    caller = User(id=uuid.uuid4(), email="creator@example.com", status=UserStatus.active)
-    caller.role = "superadmin"
 
     payload = AdminSignupRequest(
         firstName="Admin",
@@ -1428,31 +1412,8 @@ async def test_admin_signup_rejects_non_staff_role(monkeypatch) -> None:
     db.execute = mock_execute
 
     with pytest.raises(HTTPException) as exc:
-        await admin_signup(payload, db, current_user=caller)
+        await admin_signup(payload, db)
 
     assert exc.value.status_code == 401
     assert exc.value.detail == "Forbidden: Admin access required"
-
-
-@pytest.mark.asyncio
-async def test_admin_signup_rejects_non_superadmin_caller(monkeypatch) -> None:
-    from types import SimpleNamespace
-
-    monkeypatch.setattr(
-        "apps.administration.services.auth_service.auth_settings",
-        SimpleNamespace(is_disposable_email_enabled=False),
-    )
-    caller = User(id=uuid.uuid4(), email="mod@example.com", status=UserStatus.active)
-    caller.role = "moderator"
-    payload = AdminSignupRequest(
-        firstName="Admin",
-        lastName="User",
-        email=f"admin_{uuid.uuid4()}@example.com",
-        password="Secret123",
-        role="viewer",
-    )
-    with pytest.raises(HTTPException) as exc:
-        await admin_signup(payload, AsyncMock(), current_user=caller)
-    assert exc.value.status_code == 403
-    assert "Superadmin" in str(exc.value.detail)
 

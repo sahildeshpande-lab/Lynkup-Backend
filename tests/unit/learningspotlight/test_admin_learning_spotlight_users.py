@@ -22,7 +22,6 @@ from common.enums import ReportEntityType, UserStatus
 from common.exceptions import ApiError
 from core.database.session import get_session
 from core.security.auth import get_current_admin
-from apps.administration.dependencies import require_signed_admin
 
 
 EXISTING_USER_FIELDS = [
@@ -195,7 +194,6 @@ def _build_route_app(*, admin=None, db=None):
 
     if admin is not None:
         app.dependency_overrides[get_current_admin] = lambda: admin
-        app.dependency_overrides[require_signed_admin] = lambda: admin
     if db is not None:
         async def _override_db():
             yield db
@@ -875,7 +873,6 @@ async def test_admin_learning_spotlight_users_requires_admin() -> None:
         raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
 
     app.dependency_overrides[get_current_admin] = _override_non_admin
-    app.dependency_overrides[require_signed_admin] = _override_non_admin
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/api/v1/admin/learning-spotlight/users")
@@ -886,7 +883,6 @@ async def test_admin_learning_spotlight_users_requires_admin() -> None:
 async def test_admin_learning_spotlight_users_unauthorized_without_token() -> None:
     app = _build_route_app()
     app.dependency_overrides.pop(get_current_admin, None)
-    app.dependency_overrides.pop(require_signed_admin, None)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/api/v1/admin/learning-spotlight/users")
@@ -902,7 +898,6 @@ async def test_admin_learning_spotlight_users_rejects_non_admin_role() -> None:
         raise ApiError("Insufficient permissions")
 
     app.dependency_overrides[get_current_admin] = _override_app_user
-    app.dependency_overrides[require_signed_admin] = _override_app_user
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/api/v1/admin/learning-spotlight/users")

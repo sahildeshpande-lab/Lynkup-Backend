@@ -223,21 +223,21 @@ async def test_fetch_feed_posts_preserves_repost_event_order():
             "repost_id": repost_1,
             "created_at": "t1",
             "event_type": "repost",
-            "engagement_score": 10,
+            # "engagement_score": 10,
         },
         {
             "post_id": post_b,
             "repost_id": repost_missing,
             "created_at": "t2",
             "event_type": "repost",
-            "engagement_score": 9,
+            # "engagement_score": 9,
         },
         {
             "post_id": post_b,
             "repost_id": repost_2,
             "created_at": "t3",
             "event_type": "repost",
-            "engagement_score": 8,
+            # "engagement_score": 8,
         },
     ]
 

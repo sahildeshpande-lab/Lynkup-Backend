@@ -141,9 +141,12 @@ async def _verify_mobile_identity(
 async def _verify_mobile_request_proof(request: Request, user: User) -> None:
     """Mobile request proof: timestamp + nonce + HMAC.
 
-    Not enforced yet — identity-only until mobile HMAC signing ships.
+    Delegates to ``core.security.mobile`` when ``MOBILE_SECURITY_ENABLED``.
+    No-op when the feature flag is off (backward compatible).
     """
-    _ = (request, user)
+    from core.security.mobile.request_proof import verify_mobile_request_proof
+
+    await verify_mobile_request_proof(request, user)
 
 
 async def _authenticate_mobile(

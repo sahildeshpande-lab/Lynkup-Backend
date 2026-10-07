@@ -206,6 +206,64 @@ async def count_notifications_for_user(
     return int((await db.execute(stmt)).scalar_one())
 
 
+async def count_unread_personal_by_type_for_users(
+    db: AsyncSession,
+    user_ids: list[UUID],
+) -> dict[UUID, dict[str, int]]:
+    """
+    Efficient unread personal counts grouped by user and notification type name.
+
+    Only rows with ``campaign_id IS NULL`` and ``is_read = false`` are included.
+    Broadcast / preference visibility is applied by the service layer.
+    """
+    if not user_ids:
+        return {}
+
+    unique_user_ids = list(dict.fromkeys(user_ids))
+    stmt = (
+        select(
+            Notification.recipient_user_id,
+            NotificationType.name,
+            func.count(),
+        )
+        .select_from(Notification)
+        .join(
+            NotificationType,
+            NotificationType.id == Notification.notification_type_id,
+        )
+        .where(
+            Notification.recipient_user_id.in_(unique_user_ids),
+            Notification.campaign_id.is_(None),
+            Notification.is_read.is_(False),
+        )
+        .group_by(Notification.recipient_user_id, NotificationType.name)
+    )
+    result: dict[UUID, dict[str, int]] = {user_id: {} for user_id in unique_user_ids}
+    for user_id, type_name, count in (await db.execute(stmt)).all():
+        if user_id is None or not type_name:
+            continue
+        result.setdefault(user_id, {})[str(type_name)] = int(count or 0)
+    return result
+
+
+async def get_preferences_for_users(
+    db: AsyncSession,
+    user_ids: list[UUID],
+) -> dict[UUID, NotificationPreference]:
+    """Return preference rows keyed by user_id for the given users."""
+    if not user_ids:
+        return {}
+
+    unique_user_ids = list(dict.fromkeys(user_ids))
+    stmt = select(NotificationPreference).where(
+        NotificationPreference.user_id.in_(unique_user_ids)
+    )
+    return {
+        pref.user_id: pref
+        for pref in (await db.execute(stmt)).scalars().all()
+    }
+
+
 async def list_notifications_for_user(
     db: AsyncSession,
     recipient_user_id: UUID,

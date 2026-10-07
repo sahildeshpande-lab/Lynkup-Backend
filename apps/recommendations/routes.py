@@ -17,9 +17,9 @@ from apps.recommendations.services.recommendation_settings_service import (
 )
 from common.pagination import paginate_items
 from common.schemas import ApiResponse
-from apps.administration.dependencies import require_signed_admin
 from core.database.session import get_session
-from core.security.auth import get_current_user
+from core.security.auth import get_current_admin, get_current_user
+from core.security.mobile.dependencies import require_mobile_request_security
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ _NOT_READY_MESSAGE = (
 
 @router.get("/recommendations/papers", response_model=ApiResponse)
 async def search_recommendation_papers(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: AsyncSession = Depends(get_session),
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
@@ -93,7 +93,7 @@ async def search_recommendation_papers(
 @router.get("/admin/recommendation-settings", response_model=ApiResponse)
 async def get_recommendation_settings(
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
     page: int | None = Query(default=None, ge=1, description="Page number for settings history"),
     pageSize: int | None = Query(
         default=None,
@@ -131,7 +131,7 @@ async def get_recommendation_settings(
 async def patch_recommendation_settings(
     payload: RecommendationSettingsUpdateRequest,
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
 ) -> ApiResponse:
     """Update recommendation cron configuration only. All body fields are optional."""
     changes = payload.model_dump(exclude_unset=True)
@@ -172,7 +172,7 @@ async def patch_recommendation_settings(
 
 @router.post("/admin/runcron", response_model=ApiResponse, status_code=202)
 async def run_recommendation_cron(
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """Queue recommendation generation for a Celery worker."""

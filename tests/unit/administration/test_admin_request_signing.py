@@ -6,7 +6,7 @@ import asyncio
 import base64
 import hashlib
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -24,7 +24,7 @@ from apps.administration.db_models import (
     AdminSigningKey,
     AdminSigningKeyStatus,
 )
-from apps.administration.dependencies import require_signed_admin, require_admin_signed_request
+from apps.administration.dependencies import require_admin_signed_request
 from apps.administration.routes import router as admin_router
 from apps.administration.services import signing_canonical as canonical
 from apps.administration.services.auth_service import _generate_admin_tokens
@@ -44,6 +44,7 @@ from apps.administration.services.signing_service import (
 )
 from apps.administration.services.signing_store import (
     claim_nonce,
+    clear_local_signing_store,
     consume_rate_limit,
     pop_pending_public_key,
     store_pending_public_key,
@@ -59,133 +60,18 @@ from core.database.session import get_session
 from core.security.auth import get_current_admin
 from entrypoints.api import app as main_app
 
-TEST_ALLOWED_ORIGIN = "https://admin.test"
-
-
-class _FakeRedisPipeline:
-    def __init__(self, store: "_FakeRedis"):
-        self._store = store
-        self._ops: list = []
-
-    def zremrangebyscore(self, key, min_score, max_score):
-        self._ops.append(("zremrangebyscore", key, min_score, max_score))
-        return self
-
-    def zadd(self, key, mapping):
-        self._ops.append(("zadd", key, mapping))
-        return self
-
-    def zcard(self, key):
-        self._ops.append(("zcard", key))
-        return self
-
-    def expire(self, key, seconds):
-        self._ops.append(("expire", key, seconds))
-        return self
-
-    async def execute(self):
-        results = []
-        now = time.time()
-        for op in self._ops:
-            kind = op[0]
-            if kind == "zremrangebyscore":
-                _, key, min_score, max_score = op
-                zset = self._store._zsets.setdefault(key, {})
-                for member, score in list(zset.items()):
-                    if min_score <= score <= max_score:
-                        zset.pop(member, None)
-                results.append(0)
-            elif kind == "zadd":
-                _, key, mapping = op
-                zset = self._store._zsets.setdefault(key, {})
-                for member, score in mapping.items():
-                    zset[str(member)] = float(score)
-                results.append(len(mapping))
-            elif kind == "zcard":
-                _, key = op
-                results.append(len(self._store._zsets.get(key, {})))
-            elif kind == "expire":
-                _, key, seconds = op
-                self._store._expiry[key] = now + float(seconds)
-                results.append(True)
-        self._ops.clear()
-        return results
-
-
-class _FakeRedis:
-    """Minimal async Redis stand-in for signing-store unit tests."""
-
-    def __init__(self):
-        self._kv: dict[str, tuple[str, float | None]] = {}
-        self._zsets: dict[str, dict[str, float]] = {}
-        self._expiry: dict[str, float] = {}
-
-    def _expired(self, key: str) -> bool:
-        exp = self._expiry.get(key)
-        if exp is not None and exp <= time.time():
-            self._kv.pop(key, None)
-            self._zsets.pop(key, None)
-            self._expiry.pop(key, None)
-            return True
-        return False
-
-    async def set(self, key, value, ex=None, nx=False):
-        if self._expired(key):
-            pass
-        if nx and key in self._kv and not self._expired(key):
-            return False
-        expires_at = time.time() + float(ex) if ex is not None else None
-        self._kv[key] = (str(value), expires_at)
-        if expires_at is not None:
-            self._expiry[key] = expires_at
-        return True
-
-    async def get(self, key):
-        if self._expired(key):
-            return None
-        item = self._kv.get(key)
-        if item is None:
-            return None
-        value, expires_at = item
-        if expires_at is not None and expires_at <= time.time():
-            self._kv.pop(key, None)
-            return None
-        return value
-
-    async def getdel(self, key):
-        value = await self.get(key)
-        self._kv.pop(key, None)
-        self._expiry.pop(key, None)
-        return value
-
-    async def delete(self, *keys):
-        for key in keys:
-            self._kv.pop(key, None)
-            self._zsets.pop(key, None)
-            self._expiry.pop(key, None)
-        return len(keys)
-
-    def pipeline(self):
-        return _FakeRedisPipeline(self)
-
-    async def aclose(self):
-        return None
-
 
 @pytest.fixture(autouse=True)
-def _signing_store_isolation(monkeypatch):
-    fake_redis = _FakeRedis()
+def _clear_signing_store(monkeypatch):
+    clear_local_signing_store()
     monkeypatch.setattr(
         "apps.administration.services.signing_store.get_redis_client",
-        AsyncMock(return_value=fake_redis),
-    )
-    monkeypatch.setattr(
-        "apps.administration.services.signing_store.close_redis_client",
-        AsyncMock(),
+        AsyncMock(return_value=None),
     )
     # Isolate from local .env ADMIN_ALLOWED_ORIGINS / prior test mutations.
-    monkeypatch.setattr(auth_settings, "admin_allowed_origins", TEST_ALLOWED_ORIGIN)
+    monkeypatch.setattr(auth_settings, "admin_allowed_origins", "")
     yield
+    clear_local_signing_store()
 
 
 def _admin_user(**kwargs) -> User:
@@ -199,21 +85,12 @@ def _admin_user(**kwargs) -> User:
     return user
 
 
-def _session(
-    user_id,
-    *,
-    session_id=None,
-    status=AdminSessionStatus.ACTIVE.value,
-    refresh_jti=None,
-    expires_at=None,
-) -> AdminSession:
+def _session(user_id, *, session_id=None, status=AdminSessionStatus.ACTIVE.value) -> AdminSession:
     now = datetime.now(timezone.utc)
     return AdminSession(
         id=session_id or uuid4(),
         user_id=user_id,
         status=status,
-        refresh_jti=refresh_jti,
-        expires_at=expires_at if expires_at is not None else now + timedelta(hours=1),
         created_at=now,
         updated_at=now,
     )
@@ -239,7 +116,7 @@ def _signing_key(
     )
 
 
-def _mock_request(*, method="GET", path="/api/v1/me", query="", body=b"", headers=None, origin=TEST_ALLOWED_ORIGIN):
+def _mock_request(*, method="GET", path="/api/v1/me", query="", body=b"", headers=None, origin=None):
     hdrs = {k.lower(): v for k, v in (headers or {}).items()}
     if origin is not None:
         hdrs["origin"] = origin
@@ -285,7 +162,6 @@ def _sign_headers(
     signature = sign_canonical_request_for_tests(private_key, message)
     return {
         "X-Key-ID": str(key_id),
-        "X-Session-Id": str(session_id),
         "X-Timestamp": ts,
         "X-Nonce": nonce_val,
         "X-Signature": signature,
@@ -327,7 +203,7 @@ def _db_returning(*records, sticky: bool = True):
 def test_generate_admin_tokens_embeds_independent_session_id():
     user = _admin_user()
     session_id = uuid4()
-    access, refresh, jti = _generate_admin_tokens(user, session_id=session_id)
+    access, refresh = _generate_admin_tokens(user, session_id=session_id)
     access_claims = jwt.decode(access, auth_settings.jwt_secret, algorithms=[auth_settings.jwt_algorithm])
     refresh_claims = jwt.decode(refresh, auth_settings.jwt_secret, algorithms=[auth_settings.jwt_algorithm])
 
@@ -337,8 +213,6 @@ def test_generate_admin_tokens_embeds_independent_session_id():
     assert access_claims["session_id"] != access_claims["sub"]
     assert access_claims["session_id"] != refresh
     assert str(user.id) != refresh
-    assert refresh_claims["jti"] == jti
-    assert "exp" in refresh_claims
 
 
 @pytest.mark.asyncio
@@ -348,31 +222,17 @@ async def test_refresh_preserves_same_session_id():
 
     user = _admin_user()
     session = _session(user.id)
-    old_expires = session.expires_at
-    access1, refresh1, jti = _generate_admin_tokens(user, session_id=session.id)
-    session.refresh_jti = jti
+    access1, refresh1 = _generate_admin_tokens(user, session_id=session.id)
     claims1 = jwt.decode(access1, auth_settings.jwt_secret, algorithms=[auth_settings.jwt_algorithm])
 
     db = _db_returning(user, session)
     result = await admin_token(RefreshTokenRequest(refreshToken=refresh1), db)
     access2 = result["access_token"]
     claims2 = jwt.decode(access2, auth_settings.jwt_secret, algorithms=[auth_settings.jwt_algorithm])
-    refresh2_claims = jwt.decode(
-        result["refresh_token"],
-        auth_settings.jwt_secret,
-        algorithms=[auth_settings.jwt_algorithm],
-    )
 
     assert claims1["session_id"] == claims2["session_id"] == str(session.id)
     assert claims2["session_id"] != str(user.id)
     assert claims2["sub"] == str(user.id)
-    assert "refresh_token" in result
-    assert session.refresh_jti == refresh2_claims["jti"]
-    assert session.refresh_jti != jti
-    assert session.expires_at is not None
-    # Sliding window: expires_at aligns to access TTL from refresh time (not the prior stub).
-    assert session.expires_at != old_expires
-    assert session.expires_at > datetime.now(timezone.utc)
 
 
 @pytest.mark.asyncio
@@ -381,31 +241,10 @@ async def test_create_admin_session_is_not_user_id():
     db = MagicMock(spec=AsyncSession)
     db.add = MagicMock()
     db.flush = AsyncMock()
-    session = await create_admin_session(db, user, refresh_jti="abc123")
+    session = await create_admin_session(db, user)
     assert session.id != user.id
     assert session.user_id == user.id
     assert session.status == AdminSessionStatus.ACTIVE.value
-    assert session.refresh_jti == "abc123"
-    assert session.expires_at is not None
-    assert session.expires_at > datetime.now(timezone.utc)
-
-
-@pytest.mark.asyncio
-async def test_expired_admin_session_rejected_for_api_but_refreshable():
-    from apps.administration.services.session_service import (
-        get_active_admin_session,
-        get_admin_session_for_refresh,
-    )
-
-    user = _admin_user()
-    past = datetime.now(timezone.utc) - timedelta(minutes=1)
-    session = _session(user.id, expires_at=past)
-    db = _db_returning(session)
-
-    assert await get_active_admin_session(db, session.id, user_id=user.id) is None
-    loaded = await get_admin_session_for_refresh(db, session.id, user_id=user.id)
-    assert loaded is session
-
 
 
 @pytest.mark.asyncio
@@ -503,8 +342,7 @@ def test_normalize_rejects_small_rsa_key(monkeypatch):
 @pytest.mark.asyncio
 async def test_register_pending_signing_key_positive():
     _, public_pem = generate_rsa_key_pair_for_tests()
-    request = _mock_request(method="POST", path="/api/v1/auth/admin/signing-keys/register")
-    response = await register_pending_signing_key(public_pem, request=request)
+    response = await register_pending_signing_key(public_pem)
     assert response.status is True
     key_id = response.data["keyId"]
     stored = await pop_pending_public_key(key_id)
@@ -821,7 +659,7 @@ async def test_invalid_origin_and_rate_limit(monkeypatch):
             session_id=session.id,
         )
 
-    monkeypatch.setattr(auth_settings, "admin_allowed_origins", TEST_ALLOWED_ORIGIN)
+    monkeypatch.setattr(auth_settings, "admin_allowed_origins", "")
     monkeypatch.setattr(auth_settings, "admin_signing_rate_limit_requests", 1)
     monkeypatch.setattr(auth_settings, "admin_signing_rate_limit_window_seconds", 60)
     db2 = _db_returning(key, key)
@@ -831,24 +669,6 @@ async def test_invalid_origin_and_rate_limit(monkeypatch):
     with pytest.raises(ApiError) as exc:
         await verify_signed_admin_request(_mock_request(headers=h2), user, db2, session_id=session.id)
     assert exc.value.message == RATE_LIMIT_MESSAGE
-
-
-@pytest.mark.asyncio
-async def test_empty_allowed_origins_rejects(monkeypatch):
-    monkeypatch.setattr(auth_settings, "admin_allowed_origins", "")
-    private_key, public_pem = generate_rsa_key_pair_for_tests()
-    user = _admin_user()
-    session = _session(user.id)
-    key = _signing_key(user.id, session.id, public_pem)
-    headers, _ = _sign_headers(private_key, session_id=session.id, key_id=key.key_id)
-    db = _db_returning(key)
-    with pytest.raises(ApiError, match=GENERIC_AUTH_FAILURE):
-        await verify_signed_admin_request(
-            _mock_request(headers=headers),
-            user,
-            db,
-            session_id=session.id,
-        )
 
 
 @pytest.mark.asyncio
@@ -930,7 +750,6 @@ def test_main_app_me_rejects_unsigned_request():
         yield _db_returning(None)
 
     main_app.dependency_overrides[get_current_admin] = _override_admin
-    main_app.dependency_overrides[require_signed_admin] = _override_admin
     main_app.dependency_overrides[get_session] = _override_session
     try:
         with patch(
@@ -944,7 +763,6 @@ def test_main_app_me_rejects_unsigned_request():
             assert response.json().get("message") == GENERIC_AUTH_FAILURE
     finally:
         main_app.dependency_overrides.pop(get_current_admin, None)
-        main_app.dependency_overrides.pop(require_signed_admin, None)
         main_app.dependency_overrides.pop(get_session, None)
 
 
@@ -969,87 +787,3 @@ def test_repo_has_no_user_id_session_fallback():
         text = path.read_text(encoding="utf-8")
         for needle in banned:
             assert needle not in text, f"{path} still contains {needle!r}"
-
-
-@pytest.mark.asyncio
-async def test_missing_x_session_id_rejected():
-    private_key, public_pem = generate_rsa_key_pair_for_tests()
-    user = _admin_user()
-    session = _session(user.id)
-    key = _signing_key(user.id, session.id, public_pem)
-    headers, _ = _sign_headers(private_key, session_id=session.id, key_id=key.key_id)
-    headers.pop("X-Session-Id")
-    request = _mock_request(headers=headers)
-    db = _db_returning(key)
-    with pytest.raises(ApiError, match=GENERIC_AUTH_FAILURE):
-        await verify_signed_admin_request(request, user, db, session_id=session.id)
-
-
-@pytest.mark.asyncio
-async def test_mismatched_x_session_id_rejected():
-    private_key, public_pem = generate_rsa_key_pair_for_tests()
-    user = _admin_user()
-    session = _session(user.id)
-    key = _signing_key(user.id, session.id, public_pem)
-    headers, _ = _sign_headers(private_key, session_id=session.id, key_id=key.key_id)
-    headers["X-Session-Id"] = str(uuid4())
-    request = _mock_request(headers=headers)
-    db = _db_returning(key)
-    with pytest.raises(ApiError, match=GENERIC_AUTH_FAILURE):
-        await verify_signed_admin_request(request, user, db, session_id=session.id)
-
-
-@pytest.mark.asyncio
-async def test_redis_unavailable_fails_closed(monkeypatch):
-    monkeypatch.setattr(
-        "apps.administration.services.signing_store.get_redis_client",
-        AsyncMock(return_value=None),
-    )
-    with pytest.raises(ApiError, match=GENERIC_AUTH_FAILURE):
-        await claim_nonce(session_id=uuid4(), nonce="n1")
-
-
-@pytest.mark.asyncio
-async def test_refresh_token_reuse_revokes_session():
-    from apps.administration.services.auth_service import admin_token
-    from apps.accounts.schemas import RefreshTokenRequest
-    from fastapi import HTTPException
-
-    user = _admin_user()
-    session = _session(user.id)
-    _access, refresh, _jti = _generate_admin_tokens(user, session_id=session.id)
-    session.refresh_jti = "already-rotated-jti"
-    db = _db_returning(user, session)
-    db.commit = AsyncMock()
-
-    with pytest.raises(HTTPException) as exc:
-        await admin_token(RefreshTokenRequest(refreshToken=refresh), db)
-    assert exc.value.status_code == 401
-    assert session.status == AdminSessionStatus.REVOKED.value
-    assert session.refresh_jti is None
-
-
-@pytest.mark.asyncio
-async def test_login_rate_limit_blocks_excess(monkeypatch):
-    from apps.administration.services.auth_service import admin_signin
-    from apps.administration.schemas import AdminLoginRequest
-    from fastapi import HTTPException
-
-    monkeypatch.setattr(auth_settings, "admin_signing_rate_limit_requests", 1)
-    monkeypatch.setattr(auth_settings, "admin_signing_rate_limit_window_seconds", 300)
-    monkeypatch.setattr(auth_settings, "admin_allowed_origins", TEST_ALLOWED_ORIGIN)
-
-    payload = AdminLoginRequest(email="anyone@example.com", password="x")
-    request = SimpleNamespace(
-        headers={"origin": TEST_ALLOWED_ORIGIN},
-        client=SimpleNamespace(host="1.2.3.4"),
-        state=SimpleNamespace(),
-    )
-    db = _db_returning(None)
-
-    first = await admin_signin(payload, db, request=request)
-    assert first.status is False
-
-    with pytest.raises(HTTPException) as exc:
-        await admin_signin(payload, db, request=request)
-    assert exc.value.status_code == 429

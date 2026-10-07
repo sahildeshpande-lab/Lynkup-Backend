@@ -156,17 +156,25 @@ def _build_apns_payload(
     title: str,
     body: str,
     data: dict[str, Any] | None = None,
+    *,
+    badge: int | None = None,
 ) -> dict[str, Any]:
-    """Build an APNs JSON payload with alert, default sound, and custom data."""
-    message: dict[str, Any] = {
-        "aps": {
-            "alert": {
-                "title": title,
-                "body": body,
-            },
-            "sound": "default",
-        }
+    """Build an APNs JSON payload with alert, default sound, and custom data.
+
+    When ``badge`` is provided (including ``0``), set ``aps.badge`` so the
+    app icon reflects the backend unread count for the target user.
+    """
+    aps: dict[str, Any] = {
+        "alert": {
+            "title": title,
+            "body": body,
+        },
+        "sound": "default",
     }
+    if badge is not None:
+        aps["badge"] = int(badge)
+
+    message: dict[str, Any] = {"aps": aps}
     if data:
         for key, value in data.items():
             if key == "aps":
@@ -180,6 +188,8 @@ async def send_apns_notification(
     title: str,
     body: str,
     data: dict[str, Any] | None = None,
+    *,
+    badge: int | None = None,
 ) -> str:
     """
     Send a single high-priority APNs alert notification.
@@ -194,7 +204,7 @@ async def send_apns_notification(
     client = _get_apns_client()
     request = NotificationRequest(
         device_token=token,
-        message=_build_apns_payload(title, body, data),
+        message=_build_apns_payload(title, body, data, badge=badge),
         priority=int(PRIORITY_HIGH),
         push_type=PushType.ALERT,
     )
@@ -240,11 +250,15 @@ async def send_apns_notifications(
     title: str,
     body: str,
     data: dict[str, Any] | None = None,
+    *,
+    badge: int | None = None,
 ) -> dict[str, Any]:
     """
     Send the same APNs notification to many device tokens.
 
     Continues after individual failures so one bad token cannot abort the batch.
+    ``badge`` is optional and applied identically to every token (same user's
+    devices share one backend unread count).
     """
     successful_count = 0
     failed_count = 0
@@ -255,7 +269,7 @@ async def send_apns_notifications(
         if not token:
             continue
         try:
-            await send_apns_notification(token, title, body, data)
+            await send_apns_notification(token, title, body, data, badge=badge)
             successful_count += 1
         except Exception as exc:
             failed_count += 1

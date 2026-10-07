@@ -8,7 +8,6 @@ from core.database.session import get_session
 from core.security.auth import get_current_admin
 from entrypoints.api import app
 from tests.unit.imports.conftest import csv_bytes
-from apps.administration.dependencies import require_signed_admin
 
 client = TestClient(app)
 
@@ -41,13 +40,11 @@ async def _override_admin():
 def setup_module() -> None:
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
 
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_admin, None)
-    app.dependency_overrides.pop(require_signed_admin, None)
 
 
 def test_admin_import_route_success(monkeypatch) -> None:

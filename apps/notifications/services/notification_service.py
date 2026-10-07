@@ -12,10 +12,12 @@ from apps.notifications.db_models import Notification
 from apps.notifications.repositories.campaign_audience_repository import (
     get_active_push_targets_for_users,
     get_campaign_audience_for_user,
+    get_campaign_audience_for_users,
     mark_all_campaign_audience_read,
     mark_campaign_audience_read,
 )
 from apps.notifications.repositories.notification_repository import (
+    count_unread_personal_by_type_for_users,
     create_notification as persist_notification,
     create_preferences,
     get_broadcast_notification_by_id,
@@ -23,6 +25,7 @@ from apps.notifications.repositories.notification_repository import (
     get_notification_for_user,
     get_notification_type_by_name,
     get_preferences_by_user_id,
+    get_preferences_for_users,
     list_broadcast_notifications,
     list_personal_notifications_for_user,
     mark_all_notifications_read as persist_mark_all_read,
@@ -426,6 +429,152 @@ async def _list_unified_notifications_for_user(
     return merged
 
 
+async def get_unread_notification_counts_for_users(
+    db: AsyncSession,
+    user_ids: list[UUID],
+    *,
+    preferences_by_user: dict[UUID, Any] | None = None,
+) -> dict[UUID, int]:
+    """
+    Return per-user unread counts matching ``GET /notifications`` ``Totalcount``.
+
+    Personal unread rows are counted with a grouped SQL query. Broadcast
+    visibility/read state uses the same announcement/topic/audience/preference
+    rules as the inbox list. Missing preference rows default like the list path
+    (``_get_or_create_preferences`` semantics via create-on-read for singles;
+    batch path treats missing prefs as defaults with in-app enabled).
+    """
+    if not user_ids:
+        return {}
+
+    unique_user_ids = list(dict.fromkeys(user_ids))
+    prefs_map: dict[UUID, Any] = dict(preferences_by_user or {})
+    missing = [user_id for user_id in unique_user_ids if user_id not in prefs_map]
+    if missing:
+        loaded = await get_preferences_for_users(db, missing)
+        prefs_map.update(loaded)
+        for user_id in missing:
+            if user_id not in prefs_map:
+                prefs_map[user_id] = await _get_or_create_preferences(db, user_id)
+
+    counts: dict[UUID, int] = {user_id: 0 for user_id in unique_user_ids}
+    active_user_ids = [
+        user_id
+        for user_id in unique_user_ids
+        if prefs_map.get(user_id) is not None
+        and bool(prefs_map[user_id].in_app_enabled)
+    ]
+    if not active_user_ids:
+        return counts
+
+    personal_by_user = await count_unread_personal_by_type_for_users(
+        db, active_user_ids
+    )
+    broadcasts = await list_broadcast_notifications(db)
+    broadcast_campaign_ids = [
+        notification.campaign_id
+        for notification in broadcasts
+        if notification.campaign_id is not None
+    ]
+    audience_by_pair = await get_campaign_audience_for_users(
+        db,
+        active_user_ids,
+        broadcast_campaign_ids,
+    )
+
+    from apps.accounts.db_models import User
+
+    registered_result = await db.execute(
+        select(User.id, User.created_at).where(User.id.in_(active_user_ids))
+    )
+    registered_at_by_user = {
+        user_id: _as_aware_utc(created_at)
+        for user_id, created_at in registered_result.all()
+    }
+
+    topic_cache: dict[UUID, set[str]] = {}
+
+    for user_id in active_user_ids:
+        preference = prefs_map[user_id]
+        enabled_categories = await _merged_category_preferences(
+            db,
+            preference.category_preferences,
+            email_preferences=getattr(preference, "email_preferences", None),
+        )
+
+        personal_total = 0
+        for type_name, type_count in (personal_by_user.get(user_id) or {}).items():
+            if enabled_categories.get(
+                _category_preference_key(type_name), True
+            ):
+                personal_total += int(type_count)
+
+        user_registered_at = registered_at_by_user.get(user_id)
+        broadcast_total = 0
+        for notification in broadcasts:
+            type_name = (
+                notification.notification_type.name
+                if getattr(notification, "notification_type", None) is not None
+                else None
+            )
+            if type_name and not enabled_categories.get(type_name, True):
+                continue
+            if not _is_broadcast_after_registration(
+                notification,
+                user_registered_at=user_registered_at,
+            ):
+                continue
+
+            campaign_id = notification.campaign_id
+            audience = (
+                audience_by_pair.get((user_id, campaign_id))
+                if campaign_id is not None
+                else None
+            )
+            if type_name == "TOPIC":
+                in_audience = audience is not None
+                if not in_audience:
+                    if user_id not in topic_cache:
+                        topic_cache[user_id] = await _user_topic_set(db, user_id)
+                    topic_match = _is_broadcast_visible_to_user(
+                        notification,
+                        user_topics=topic_cache[user_id],
+                        user_registered_at=user_registered_at,
+                    )
+                    if not topic_match:
+                        continue
+            elif type_name != "ANNOUNCEMENT":
+                continue
+
+            broadcast_is_read = audience.is_read if audience is not None else False
+            if not broadcast_is_read:
+                broadcast_total += 1
+
+        counts[user_id] = personal_total + broadcast_total
+
+    return counts
+
+
+async def get_unread_notification_count(
+    db: AsyncSession,
+    user_id: UUID,
+    *,
+    preference: Any | None = None,
+) -> int:
+    """
+    Unread count for one user — same semantics as ``data.Totalcount``.
+
+    Scoped to ``user_id`` only. Never derives badge from FCM delivery counts.
+    """
+    prefs = {user_id: preference} if preference is not None else None
+    counts = await get_unread_notification_counts_for_users(
+        db,
+        [user_id],
+        preferences_by_user=prefs,
+    )
+    return int(counts.get(user_id, 0))
+
+
 def _notification_list_reason(*, in_app_enabled: bool) -> dict[str, str]:
     if in_app_enabled:
         return {}
@@ -591,19 +740,12 @@ async def list_notifications(
     # Persist any preference create/merge done while building the inbox.
     await db.commit()
     total_items = len(merged)
-
-    if is_read is None:
-        total_unread = sum(1 for _, _, is_read_value, _ in merged if not is_read_value)
-    elif is_read is False:
-        total_unread = total_items
-    else:
-        all_unread = await _list_unified_notifications_for_user(
-            db,
-            user_id,
-            is_read=False,
-            preference=preference,
-        )
-        total_unread = len(all_unread)
+    # Always expose inbox unread semantics (same as badge source of truth).
+    total_unread = await get_unread_notification_count(
+        db,
+        user_id,
+        preference=preference,
+    )
 
     paginate = page is not None or page_size is not None
     if paginate:
@@ -877,6 +1019,20 @@ async def create_notification(
         db.add(notification)
         await db.flush()
 
+    # Commit before push so badge cannot advertise a row that later rolls back.
+    try:
+        await db.commit()
+        if notification is not None:
+            await db.refresh(notification)
+    except Exception:
+        await db.rollback()
+        logger.exception(
+            "Failed to commit notification type=%s recipient_user_id=%s",
+            type_name,
+            recipient_user_id,
+        )
+        return None
+
     # Push requires global push + category. For CONNECTION_REMINDER the category
     # key is weekly_lynkup_request_reminder (off => no push delivery).
     if send_push and preference.push_enabled and category_enabled:
@@ -889,18 +1045,28 @@ async def create_notification(
                 len(targets),
             )
             if targets:
+                unread_count = await get_unread_notification_count(
+                    db,
+                    recipient_user_id,
+                    preference=preference,
+                )
+                push_data = dict(data_payload)
+                push_data["unread_count"] = unread_count
                 result = await send_push_to_devices(
                     targets,
                     title,
                     body,
-                    NotificationPayloadBuilder.for_fcm(data_payload),
+                    NotificationPayloadBuilder.for_fcm(push_data),
+                    badge=unread_count,
                 )
                 logger.info(
-                    "Push sent type=%s recipient_user_id=%s successful=%s failed=%s",
+                    "Push sent type=%s recipient_user_id=%s successful=%s failed=%s "
+                    "unread_count=%s",
                     type_name,
                     recipient_user_id,
                     result.get("successful_count", 0),
                     result.get("failed_count", 0),
+                    unread_count,
                 )
             else:
                 logger.warning(
@@ -928,19 +1094,6 @@ async def create_notification(
             preference.push_enabled,
             category_enabled,
         )
-
-    try:
-        await db.commit()
-        if notification is not None:
-            await db.refresh(notification)
-    except Exception:
-        await db.rollback()
-        logger.exception(
-            "Failed to commit notification type=%s recipient_user_id=%s",
-            type_name,
-            recipient_user_id,
-        )
-        return None
 
     return notification
 

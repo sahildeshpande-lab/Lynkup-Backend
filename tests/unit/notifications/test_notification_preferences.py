@@ -385,6 +385,11 @@ async def test_list_notifications_includes_totalcount_above_page():
             "_list_unified_notifications_for_user",
             AsyncMock(return_value=[(n1, False, False, None), (n2, False, True, n2.read_at)]),
         ),
+        patch.object(
+            svc,
+            "get_unread_notification_count",
+            AsyncMock(return_value=1),
+        ),
     ):
         response = await svc.list_notifications(db, user_id=user_id, page=1, page_size=10)
 
@@ -435,6 +440,11 @@ async def test_list_notifications_unpaginated_includes_totalcount():
             "_list_unified_notifications_for_user",
             AsyncMock(return_value=[(n1, False, False, None)]),
         ),
+        patch.object(
+            svc,
+            "get_unread_notification_count",
+            AsyncMock(return_value=1),
+        ),
     ):
         response = await svc.list_notifications(db, user_id=user_id)
 
@@ -450,10 +460,17 @@ async def test_list_notifications_returns_reason_when_in_app_disabled(mock_db):
     user_id = uuid4()
     preference = _preference(user_id=user_id, in_app_enabled=False)
 
-    with patch.object(
-        svc,
-        "_get_or_create_preferences",
-        AsyncMock(return_value=preference),
+    with (
+        patch.object(
+            svc,
+            "_get_or_create_preferences",
+            AsyncMock(return_value=preference),
+        ),
+        patch.object(
+            svc,
+            "get_unread_notification_count",
+            AsyncMock(return_value=0),
+        ),
     ):
         response = await svc.list_notifications(db, user_id=user_id)
 
@@ -472,10 +489,17 @@ async def test_list_notifications_paginated_returns_reason_when_in_app_disabled(
     user_id = uuid4()
     preference = _preference(user_id=user_id, in_app_enabled=False)
 
-    with patch.object(
-        svc,
-        "_get_or_create_preferences",
-        AsyncMock(return_value=preference),
+    with (
+        patch.object(
+            svc,
+            "_get_or_create_preferences",
+            AsyncMock(return_value=preference),
+        ),
+        patch.object(
+            svc,
+            "get_unread_notification_count",
+            AsyncMock(return_value=0),
+        ),
     ):
         response = await svc.list_notifications(
             db,

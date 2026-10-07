@@ -90,13 +90,9 @@ async def test_signup_allows_disposable_when_disabled(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_admin_signup_rejects_disposable_when_enabled(monkeypatch) -> None:
     monkeypatch.setattr(
-        admin_auth,
-        "auth_settings",
+        "core.auth.config.settings",
         _auth_settings(enabled=True),
     )
-    caller = Mock()
-    caller.id = uuid4()
-    caller.role = "superadmin"
     payload = AdminSignupRequest(
         firstName="Admin",
         lastName="User",
@@ -104,7 +100,7 @@ async def test_admin_signup_rejects_disposable_when_enabled(monkeypatch) -> None
         password="Secret123",
         role="superadmin",
     )
-    result = await admin_auth.admin_signup(payload, Mock(), current_user=caller)
+    result = await admin_auth.admin_signup(payload, Mock())
     assert result.status is False
     assert result.message == DISPOSABLE_EMAIL_NOT_ALLOWED_MESSAGE
 

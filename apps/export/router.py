@@ -14,8 +14,8 @@ from apps.export.tasks import enqueue_export_processing
 from common.schemas import ApiResponse
 from core.auth.dependencies import require_recent_auth
 from core.database.session import get_session
-from apps.administration.dependencies import require_signed_admin
-from core.security.auth import get_current_user
+from core.security.auth import get_current_admin, get_current_user
+from core.security.mobile.dependencies import require_mobile_request_security
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ admin_router = APIRouter(prefix="/admin/exports", tags=["Data Export"])
 
 @router.post("", response_model=ApiResponse)
 async def request_data_export(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_mobile_request_security),
     _recent_auth: dict = Depends(require_recent_auth),
     db: AsyncSession = Depends(get_session),
     service: DataExportService = Depends(get_data_export_service),
@@ -66,7 +66,7 @@ async def request_data_export(
 @router.get("/{export_id}", response_model=ApiResponse)
 async def get_data_export_status(
     export_id: UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_mobile_request_security),
     db: AsyncSession = Depends(get_session),
     service: DataExportService = Depends(get_data_export_service),
 ) -> ApiResponse:
@@ -83,7 +83,7 @@ async def get_data_export_status(
 
 @admin_router.post("/cleanup", response_model=ApiResponse, status_code=202)
 async def cleanup_expired_data_exports(
-    current_user: User = Depends(require_signed_admin),
+    current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """Queue expired export cleanup for a Celery worker."""

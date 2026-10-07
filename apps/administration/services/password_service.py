@@ -55,62 +55,38 @@ def _sync_firebase_password_best_effort(user: User, new_password: str) -> None:
     except Exception:  # nosec B110 -- best-effort Firebase token revocation
         pass
 
-async def admin_forgot_password(payload: AdminForgotPasswordRequest, db: AsyncSession, *, request=None) -> ApiResponse:
+async def admin_forgot_password(payload: AdminForgotPasswordRequest, db: AsyncSession) -> ApiResponse:
     from core.email_service import send_reset_password_email
     from apps.accounts.db_models import PasswordResetToken
     from core.auth.config import settings as auth_settings
-    from apps.administration.services.signing_store import consume_keyed_rate_limit
     import os
     import uuid
 
     email = payload.email.lower()
-    ip = "unknown"
-    if request is not None:
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            ip = forwarded.split(",")[0].strip() or ip
-        elif request.client:
-            ip = request.client.host or ip
-
-    allowed = await consume_keyed_rate_limit(
-        f"forgot:{ip}:{email}",
-        limit=int(auth_settings.admin_signing_rate_limit_requests),
-        window_seconds=int(auth_settings.admin_signing_rate_limit_window_seconds),
-    )
-    if not allowed:
-        # Avoid enumeration: generic success-shaped delay message
-        return ApiResponse(
-            status=True,
-            message="If an account exists for this email, a reset link will be sent.",
-            data=None,
-        )
-
     stmt = select(User).options(selectinload(User.roles)).where(User.email == email)
     user = (await db.execute(stmt)).scalar_one_or_none()
 
     from apps.accounts.services.common_service import is_soft_deleted_user
 
     if not user or is_soft_deleted_user(user):
-        return ApiResponse(
-            status=True,
-            message="If an account exists for this email, a reset link will be sent.",
-            data=None,
-        )
+        return ApiResponse(status=False, message="User not found", data=None)
 
+    # Check for recent active token to rate limit
     now = datetime.now(timezone.utc)
     existing_stmt = select(PasswordResetToken).where(
         PasswordResetToken.user_id == user.id,
         PasswordResetToken.used_at == None,
-        PasswordResetToken.expires_at > now,
+        PasswordResetToken.expires_at > now
     ).limit(1)
-    existing_token = (await db.execute(existing_stmt)).scalar_one_or_none()
-    if existing_token:
-        return ApiResponse(
-            status=True,
-            message="If an account exists for this email, a reset link will be sent.",
-            data=None,
-        )
+    # existing_token = (await db.execute(existing_stmt)).scalar_one_or_none()
+    # if existing_token:
+    #     return ApiResponse(
+    #         status=False,
+    #         message=f"Recently email for resest password as been send please try after {auth_settings.password_reset_token_expire_minutes} minutes  ",
+    #         data=None
+    #     )
 
+    # Generate token
     token_val = str(uuid.uuid4())
     expires_at = now + timedelta(minutes=auth_settings.password_reset_token_expire_minutes)
 
@@ -122,6 +98,7 @@ async def admin_forgot_password(payload: AdminForgotPasswordRequest, db: AsyncSe
     db.add(reset_token)
     await db.commit()
 
+    # Get application link
     app_link = os.getenv("APPLICATION_LINK").rstrip("/") + "/"
     reset_link = f"{app_link}reset-password?token={token_val}"
 
@@ -131,19 +108,16 @@ async def admin_forgot_password(payload: AdminForgotPasswordRequest, db: AsyncSe
             from apps.profiles.db_models import Profile
             profile_stmt = select(Profile.first_name).where(Profile.user_id == user.id)
             first_name = (await db.execute(profile_stmt)).scalar_one_or_none()
-        except Exception:  # nosec B110
+        except Exception: # nosec B110
             pass
 
+    # Send email
     try:
         await send_reset_password_email(email, reset_link, first_name=first_name)
     except TypeError:
         await send_reset_password_email(email, reset_link)
 
-    return ApiResponse(
-        status=True,
-        message="If an account exists for this email, a reset link will be sent.",
-        data=None,
-    )
+    return ApiResponse(status=True, message="Password reset link sent successfully to your mail ", data=None)
 
 async def admin_reset_password(payload: AdminResetPasswordRequest, db: AsyncSession) -> ApiResponse:
     from apps.accounts.db_models import PasswordResetToken

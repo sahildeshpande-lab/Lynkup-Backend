@@ -21,7 +21,7 @@ from apps.notifications.repositories.admin_campaign_repository import (
 )
 from apps.notifications.repositories.campaign_audience_repository import (
     create_campaign_audience,
-    get_active_push_targets_for_users,
+    get_active_push_targets_grouped_by_user,
     resolve_announcement_recipients,
     resolve_topic_recipients,
 )
@@ -48,6 +48,9 @@ from apps.notifications.schemas import (
 from apps.notifications.services.topic_service import resolve_firebase_topics_from_targets
 from apps.notifications.services.notification_payload_builder import (
     NotificationPayloadBuilder,
+)
+from apps.notifications.services.notification_service import (
+    get_unread_notification_counts_for_users,
 )
 from common.enums import (
     NotificationCampaignStatus,
@@ -824,6 +827,9 @@ async def _dispatch_announcement(
     await db.flush()
     logger.info("Broadcast notification created campaign_id=%s", campaign.id)
 
+    # Persist audience + broadcast before push so badges cannot outlive a rollback.
+    await db.commit()
+
     push_eligible_user_ids = await filter_users_eligible_for_push(
         db,
         recipient_user_ids,
@@ -835,8 +841,12 @@ async def _dispatch_announcement(
         len(recipient_user_ids),
         len(push_eligible_user_ids),
     )
-    fcm_tokens = await get_active_push_targets_for_users(db, push_eligible_user_ids)
-    push_result = await _send_token_push(campaign, fcm_tokens, data=data_payload)
+    push_result = await _send_token_push(
+        db,
+        campaign,
+        push_eligible_user_ids,
+        data=data_payload,
+    )
     logger.info(
         "Announcement push sent campaign_id=%s successful_count=%s failed_count=%s",
         campaign.id,
@@ -913,6 +923,9 @@ async def _dispatch_topic(
     await db.flush()
     logger.info("Broadcast notification created campaign_id=%s", campaign.id)
 
+    # Persist audience + broadcast before push so badges cannot outlive a rollback.
+    await db.commit()
+
     # Always send one push per device token. Never publish to multiple Firebase
     # topics for one campaign — a user subscribed to university + major + minor
     # would otherwise receive the same notification N times.
@@ -933,11 +946,11 @@ async def _dispatch_topic(
             len(recipient_user_ids),
             len(push_eligible_user_ids),
         )
-        push_targets = await get_active_push_targets_for_users(
-            db, push_eligible_user_ids
-        )
         push_result = await _send_token_push(
-            campaign, push_targets, data=data_payload
+            db,
+            campaign,
+            push_eligible_user_ids,
+            data=data_payload,
         )
     else:
         logger.warning(
@@ -955,13 +968,28 @@ async def _dispatch_topic(
 
 
 async def _send_token_push(
+    db: AsyncSession,
     campaign: NotificationCampaign,
-    push_targets: list[tuple[str, str | None]],
+    user_ids: list[UUID],
     *,
     data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if not push_targets:
+    """
+    Fan out campaign pushes per recipient user with that user's unread badge.
+
+    Never computes one global unread count for the whole campaign.
+    """
+    if not user_ids:
         return {"successful_count": 0, "failed_count": 0, "failed_tokens": []}
+
+    targets_by_user = await get_active_push_targets_grouped_by_user(db, user_ids)
+    if not targets_by_user:
+        return {"successful_count": 0, "failed_count": 0, "failed_tokens": []}
+
+    unread_by_user = await get_unread_notification_counts_for_users(
+        db,
+        list(targets_by_user.keys()),
+    )
 
     raw_payload = data or {
         "notification_type": (
@@ -971,13 +999,41 @@ async def _send_token_push(
         ),
         "campaign_id": str(campaign.id),
     }
-    payload = NotificationPayloadBuilder.for_fcm(raw_payload)
-    return await send_push_to_devices(
-        push_targets,
-        campaign.title,
-        campaign.message,
-        payload,
-    )
+
+    successful_count = 0
+    failed_count = 0
+    failed_tokens: list[str] = []
+
+    for user_id, push_targets in targets_by_user.items():
+        unread_count = int(unread_by_user.get(user_id, 0))
+        user_payload = dict(raw_payload)
+        user_payload["unread_count"] = unread_count
+        payload = NotificationPayloadBuilder.for_fcm(user_payload)
+        result = await send_push_to_devices(
+            push_targets,
+            campaign.title,
+            campaign.message,
+            payload,
+            badge=unread_count,
+        )
+        successful_count += int(result.get("successful_count", 0))
+        failed_count += int(result.get("failed_count", 0))
+        failed_tokens.extend(result.get("failed_tokens") or [])
+        logger.info(
+            "Campaign push user scoped campaign_id=%s user_id=%s unread_count=%s "
+            "successful=%s failed=%s",
+            campaign.id,
+            user_id,
+            unread_count,
+            result.get("successful_count", 0),
+            result.get("failed_count", 0),
+        )
+
+    return {
+        "successful_count": successful_count,
+        "failed_count": failed_count,
+        "failed_tokens": failed_tokens,
+    }
 
 
 async def _get_campaign(

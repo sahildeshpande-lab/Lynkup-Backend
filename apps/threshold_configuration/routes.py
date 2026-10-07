@@ -11,8 +11,8 @@ from apps.threshold_configuration.services import (
     get_moderation_thresholds,
     update_moderation_thresholds,
 )
-from apps.administration.dependencies import require_signed_moderator_or_viewer
 from core.database.session import get_session
+from core.security.auth import get_current_moderator_or_viewer
 
 router = APIRouter(tags=["Threshold Configuration"])
 
@@ -20,7 +20,7 @@ router = APIRouter(tags=["Threshold Configuration"])
 @router.get("/admin/threshold", response_model=ApiResponse)
 async def get_admin_thresholds(
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     _ = current_user
     data = await get_moderation_thresholds(db)
@@ -34,7 +34,7 @@ async def get_admin_thresholds(
 async def patch_admin_thresholds(
     payload: UpdateModerationThresholdsRequest,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
 ) -> ApiResponse:
     data = await update_moderation_thresholds(
         payload,

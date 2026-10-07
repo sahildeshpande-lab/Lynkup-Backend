@@ -27,6 +27,7 @@ from core.security.auth import get_current_app_user
 router = APIRouter(tags=["8] Invitations"])
 
 
+from core.security.mobile.dependencies import require_mobile_request_security
 @router.post(
     "/invitations",
     response_model=InvitationCreateResponse,
@@ -40,7 +41,7 @@ router = APIRouter(tags=["8] Invitations"])
     ),
 )
 async def generate_invitation_route(
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> InvitationCreateResponse:
     return await create_invitation(db, current_user.id)
@@ -60,7 +61,7 @@ async def generate_invitation_route(
 )
 async def associate_invitation_route(
     payload: AssociateInvitationRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> InvitationAssociateResponse:
     return await associate_invitation(db, current_user.id, payload.code)
@@ -92,7 +93,7 @@ async def validate_invitation_route(
 )
 async def redeem_invitation_route(
     payload: RedeemInvitationRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> InvitationRedeemResponse:
     return await redeem_invitation_response(

@@ -30,7 +30,6 @@ from common.enums import LearningPaperAction
 from core.database.session import get_session
 from core.security.auth import get_current_admin
 from tests.unit.conftest import FakeScalarResult
-from apps.administration.dependencies import require_signed_admin
 
 START = datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc)
 
@@ -517,7 +516,6 @@ async def test_admin_learning_spotlight_logs_endpoint(mock_db) -> None:
         yield mock_db()
 
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
     app.dependency_overrides[get_session] = _override_db
 
     payload = {
@@ -586,7 +584,6 @@ async def test_admin_learning_spotlight_logs_endpoint_rejects_invalid_is_like(mo
     app = FastAPI()
     app.include_router(spotlight_router, prefix="/api/v1")
     app.dependency_overrides[get_current_admin] = lambda: mock_admin
-    app.dependency_overrides[require_signed_admin] = lambda: mock_admin
     app.dependency_overrides[get_session] = lambda: mock_db()
 
     transport = ASGITransport(app=app)
@@ -607,7 +604,6 @@ async def test_admin_learning_spotlight_logs_endpoint_forwards_pagination(mock_d
     app = FastAPI()
     app.include_router(spotlight_router, prefix="/api/v1")
     app.dependency_overrides[get_current_admin] = lambda: mock_admin
-    app.dependency_overrides[require_signed_admin] = lambda: mock_admin
     app.dependency_overrides[get_session] = lambda: mock_db()
 
     payload = {

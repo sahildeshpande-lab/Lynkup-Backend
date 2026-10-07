@@ -13,13 +13,6 @@ from core.security.auth import (
     get_current_superadmin,
     get_current_moderator_or_viewer,
 )
-from apps.administration.dependencies import (
-    require_admin_signed_request,
-    require_signed_admin,
-    require_signed_moderator,
-    require_signed_moderator_or_viewer,
-    require_signed_superadmin,
-)
 from entrypoints.api import app
 
 
@@ -90,35 +83,19 @@ async def _override_app_user():
 def setup_module() -> None:
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
     app.dependency_overrides[get_current_moderator] = _override_moderator
-    app.dependency_overrides[require_signed_moderator] = _override_moderator
     app.dependency_overrides[get_current_superadmin] = _override_admin
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_moderator
     app.dependency_overrides[get_current_user_or_superadmin] = _override_app_user
-    app.dependency_overrides[require_admin_signed_request] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
-    app.dependency_overrides[require_signed_moderator] = _override_moderator
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_moderator
-    app.dependency_overrides[require_signed_superadmin] = _override_admin
 
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_admin, None)
-    app.dependency_overrides.pop(require_signed_admin, None)
     app.dependency_overrides.pop(get_current_moderator, None)
-    app.dependency_overrides.pop(require_signed_moderator, None)
     app.dependency_overrides.pop(get_current_superadmin, None)
     app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
-    app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
     app.dependency_overrides.pop(get_current_user_or_superadmin, None)
-    app.dependency_overrides.pop(require_admin_signed_request, None)
-    app.dependency_overrides.pop(require_signed_admin, None)
-    app.dependency_overrides.pop(require_signed_moderator, None)
-    app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
-    app.dependency_overrides.pop(require_signed_superadmin, None)
 
 
 async def _list_users(
@@ -234,35 +211,10 @@ def test_admin_logout_route(monkeypatch) -> None:
     assert body["data"]["sessionId"] == "11111111-1111-1111-1111-111111111111"
 
 
-def test_admin_signup_route_requires_auth(monkeypatch) -> None:
-    app.dependency_overrides.pop(get_current_admin, None)
-    app.dependency_overrides.pop(require_signed_admin, None)
-    app.dependency_overrides.pop(require_signed_superadmin, None)
-    app.dependency_overrides.pop(require_admin_signed_request, None)
-
-    try:
-        response = client.post(
-            "/api/v1/auth/admin/signup",
-            json={
-                "firstName": "Admin",
-                "lastName": "User",
-                "email": "newstaff@example.com",
-                "password": "Secret123",
-                "role": "moderator",
-            },
-        )
-        assert response.status_code in (401, 403, 422) or response.json().get("status") is False
-    finally:
-        app.dependency_overrides[get_current_admin] = _override_admin
-        app.dependency_overrides[require_signed_admin] = _override_admin
-        app.dependency_overrides[require_signed_superadmin] = _override_admin
-        app.dependency_overrides[require_admin_signed_request] = _override_admin
-
-
 def test_admin_signup_route_returns_401_for_invalid_role(monkeypatch) -> None:
     from fastapi import HTTPException, status
 
-    async def _mock_admin_signup(payload, db, current_user=None):
+    async def _mock_admin_signup(payload, db):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Forbidden: Admin access required",
@@ -630,7 +582,6 @@ def test_list_processing_posts_route(monkeypatch) -> None:
 def test_list_processing_posts_route_superadmin_with_moderator_id(monkeypatch) -> None:
     from uuid import UUID
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_admin
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_admin
 
     called_moderator_id = None
 
@@ -661,7 +612,6 @@ def test_list_processing_posts_route_superadmin_with_moderator_id(monkeypatch) -
         assert called_moderator_id is None
     finally:
         app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
-        app.dependency_overrides[require_signed_moderator_or_viewer] = _override_moderator
 
 
 def test_list_processing_posts_route_moderator_ignores_moderator_id(monkeypatch) -> None:
@@ -811,7 +761,6 @@ def test_list_reviewed_posts_route_passes_order_asc(monkeypatch) -> None:
 
 def test_list_processing_posts_route_viewer(monkeypatch) -> None:
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_viewer
 
     called_moderator_id = None
 
@@ -836,7 +785,6 @@ def test_list_processing_posts_route_viewer(monkeypatch) -> None:
         assert called_moderator_id is None
     finally:
         app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
-        app.dependency_overrides[require_signed_moderator_or_viewer] = _override_moderator
 
 
 def test_list_reviewed_posts_route_without_moderator_filter(monkeypatch) -> None:
@@ -867,7 +815,6 @@ def test_list_reviewed_posts_route_without_moderator_filter(monkeypatch) -> None
 
 def test_list_users_route_viewer(monkeypatch) -> None:
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_viewer
     monkeypatch.setattr(admin_routes.services, "list_users", _list_users)
     try:
         response = client.get("/api/v1/users", params={"page": 1, "pageSize": 10})
@@ -876,12 +823,10 @@ def test_list_users_route_viewer(monkeypatch) -> None:
         assert body["status"] is True
     finally:
         app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
-        app.dependency_overrides[require_signed_moderator_or_viewer] = _override_moderator
 
 
 def test_get_user_route_viewer(monkeypatch) -> None:
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_viewer
     monkeypatch.setattr(admin_routes.services, "admin_get_user", _get_user)
     user_id = "11111111-1111-1111-1111-111111111111"
     try:
@@ -892,12 +837,10 @@ def test_get_user_route_viewer(monkeypatch) -> None:
         assert body["data"]["userId"] == user_id
     finally:
         app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
-        app.dependency_overrides[require_signed_moderator_or_viewer] = _override_moderator
 
 
 def test_list_reviewed_posts_route_viewer(monkeypatch) -> None:
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_viewer
 
     async def _mock_list_reviewed_posts(
         _db, moderator_id=None, status=None, page=None, page_size=None, viewer_user_id=None, search=None, sort=None, order=None
@@ -913,12 +856,10 @@ def test_list_reviewed_posts_route_viewer(monkeypatch) -> None:
         assert response.json()["status"] is True
     finally:
         app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
-        app.dependency_overrides[require_signed_moderator_or_viewer] = _override_moderator
 
 
 def test_list_moderators_route_viewer(monkeypatch) -> None:
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_viewer
 
     async def _mock_list_moderators(page, page_size, db, search=None, status=None):
         _ = (page, page_size, db, search, status)
@@ -931,7 +872,6 @@ def test_list_moderators_route_viewer(monkeypatch) -> None:
         assert response.json()["status"] is True
     finally:
         app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
-        app.dependency_overrides[require_signed_moderator_or_viewer] = _override_moderator
 
 
 def test_list_feature_flags_route(monkeypatch) -> None:
@@ -1034,7 +974,6 @@ def test_admin_delete_feature_flag_route(monkeypatch) -> None:
 
 def test_admin_feature_flags_route_viewer(monkeypatch) -> None:
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_viewer
 
     async def _mock_update(payload, _db, **_kwargs):
         return {
@@ -1057,12 +996,10 @@ def test_admin_feature_flags_route_viewer(monkeypatch) -> None:
         assert response.json()["status"] is True
     finally:
         app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
-        app.dependency_overrides[require_signed_moderator_or_viewer] = _override_moderator
 
 
 def test_create_user_route_viewer(monkeypatch) -> None:
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_viewer
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_viewer
 
     async def _mock_admin_create_user(payload, _db, _background_tasks, **_kwargs):
         return ApiResponse(status=True, message="User created successfully", data={})
@@ -1082,5 +1019,4 @@ def test_create_user_route_viewer(monkeypatch) -> None:
         assert response.json()["status"] is True
     finally:
         app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
-        app.dependency_overrides[require_signed_moderator_or_viewer] = _override_moderator
 

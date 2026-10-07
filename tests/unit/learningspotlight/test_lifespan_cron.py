@@ -63,7 +63,6 @@ from core.database.session import get_session
 from core.lifespan import lifespan
 from core.security.auth import get_current_admin, get_current_user
 from fastapi import FastAPI
-from apps.administration.dependencies import require_signed_admin
 
 
 def _fake_session_factory():
@@ -254,7 +253,6 @@ async def test_manual_cron_route_requires_admin_and_engagement_routes_work(mock_
 
     app.dependency_overrides[get_current_user] = _override_user
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
     app.dependency_overrides[get_session] = _override_db
 
     fake_spotlight = LearningSpotlight(

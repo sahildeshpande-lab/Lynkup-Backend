@@ -29,9 +29,9 @@ from common.enums import (
 )
 from common.pagination import PaginationParams
 from common.schemas import ApiResponse
-from apps.administration.dependencies import require_signed_moderator_or_viewer
 from core.database.session import get_session
-from core.security.auth import get_current_app_user
+from core.security.auth import get_current_app_user, get_current_moderator_or_viewer
+from core.security.mobile.dependencies import require_mobile_request_security
 
 router = APIRouter(tags=["8] Reports"])
 
@@ -45,7 +45,7 @@ router = APIRouter(tags=["8] Reports"])
 )
 async def create_report_route(
     payload: ReportCreateRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> ApiResponse:
     return await create_report_service(db, current_user.id, payload)
@@ -65,7 +65,7 @@ async def list_reports_admin_route(
     entity_type: ReportEntityType = Query(...),
     entity_id: UUID = Query(...),
     moderator_id: UUID | None = Query(None),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
     db: AsyncSession = Depends(get_session),
     pagination: PaginationParams = Depends(),
 ) -> ReportListResponse:
@@ -124,7 +124,7 @@ async def get_reported_entities_route(
             "or comment text."
         ),
     ),
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
     db: AsyncSession = Depends(get_session),
     pagination: PaginationParams = Depends(),
 ) -> ReportedEntityListResponse:
@@ -151,7 +151,7 @@ async def get_reported_entities_route(
 )
 async def get_report_details_admin_route(
     report_id: UUID,
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
     db: AsyncSession = Depends(get_session),
 ) -> ReportResponse:
     _ = current_user
@@ -170,7 +170,7 @@ async def get_report_details_admin_route(
 )
 async def review_report_admin_route(
     payload: ReportReviewRequest,
-    current_user=Depends(require_signed_moderator_or_viewer),
+    current_user=Depends(get_current_moderator_or_viewer),
     db: AsyncSession = Depends(get_session),
 ) -> ReportResponse:
     return await review_report_admin_service(

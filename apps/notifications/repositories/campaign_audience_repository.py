@@ -129,6 +129,25 @@ async def get_campaign_audience_for_user(
     return {row.campaign_id: row for row in rows}
 
 
+async def get_campaign_audience_for_users(
+    db: AsyncSession,
+    user_ids: list[UUID],
+    campaign_ids: list[UUID],
+) -> dict[tuple[UUID, UUID], NotificationCampaignAudience]:
+    """Return audience rows keyed by ``(user_id, campaign_id)``."""
+    if not user_ids or not campaign_ids:
+        return {}
+
+    unique_user_ids = list(dict.fromkeys(user_ids))
+    unique_campaign_ids = list(dict.fromkeys(campaign_ids))
+    stmt = select(NotificationCampaignAudience).where(
+        NotificationCampaignAudience.user_id.in_(unique_user_ids),
+        NotificationCampaignAudience.campaign_id.in_(unique_campaign_ids),
+    )
+    rows = list((await db.execute(stmt)).scalars().all())
+    return {(row.user_id, row.campaign_id): row for row in rows}
+
+
 async def mark_campaign_audience_read(
     db: AsyncSession,
     *,
@@ -395,6 +414,48 @@ async def get_active_push_targets_for_users(
         seen.add(key)
         targets.append((token, platform))
     return targets
+
+
+async def get_active_push_targets_grouped_by_user(
+    db: AsyncSession,
+    user_ids: list[UUID],
+) -> dict[UUID, list[tuple[str, str | None]]]:
+    """
+    Return active push targets grouped by ``user_id``.
+
+    Used for campaign fan-out so each user receives their own unread badge.
+    """
+    if not user_ids:
+        return {}
+
+    unique_user_ids = list(dict.fromkeys(user_ids))
+    stmt = (
+        select(
+            UserInstallation.user_id,
+            UserInstallation.fcm_token,
+            UserInstallation.platform,
+        )
+        .where(
+            UserInstallation.user_id.in_(unique_user_ids),
+            UserInstallation.is_active.is_(True),
+            UserInstallation.fcm_token.is_not(None),
+        )
+    )
+    grouped: dict[UUID, list[tuple[str, str | None]]] = {
+        user_id: [] for user_id in unique_user_ids
+    }
+    seen: set[tuple[UUID, str, str]] = set()
+    for user_id, raw_token, platform in (await db.execute(stmt)).all():
+        token = (raw_token or "").strip()
+        if not token or user_id is None:
+            continue
+        normalized = (platform or "").strip().lower() or "android"
+        key = (user_id, normalized, token)
+        if key in seen:
+            continue
+        seen.add(key)
+        grouped.setdefault(user_id, []).append((token, platform))
+    return {user_id: targets for user_id, targets in grouped.items() if targets}
 
 
 def _alumni_filters(is_alumni: bool | None) -> list:

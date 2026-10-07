@@ -38,12 +38,16 @@ async def send_push_to_device(
     title: str,
     body: str,
     data: dict[str, Any] | None = None,
+    badge: int | None = None,
 ) -> str:
     """
     Send one push to a single device, routing by platform.
 
     Android uses the existing Firebase FCM sender unchanged.
     iOS uses direct APNs.
+
+    ``badge`` is the backend unread count for the target user (including ``0``).
+    When omitted, platform badge fields are left unset (test / legacy callers).
     """
     normalized = normalize_platform(platform)
     device_token = (token or "").strip()
@@ -56,10 +60,11 @@ async def send_push_to_device(
             title,
             body,
             data,
+            badge=badge,
         )
 
     # Keep Android on the existing synchronous FCM path.
-    return send_push_notification(device_token, title, body, data)
+    return send_push_notification(device_token, title, body, data, badge=badge)
 
 
 async def send_push_to_devices(
@@ -67,6 +72,8 @@ async def send_push_to_devices(
     title: str,
     body: str,
     data: dict[str, Any] | None = None,
+    *,
+    badge: int | None = None,
 ) -> dict[str, Any]:
     """
     Send the same notification to many devices, branching by platform.
@@ -74,6 +81,9 @@ async def send_push_to_devices(
     Continues after individual failures. Return shape matches the existing FCM
     batch helper so callers stay unchanged: successful_count, failed_count,
     failed_tokens.
+
+    ``badge`` is optional. When set, every target receives the same badge value
+    (callers must group by user before invoking so counts never cross users).
     """
     android_tokens: list[str] = []
     ios_tokens: list[str] = []
@@ -105,20 +115,22 @@ async def send_push_to_devices(
     failed_tokens: list[str] = []
 
     if android_tokens:
-        # Existing Android FCM batch path — behavior unchanged.
+        # Existing Android FCM batch path — behavior unchanged aside from badge.
         android_result = send_push_notifications(
             android_tokens,
             title,
             body,
             data,
+            badge=badge,
         )
         successful_count += int(android_result.get("successful_count", 0))
         failed_count += int(android_result.get("failed_count", 0))
         failed_tokens.extend(android_result.get("failed_tokens") or [])
         logger.info(
-            "Push dispatch android complete successful=%s failed=%s",
+            "Push dispatch android complete successful=%s failed=%s badge=%s",
             android_result.get("successful_count", 0),
             android_result.get("failed_count", 0),
+            badge,
         )
 
     if ios_tokens:
@@ -127,14 +139,16 @@ async def send_push_to_devices(
             title,
             body,
             data,
+            badge=badge,
         )
         successful_count += int(ios_result.get("successful_count", 0))
         failed_count += int(ios_result.get("failed_count", 0))
         failed_tokens.extend(ios_result.get("failed_tokens") or [])
         logger.info(
-            "Push dispatch ios complete successful=%s failed=%s",
+            "Push dispatch ios complete successful=%s failed=%s badge=%s",
             ios_result.get("successful_count", 0),
             ios_result.get("failed_count", 0),
+            badge,
         )
 
     if not android_tokens and not ios_tokens:

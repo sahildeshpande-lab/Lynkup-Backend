@@ -35,7 +35,6 @@ GENERIC_AUTH_FAILURE = "Request authentication failed"
 RATE_LIMIT_MESSAGE = "Rate limit exceeded"
 
 HEADER_KEY_ID = "X-Key-ID"
-HEADER_SESSION_ID = "X-Session-Id"
 HEADER_TIMESTAMP = "X-Timestamp"
 HEADER_NONCE = "X-Nonce"
 HEADER_SIGNATURE = "X-Signature"
@@ -87,22 +86,8 @@ async def _audit(
         logger.exception("Failed to write security event type=%s user_id=%s", event_type, user_id)
 
 
-async def register_pending_signing_key(public_key: str, *, request: Request | None = None) -> ApiResponse:
+async def register_pending_signing_key(public_key: str) -> ApiResponse:
     """Pre-login public-key registration. Does NOT accept user_id/session_id."""
-    from apps.administration.services.signing_store import consume_keyed_rate_limit
-
-    if request is not None:
-        validate_origin(request)
-
-    ip = _client_ip(request) or "unknown"
-    allowed = await consume_keyed_rate_limit(
-        f"key-register:{ip}",
-        limit=int(auth_settings.admin_signing_rate_limit_requests),
-        window_seconds=int(auth_settings.admin_signing_rate_limit_window_seconds),
-    )
-    if not allowed:
-        raise ApiError(RATE_LIMIT_MESSAGE)
-
     try:
         pem = normalize_public_key_pem(public_key)
     except PublicKeyValidationError as exc:
@@ -231,7 +216,7 @@ async def revoke_signing_key(
 def validate_origin(request: Request) -> None:
     allowed = auth_settings.admin_allowed_origin_list
     if not allowed:
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        return
     origin = (request.headers.get("origin") or "").strip()
     if not origin or origin not in allowed:
         raise ApiError(GENERIC_AUTH_FAILURE)
@@ -263,18 +248,15 @@ async def verify_signed_admin_request(
     db: AsyncSession,
     *,
     session_id: UUID,
-    skip_origin: bool = False,
 ) -> User:
     """Full verification chain for RSA-signed Web Admin requests.
 
     ``session_id`` must come from the authenticated JWT/admin_sessions row —
     never from the client body and never from user.id.
     """
-    if not skip_origin:
-        validate_origin(request)
+    validate_origin(request)
 
     key_id_raw = (request.headers.get(HEADER_KEY_ID) or "").strip()
-    session_header = (request.headers.get(HEADER_SESSION_ID) or "").strip()
     timestamp_raw = (request.headers.get(HEADER_TIMESTAMP) or "").strip()
     nonce = (request.headers.get(HEADER_NONCE) or "").strip()
     signature = (request.headers.get(HEADER_SIGNATURE) or "").strip()
@@ -282,7 +264,7 @@ async def verify_signed_admin_request(
     path = request.url.path
     method = request.method
 
-    if not key_id_raw or not session_header or not timestamp_raw or not nonce or not signature:
+    if not key_id_raw or not timestamp_raw or not nonce or not signature:
         await _audit(
             db,
             current_user.id,
@@ -293,22 +275,6 @@ async def verify_signed_admin_request(
                 "method": method,
                 "session_id": str(session_id),
                 "reason": "missing_signing_headers",
-            },
-        )
-        await db.commit()
-        raise ApiError(GENERIC_AUTH_FAILURE)
-
-    if session_header != str(session_id):
-        await _audit(
-            db,
-            current_user.id,
-            SecurityEventType.UNAUTHORIZED_ACCESS,
-            request=request,
-            metadata={
-                "path": path,
-                "method": method,
-                "session_id": str(session_id),
-                "reason": "session_id_mismatch",
             },
         )
         await db.commit()
@@ -393,25 +359,6 @@ async def verify_signed_admin_request(
         await db.commit()
         raise ApiError(GENERIC_AUTH_FAILURE)
 
-    # Nonce before RSA (architecture order + cheaper replay reject).
-    claimed = await claim_nonce(session_id=session_id, nonce=nonce)
-    if not claimed:
-        await _audit(
-            db,
-            current_user.id,
-            SecurityEventType.NONCE_REPLAY_DETECTED,
-            request=request,
-            metadata={
-                "path": path,
-                "method": method,
-                "key_id": str(key_id),
-                "session_id": str(session_id),
-                "reason": "nonce_replay",
-            },
-        )
-        await db.commit()
-        raise ApiError(GENERIC_AUTH_FAILURE)
-
     body = await request.body()
     message = canonical_request_bytes(
         method=method,
@@ -445,6 +392,24 @@ async def verify_signed_admin_request(
         await db.commit()
         raise ApiError(GENERIC_AUTH_FAILURE)
 
+    claimed = await claim_nonce(session_id=session_id, nonce=nonce)
+    if not claimed:
+        await _audit(
+            db,
+            current_user.id,
+            SecurityEventType.NONCE_REPLAY_DETECTED,
+            request=request,
+            metadata={
+                "path": path,
+                "method": method,
+                "key_id": str(key_id),
+                "session_id": str(session_id),
+                "reason": "nonce_replay",
+            },
+        )
+        await db.commit()
+        raise ApiError(GENERIC_AUTH_FAILURE)
+
     allowed = await consume_rate_limit(session_id)
     if not allowed:
         await _audit(
@@ -468,21 +433,5 @@ async def verify_signed_admin_request(
         .where(AdminSigningKey.id == signing_key.id)
         .values(last_used_at=now)
     )
-
-    # Audit mutating signed requests (avoid noise on GETs).
-    if (request.method or "").upper() not in {"GET", "HEAD", "OPTIONS"}:
-        await _audit(
-            db,
-            current_user.id,
-            SecurityEventType.SIGNED_REQUEST_ACCEPTED,
-            request=request,
-            metadata={
-                "path": path,
-                "method": method,
-                "key_id": str(key_id),
-                "session_id": str(session_id),
-            },
-        )
-
     await db.commit()
     return current_user

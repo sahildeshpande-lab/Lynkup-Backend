@@ -49,9 +49,12 @@ async def test_send_push_to_device_routes_ios() -> None:
             title="Hello",
             body="World",
             data={"k": "v"},
+            badge=0,
         )
     assert result == "apns-1"
-    apns.assert_awaited_once_with("ios-token", "Hello", "World", {"k": "v"})
+    apns.assert_awaited_once_with(
+        "ios-token", "Hello", "World", {"k": "v"}, badge=0
+    )
 
 
 @pytest.mark.asyncio
@@ -65,9 +68,12 @@ async def test_send_push_to_device_routes_android() -> None:
             platform="android",
             title="Hello",
             body="World",
+            badge=7,
         )
     assert result == "fcm-1"
-    fcm.assert_called_once_with("android-token", "Hello", "World", None)
+    fcm.assert_called_once_with(
+        "android-token", "Hello", "World", None, badge=7
+    )
 
 
 @pytest.mark.asyncio
@@ -111,10 +117,15 @@ async def test_send_push_to_devices_splits_platforms_and_dedupes() -> None:
             "Title",
             "Body",
             {"x": "1"},
+            badge=5,
         )
 
     assert result["successful_count"] == 3
     assert result["failed_count"] == 1
     assert result["failed_tokens"] == ["bad-android"]
-    android.assert_called_once_with(["a1"], "Title", "Body", {"x": "1"})
-    ios.assert_awaited_once_with(["i1", "i2"], "Title", "Body", {"x": "1"})
+    android.assert_called_once_with(
+        ["a1"], "Title", "Body", {"x": "1"}, badge=5
+    )
+    ios.assert_awaited_once_with(
+        ["i1", "i2"], "Title", "Body", {"x": "1"}, badge=5
+    )

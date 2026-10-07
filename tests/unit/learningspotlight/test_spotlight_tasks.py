@@ -12,7 +12,6 @@ from celery.schedules import crontab
 from apps.learningspotlight.cron import LearningSpotlightRunOutcome
 from apps.learningspotlight.tasks import spotlight_tick
 from core.celery_worker.celery_app import celery_app
-from apps.administration.dependencies import require_signed_admin
 
 
 def _queue_name(task) -> str:
@@ -184,7 +183,6 @@ async def test_manual_runcron_defers_generation_to_worker(mock_db) -> None:
         yield mock_db()
 
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
     app.dependency_overrides[get_session] = _override_db
 
     with (

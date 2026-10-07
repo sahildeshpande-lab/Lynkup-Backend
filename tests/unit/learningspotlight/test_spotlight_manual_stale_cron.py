@@ -31,7 +31,6 @@ from apps.learningspotlight.services.daily_generation_service import (
 from common.enums import SpotlightType
 from core.database.session import get_session
 from core.security.auth import get_current_admin
-from apps.administration.dependencies import require_signed_admin
 
 
 def _dt(hour: int, minute: int = 0) -> datetime:
@@ -373,7 +372,6 @@ async def test_runcron_does_not_create_queue_activity_log(mock_db) -> None:
         yield mock_db()
 
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
     app.dependency_overrides[get_session] = _override_db
 
     with (
@@ -407,7 +405,6 @@ async def test_runcron_resets_claim_when_publish_fails(mock_db) -> None:
         yield db
 
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
     app.dependency_overrides[get_session] = _override_db
 
     set_running = AsyncMock()
@@ -450,7 +447,6 @@ async def test_runcron_rejects_when_is_running(mock_db) -> None:
         yield mock_db()
 
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
     app.dependency_overrides[get_session] = _override_db
 
     with (

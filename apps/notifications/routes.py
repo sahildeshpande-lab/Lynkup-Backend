@@ -40,13 +40,10 @@ from apps.notifications.services import (
 )
 from apps.notifications.tasks import enqueue_campaign_dispatch
 from common.enums import NotificationCampaignStatus, NotificationCampaignType
-from apps.administration.dependencies import (
-    require_signed_admin,
-    require_signed_moderator,
-)
 from core.database.session import get_session
 from core.push import normalize_platform, send_push_to_device
-from core.security.auth import get_current_app_user
+from core.security.auth import get_current_admin, get_current_app_user, get_current_moderator
+from core.security.mobile.dependencies import require_mobile_request_security
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +128,7 @@ async def send_test_notification(
     description="Return the authenticated user's push/in-app/category notification preferences.",
 )
 async def get_notification_preferences_route(
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> NotificationPreferencesResponse:
     return await get_preferences(db, user_id=current_user.id)
@@ -149,7 +146,7 @@ async def get_notification_preferences_route(
 )
 async def update_notification_preferences_route(
     payload: UpdateNotificationPreferencesRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> NotificationPreferencesResponse:
     return await update_preferences(db, user_id=current_user.id, payload=payload)
@@ -169,7 +166,7 @@ async def update_notification_preferences_route(
     ),
 )
 async def list_my_notifications_route(
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
@@ -195,7 +192,7 @@ async def list_my_notifications_route(
     description="Mark every unread notification for the authenticated user as read.",
 )
 async def mark_all_notifications_read_route(
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> MarkAllNotificationsReadResponse:
     return await mark_all_read(db, user_id=current_user.id)
@@ -210,7 +207,7 @@ async def mark_all_notifications_read_route(
 )
 async def mark_notification_read_route(
     notification_id: UUID,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> MarkNotificationReadResponse:
     return await mark_as_read(
@@ -232,7 +229,7 @@ async def mark_notification_read_route(
     ),
 )
 async def admin_list_notification_campaigns(
-    current_user: Annotated[User, Depends(require_signed_admin)],
+    current_user: Annotated[User, Depends(get_current_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
@@ -273,7 +270,7 @@ async def admin_list_notification_campaigns(
 )
 async def admin_create_notification_campaign(
     payload: CreateCampaignRequest,
-    current_user: Annotated[User, Depends(require_signed_admin)],
+    current_user: Annotated[User, Depends(get_current_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> CreateCampaignResponse:
     result = await create_campaign(
@@ -310,7 +307,7 @@ async def admin_create_notification_campaign(
 )
 async def admin_update_notification_campaign(
     payload: UpdateCampaignRequest,
-    current_user: Annotated[User, Depends(require_signed_admin)],
+    current_user: Annotated[User, Depends(get_current_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> UpdateCampaignResponse:
     return await update_campaign(
@@ -333,7 +330,7 @@ async def admin_update_notification_campaign(
 )
 async def admin_delete_notification_campaign(
     payload: DeleteCampaignRequest,
-    current_user: Annotated[User, Depends(require_signed_admin)],
+    current_user: Annotated[User, Depends(get_current_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> DeleteCampaignResponse:
     return await delete_campaign(
@@ -357,7 +354,7 @@ async def admin_delete_notification_campaign(
 )
 async def test_push_route(
     payload: TestNotificationRequest,
-    current_user: Annotated[User, Depends(get_current_app_user)],
+    current_user: Annotated[User, Depends(require_mobile_request_security)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> TestNotificationResponse:
     from apps.notifications.repositories import get_active_fcm_tokens_for_users
@@ -412,7 +409,7 @@ async def test_push_route(
     ),
 )
 async def list_admin_activity_notifications_route(
-    current_user: Annotated[User, Depends(require_signed_moderator)],
+    current_user: Annotated[User, Depends(get_current_moderator)],
     db: Annotated[AsyncSession, Depends(get_session)],
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
@@ -453,7 +450,7 @@ async def list_admin_activity_notifications_route(
     description="Mark every unread admin activity log notification as read.",
 )
 async def mark_all_admin_notifications_read_route(
-    current_user: Annotated[User, Depends(require_signed_moderator)],
+    current_user: Annotated[User, Depends(get_current_moderator)],
     db: Annotated[AsyncSession, Depends(get_session)],
     moderator_id: UUID | None = Query(
         default=None,
@@ -486,7 +483,7 @@ async def mark_all_admin_notifications_read_route(
 )
 async def mark_admin_notification_read_route(
     notification_id: UUID,
-    current_user: Annotated[User, Depends(require_signed_moderator)],
+    current_user: Annotated[User, Depends(get_current_moderator)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> MarkAdminNotificationReadResponse:
     from apps.administration.services.admin_activity_log_service import (

@@ -98,11 +98,20 @@ async def test_create_notification_delivers_connection_reminder_when_weekly_on()
             AsyncMock(return_value={"successful_count": 1, "failed_count": 0}),
         ) as push,
         patch.object(
+            ns,
+            "get_unread_notification_count",
+            AsyncMock(return_value=4),
+        ),
+        patch.object(
             ns.NotificationPayloadBuilder,
             "build",
             return_value={"notification_type": "CONNECTION_REMINDER"},
         ),
-        patch.object(ns.NotificationPayloadBuilder, "for_fcm", return_value={}),
+        patch.object(
+            ns.NotificationPayloadBuilder,
+            "for_fcm",
+            side_effect=lambda payload: {k: str(v) for k, v in payload.items()},
+        ),
     ):
         result = await ns.create_notification(
             db,
@@ -116,4 +125,7 @@ async def test_create_notification_delivers_connection_reminder_when_weekly_on()
     assert result is saved
     persist.assert_awaited_once()
     push.assert_awaited_once()
+    assert push.await_args.kwargs.get("badge") == 4
+    assert push.await_args.args[3]["unread_count"] == "4"
     db.commit.assert_awaited()
+    assert db.commit.await_count >= 1

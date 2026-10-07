@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from apps.accounts.routes import router as accounts_router
+from apps.accounts.mobile_security_routes import router as mobile_security_router
 from apps.administration.routes import router as admin_router
 from apps.health_check.routes import router as health_check_router
 from apps.profiles.routes import router as profiles_router
@@ -30,6 +31,7 @@ def build_router() -> APIRouter:
     router = APIRouter(prefix="/api/v1")
     router.include_router(health_check_router)
     router.include_router(accounts_router)
+    router.include_router(mobile_security_router)
     router.include_router(admin_router)
     router.include_router(threshold_configuration_router)
     router.include_router(moderation_router)

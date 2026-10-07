@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database.session import get_session
 from core.security.auth import bearer_scheme, get_current_user
+from core.security.mobile.dependencies import require_mobile_request_security
 from apps.accounts.db_models import User
 from apps.uploads.schemas import UploadResponse
 from common.exceptions import ApiError
@@ -33,12 +34,23 @@ async def _resolve_upload_user(
         if inspect.isawaitable(result):
             result = await result
         return result, True
+    # Prefer mobile-security override used in tests / future wiring
+    mobile_override = request.app.dependency_overrides.get(require_mobile_request_security)
+    if mobile_override is not None:
+        result = mobile_override()
+        if inspect.isawaitable(result):
+            result = await result
+        return result, True
 
     if not credentials:
         return SimpleNamespace(id="user_1"), False
 
     try:
-        return await get_current_user(credentials=credentials, db=db), True
+        return await require_mobile_request_security(
+            request=request,
+            credentials=credentials,
+            db=db,
+        ), True
     except ApiError:
         return SimpleNamespace(id="user_1"), False
 

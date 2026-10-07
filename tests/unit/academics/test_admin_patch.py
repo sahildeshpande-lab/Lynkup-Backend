@@ -36,7 +36,6 @@ from common.exceptions import ApiError
 from core.database.session import get_session
 from core.security.auth import get_current_admin
 from entrypoints.api import app
-from apps.administration.dependencies import require_signed_admin
 
 
 async def _prepare_sqlite():
@@ -92,11 +91,9 @@ async def app_client(db_session):
 
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
     yield TestClient(app)
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_admin, None)
-    app.dependency_overrides.pop(require_signed_admin, None)
 
 
 @pytest.mark.asyncio
@@ -620,7 +617,6 @@ async def test_patch_unauthorized(db_session) -> None:
 
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_admin] = _override_non_admin
-    app.dependency_overrides[require_signed_admin] = _override_non_admin
 
     client_non_admin = TestClient(app)
     response = client_non_admin.patch(
@@ -637,7 +633,6 @@ async def test_patch_unauthorized(db_session) -> None:
 
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_admin, None)
-    app.dependency_overrides.pop(require_signed_admin, None)
 
 
 @pytest.mark.asyncio

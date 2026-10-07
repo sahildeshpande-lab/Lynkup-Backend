@@ -36,17 +36,7 @@ class AuthSettings(BaseSettings):
         alias="IS_DISPOSABLE_EMAIL_ENABLED",
     )
 
-    # Web Admin JWT lifetimes (independent of mobile ACCESS_TOKEN_EXPIRE_MINUTES).
-    admin_access_token_expire_minutes: int = Field(
-        default=15,
-        alias="ADMIN_ACCESS_TOKEN_EXPIRE_MINUTES",
-    )
-    admin_refresh_token_expire_minutes: int = Field(
-        default=10080,
-        alias="ADMIN_REFRESH_TOKEN_EXPIRE_MINUTES",
-    )
-
-    # Web Admin RSA request signing (RSA-PSS / SHA-256).
+    # Web Admin RSA request signing (RSA-PSS / SHA-256). JWT TTL stays ACCESS_TOKEN_EXPIRE_MINUTES.
     admin_signing_algorithm: str = Field(default="RSA-PSS", alias="ADMIN_SIGNING_ALGORITHM")
     admin_signing_hash: str = Field(default="SHA-256", alias="ADMIN_SIGNING_HASH")
     admin_signing_key_size: int = Field(default=2048, alias="ADMIN_SIGNING_KEY_SIZE")
@@ -62,8 +52,6 @@ class AuthSettings(BaseSettings):
         default=600,
         alias="ADMIN_SIGNING_PENDING_TTL_SECONDS",
     )
-    # Shared admin rate limit: signed requests, login, key-register, forgot-password.
-    # Window also throttles admin session last_seen writes.
     admin_signing_rate_limit_requests: int = Field(
         default=120,
         alias="ADMIN_SIGNING_RATE_LIMIT_REQUESTS",
@@ -73,7 +61,7 @@ class AuthSettings(BaseSettings):
         alias="ADMIN_SIGNING_RATE_LIMIT_WINDOW_SECONDS",
     )
     # Comma-separated browser Origins allowed for signed Web Admin requests.
-    # Empty list rejects all signed requests.
+    # Empty allowlist skips Origin enforcement (local/dev); set in production.
     admin_allowed_origins: str = Field(default="", alias="ADMIN_ALLOWED_ORIGINS")
 
     @property

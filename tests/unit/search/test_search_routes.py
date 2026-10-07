@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from apps.accounts.db_models import User
 from apps.search import routes as search_routes
 from core.database.session import get_session
-from core.security.auth import get_current_user, get_current_user_moderator_or_superadmin
+from core.security.auth import get_current_user
 from entrypoints.api import app
 
 
@@ -31,7 +31,6 @@ class _NoopSession:
 
 def setup_module() -> None:
     app.dependency_overrides[get_current_user] = _override_current_user
-    app.dependency_overrides[get_current_user_moderator_or_superadmin] = _override_current_user
     async def _override_session():
         yield _NoopSession()
     app.dependency_overrides[get_session] = _override_session
@@ -39,7 +38,6 @@ def setup_module() -> None:
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_current_user, None)
-    app.dependency_overrides.pop(get_current_user_moderator_or_superadmin, None)
     app.dependency_overrides.pop(get_session, None)
 
 
@@ -576,7 +574,6 @@ def test_viewer_role_access_to_catalog_endpoints(monkeypatch) -> None:
         return User(email="viewer@example.com", role="viewer", firebase_uid="viewer-uid")
 
     app.dependency_overrides[get_current_user] = _override_viewer_user
-    app.dependency_overrides[get_current_user_moderator_or_superadmin] = _override_viewer_user
 
     async def _dummy_list_countries(*args, **kwargs):
         return {"items": [{"id": "c-1", "name": "India", "iso_code": "IN"}], "page": 1, "pageSize": 10, "totalItems": 1, "totalPages": 1}
@@ -625,7 +622,6 @@ def test_viewer_role_access_to_catalog_endpoints(monkeypatch) -> None:
     assert res_interest.json()["status"] is True
 
     app.dependency_overrides[get_current_user] = _override_current_user
-    app.dependency_overrides[get_current_user_moderator_or_superadmin] = _override_current_user
 
 
 import pytest

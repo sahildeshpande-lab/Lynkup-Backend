@@ -17,12 +17,6 @@ from core.security.auth import (
     get_current_user,
     get_current_user_or_superadmin,
 )
-from apps.administration.dependencies import (
-    require_admin_signed_request,
-    require_signed_admin,
-    require_signed_moderator,
-    require_signed_moderator_or_viewer,
-)
 from entrypoints.api import app
 
 client = TestClient(app)
@@ -81,24 +75,18 @@ async def _override_app_user():
 def setup_module() -> None:
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_current_moderator] = _override_moderator
-    app.dependency_overrides[require_signed_moderator] = _override_moderator
     app.dependency_overrides[get_current_superadmin] = _override_superadmin
     app.dependency_overrides[get_current_admin] = _override_superadmin
-    app.dependency_overrides[require_signed_admin] = _override_superadmin
     app.dependency_overrides[get_current_moderator_or_viewer] = _override_moderator
-    app.dependency_overrides[require_signed_moderator_or_viewer] = _override_moderator
     app.dependency_overrides[get_current_user_or_superadmin] = _override_app_user
 
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_moderator, None)
-    app.dependency_overrides.pop(require_signed_moderator, None)
     app.dependency_overrides.pop(get_current_superadmin, None)
     app.dependency_overrides.pop(get_current_admin, None)
-    app.dependency_overrides.pop(require_signed_admin, None)
     app.dependency_overrides.pop(get_current_moderator_or_viewer, None)
-    app.dependency_overrides.pop(require_signed_moderator_or_viewer, None)
     app.dependency_overrides.pop(get_current_user_or_superadmin, None)
     app.dependency_overrides.pop(get_current_user, None)
 
@@ -141,7 +129,6 @@ def test_moderator_can_access_activity_logs(monkeypatch) -> None:
 
 def test_superadmin_can_access_activity_logs(monkeypatch) -> None:
     app.dependency_overrides[get_current_moderator] = _override_superadmin
-    app.dependency_overrides[require_signed_moderator] = _override_superadmin
 
     async def _mock_list(_db, **kwargs):
         return {"items": []}
@@ -154,35 +141,31 @@ def test_superadmin_can_access_activity_logs(monkeypatch) -> None:
         assert response.json()["data"]["items"] == []
     finally:
         app.dependency_overrides[get_current_moderator] = _override_moderator
-        app.dependency_overrides[require_signed_moderator] = _override_moderator
 
 
 def test_viewer_cannot_access_activity_logs() -> None:
-    # Real require_signed_moderator role check must run on an authenticated principal.
-    app.dependency_overrides.pop(require_signed_moderator, None)
-    app.dependency_overrides[require_admin_signed_request] = _override_viewer
+    app.dependency_overrides.pop(get_current_moderator, None)
+    app.dependency_overrides[get_current_user] = _override_viewer
     try:
         response = client.get("/api/v1/admin/activity-logs")
         assert response.status_code == 403
         assert response.json()["status"] is False
         assert "permission" in response.json()["message"].lower()
     finally:
-        app.dependency_overrides.pop(require_admin_signed_request, None)
+        app.dependency_overrides.pop(get_current_user, None)
         app.dependency_overrides[get_current_moderator] = _override_moderator
-        app.dependency_overrides[require_signed_moderator] = _override_moderator
 
 
 def test_user_cannot_access_activity_logs() -> None:
-    app.dependency_overrides.pop(require_signed_moderator, None)
-    app.dependency_overrides[require_admin_signed_request] = _override_app_user
+    app.dependency_overrides.pop(get_current_moderator, None)
+    app.dependency_overrides[get_current_user] = _override_app_user
     try:
         response = client.get("/api/v1/admin/activity-logs")
         assert response.status_code == 403
         assert response.json()["status"] is False
     finally:
-        app.dependency_overrides.pop(require_admin_signed_request, None)
+        app.dependency_overrides.pop(get_current_user, None)
         app.dependency_overrides[get_current_moderator] = _override_moderator
-        app.dependency_overrides[require_signed_moderator] = _override_moderator
 
 
 def test_activity_logs_use_common_pagination(monkeypatch) -> None:

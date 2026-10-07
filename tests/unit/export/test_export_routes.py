@@ -15,7 +15,6 @@ from core.database.session import get_session
 from core.security.auth import get_current_admin, get_current_user
 from entrypoints.api import app
 from tests.unit.conftest import FakeScalarResult
-from apps.administration.dependencies import require_signed_admin
 
 client = TestClient(app)
 
@@ -54,7 +53,6 @@ class _Session:
 def setup_module() -> None:
     app.dependency_overrides[get_current_user] = _override_current_user
     app.dependency_overrides[get_current_admin] = _override_admin
-    app.dependency_overrides[require_signed_admin] = _override_admin
     app.dependency_overrides[require_recent_auth] = _override_recent_auth
 
     async def _override_session():
@@ -66,7 +64,6 @@ def setup_module() -> None:
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_current_user, None)
     app.dependency_overrides.pop(get_current_admin, None)
-    app.dependency_overrides.pop(require_signed_admin, None)
     app.dependency_overrides.pop(require_recent_auth, None)
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_data_export_service, None)
@@ -230,7 +227,6 @@ def test_admin_cleanup_expired_exports_failure(monkeypatch) -> None:
 
 def test_admin_cleanup_requires_admin() -> None:
     override = app.dependency_overrides.pop(get_current_admin, None)
-    override = app.dependency_overrides.pop(require_signed_admin, None)
     try:
         response = client.post("/api/v1/admin/exports/cleanup")
         assert response.status_code in (200, 401)
@@ -239,4 +235,3 @@ def test_admin_cleanup_requires_admin() -> None:
     finally:
         if override:
             app.dependency_overrides[get_current_admin] = override
-            app.dependency_overrides[require_signed_admin] = override
