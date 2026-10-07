@@ -25,12 +25,6 @@ class AppAttestRegisterRequest(BaseModel):
     attestationObject: str = Field(min_length=1)
 
 
-class AndroidEnrollRequest(BaseModel):
-    """Body is empty; Play Integrity token is in ``X-Play-Integrity-Token``."""
-
-    pass
-
-
 @router.post("/app-attest/challenge", response_model=ApiResponse)
 async def app_attest_challenge(
     request: Request,
@@ -66,7 +60,7 @@ async def android_integrity_enroll(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """Validate a Play Integrity token and persist Android security state + HMAC key."""
+    """Validate FE integrity_token (header or JSON body) and persist Android security state."""
     if current_user.role != "user":
         raise ApiError("Insufficient permissions")
     if not mobile_settings.android_integrity_enabled:
@@ -75,7 +69,7 @@ async def android_integrity_enroll(
     # Temporarily enable binding path even if master mobile flag is off (enrollment).
     ctx = await bind_mobile_device(db, request, current_user)
     body = await request.body()
-    # Force integrity check regardless of platform string if enroll is called.
+    # Token from X-Play-Integrity-Token and/or JSON {"integrityToken"|"integrity_token": "..."}.
     await verify_android_play_integrity(db, request, current_user, ctx, body=body)
     assert ctx.installation is not None
     secret = ensure_installation_hmac_secret(ctx.installation)

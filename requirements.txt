@@ -54,7 +54,7 @@ disposable-email-domains
 alembic
 bleach
 # Spreadsheet imports — not needed for admin RSA auth testing on small Render instances.
-# pandas
+pandas
 # openpyxl
 # Large / unused on admin-auth-only deploys
 # pysonar

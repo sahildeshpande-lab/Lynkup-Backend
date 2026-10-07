@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -12,7 +11,7 @@ from typing import Any
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.accounts.db_models import SecurityEventType, User, UserInstallation
+from apps.accounts.db_models import SecurityEventType, User
 from common.exceptions import ApiError
 from core.security.mobile.audit import emit_mobile_security_event
 from core.security.mobile.config import settings as mobile_settings
@@ -44,7 +43,28 @@ def _normalize_digest(value: str) -> str:
     return (value or "").strip().lower().replace(":", "").replace(" ", "")
 
 
+def extract_integrity_token(request: Request, body: bytes = b"") -> str:
+    """Read integrity token from header or FE JSON body (``integrity_token`` / ``integrityToken``)."""
+    header_token = (request.headers.get(HEADER_PLAY_INTEGRITY_TOKEN) or "").strip()
+    if header_token:
+        return header_token
+    if not body:
+        return ""
+    try:
+        data = json.loads(body)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    for key in ("integrity_token", "integrityToken"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def _load_service_account_info() -> dict[str, Any]:
+    # Existing architecture: Google decodeIntegrityToken requires a service account.
     raw = (mobile_settings.play_integrity_service_account_json or "").strip()
     if not raw:
         raise ApiError(GENERIC_AUTH_FAILURE)
@@ -102,11 +122,12 @@ def validate_integrity_payload(
     payload: dict[str, Any],
     *,
     expected_package: str,
-    expected_digests: list[str],
+    expected_digests: list[str] | None = None,
     expected_request_hash: str,
 ) -> str:
-    """Validate package, cert digest, request hash, and integrity verdicts.
+    """Validate package name + required verdict fields (allow/reject).
 
+    Certificate digests are enforced only when configured in existing settings.
     Returns a compact integrity level string for persistence.
     """
     request_details = payload.get("requestDetails") or {}
@@ -117,13 +138,15 @@ def validate_integrity_payload(
     if pkg != expected_package:
         raise ApiError(GENERIC_AUTH_FAILURE)
 
-    certs = app_integrity.get("certificateSha256Digest") or []
-    if isinstance(certs, str):
-        certs = [certs]
-    normalized_certs = {_normalize_digest(c) for c in certs}
-    expected = {_normalize_digest(d) for d in expected_digests}
-    if not expected or not normalized_certs.intersection(expected):
-        raise ApiError(GENERIC_AUTH_FAILURE)
+    digests = [d for d in (expected_digests or []) if d]
+    if digests:
+        certs = app_integrity.get("certificateSha256Digest") or []
+        if isinstance(certs, str):
+            certs = [certs]
+        normalized_certs = {_normalize_digest(c) for c in certs}
+        expected = {_normalize_digest(d) for d in digests}
+        if not normalized_certs.intersection(expected):
+            raise ApiError(GENERIC_AUTH_FAILURE)
 
     # requestHash may be hex or base64 depending on client encoding; accept hex match.
     token_hash = (
@@ -139,10 +162,7 @@ def validate_integrity_payload(
             raise ApiError(GENERIC_AUTH_FAILURE)
 
     app_recognition = (app_integrity.get("appRecognitionVerdict") or "").strip().upper()
-    if app_recognition and app_recognition not in _ACCEPTABLE_APP_RECOGNITION:
-        # Empty is treated as fail — require a recognized verdict when present.
-        raise ApiError(GENERIC_AUTH_FAILURE)
-    if not app_recognition:
+    if not app_recognition or app_recognition not in _ACCEPTABLE_APP_RECOGNITION:
         raise ApiError(GENERIC_AUTH_FAILURE)
 
     verdicts = device_integrity.get("deviceRecognitionVerdict") or []
@@ -164,13 +184,15 @@ async def verify_android_play_integrity(
     *,
     body: bytes,
 ) -> None:
-    """Enforce Play Integrity when ``ANDROID_INTEGRITY_ENABLED``."""
+    """FE integrity_token → Google decode (package name) → verdict check → allow/reject."""
     if not mobile_settings.android_integrity_enabled:
         return
 
     package = (mobile_settings.play_integrity_package_name or "").strip()
     digests = mobile_settings.play_integrity_certificate_digest_list
-    if not package or not digests or not (
+    # Package name is required; service account already required by this architecture
+    # to call Google's decodeIntegrityToken. Certificate digests remain optional.
+    if not package or not (
         mobile_settings.play_integrity_service_account_json or ""
     ).strip():
         await emit_mobile_security_event(
@@ -182,7 +204,7 @@ async def verify_android_play_integrity(
         )
         raise ApiError(GENERIC_AUTH_FAILURE)
 
-    token = (request.headers.get(HEADER_PLAY_INTEGRITY_TOKEN) or "").strip()
+    token = extract_integrity_token(request, body)
     if not token:
         await emit_mobile_security_event(
             db,
@@ -215,7 +237,7 @@ async def verify_android_play_integrity(
         level = validate_integrity_payload(
             payload,
             expected_package=package,
-            expected_digests=digests,
+            expected_digests=digests or None,
             expected_request_hash=request_hash,
         )
     except ApiError:
@@ -230,8 +252,16 @@ async def verify_android_play_integrity(
 
     installation = ctx.installation
     installation.android_package_name = package
-    # Persist the matching digest from config (validated against token).
-    installation.android_certificate_digest = digests[0]
+    if digests:
+        installation.android_certificate_digest = digests[0]
+    else:
+        app_integrity = (payload.get("appIntegrity") or {}) if isinstance(payload, dict) else {}
+        certs = app_integrity.get("certificateSha256Digest") or []
+        if isinstance(certs, str):
+            certs = [certs]
+        installation.android_certificate_digest = (
+            _normalize_digest(str(certs[0])) if certs else None
+        )
     installation.android_integrity_level = level
     installation.android_last_verified_at = _utc_now()
     ensure_installation_hmac_secret(installation)

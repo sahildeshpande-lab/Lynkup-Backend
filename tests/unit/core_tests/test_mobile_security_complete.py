@@ -177,6 +177,27 @@ def test_play_integrity_valid_payload():
     assert "PLAY_RECOGNIZED" in level
 
 
+def test_play_integrity_valid_without_configured_digests():
+    """Package + verdicts alone are enough when certificate digests are not configured."""
+    body_hash = hashlib.sha256(b"{}").hexdigest()
+    payload = {
+        "requestDetails": {"requestHash": body_hash, "requestPackageName": "com.app"},
+        "appIntegrity": {
+            "packageName": "com.app",
+            "certificateSha256Digest": ["deadbeef"],
+            "appRecognitionVerdict": "PLAY_RECOGNIZED",
+        },
+        "deviceIntegrity": {"deviceRecognitionVerdict": ["MEETS_DEVICE_INTEGRITY"]},
+    }
+    level = validate_integrity_payload(
+        payload,
+        expected_package="com.app",
+        expected_digests=None,
+        expected_request_hash=body_hash,
+    )
+    assert level.startswith("PLAY_RECOGNIZED:")
+
+
 def test_play_integrity_wrong_package():
     body_hash = hashlib.sha256(b"").hexdigest()
     payload = {
