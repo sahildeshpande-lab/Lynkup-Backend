@@ -39,16 +39,13 @@ class MobileSecuritySettings(BaseSettings):
     )
 
     # Android Play Integrity (required only when ANDROID_INTEGRITY_ENABLED=true).
+    # OAuth uses FIREBASE_CREDENTIALS_JSON (or Firebase file-path fallbacks) — do not
+    # introduce a separate Play Integrity service-account env var.
     android_integrity_enabled: bool = Field(default=False, alias="ANDROID_INTEGRITY_ENABLED")
     play_integrity_package_name: str = Field(default="", alias="PLAY_INTEGRITY_PACKAGE_NAME")
     play_integrity_certificate_digests: str = Field(
         default="",
         alias="PLAY_INTEGRITY_CERTIFICATE_DIGESTS",
-    )
-    # Path or raw JSON string — never log this value.
-    play_integrity_service_account_json: str = Field(
-        default="",
-        alias="PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON",
     )
 
     # iOS App Attest (required only when IOS_ATTEST_ENABLED=true).

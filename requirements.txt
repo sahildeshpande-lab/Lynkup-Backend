@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
 sqlmodel
+hoogle-auth requests
 sqlalchemy[asyncio]
 rapidfuzz
 sqlalchemy

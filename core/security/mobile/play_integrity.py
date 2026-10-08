@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import Request
@@ -23,6 +25,11 @@ from core.security.mobile.store import GENERIC_AUTH_FAILURE, claim_integrity_req
 logger = logging.getLogger(__name__)
 
 HEADER_PLAY_INTEGRITY_TOKEN = "X-Play-Integrity-Token"
+_PLAY_INTEGRITY_SCOPE = "https://www.googleapis.com/auth/playintegrity"
+_DECODE_TIMEOUT_SECONDS = 15
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_FIREBASE_CREDENTIALS_FILE = _REPO_ROOT / "credentials" / "firebase-adminsdk.json"
 
 # Verdicts accepted as sufficiently intact for app recognition.
 _ACCEPTABLE_APP_RECOGNITION = frozenset({"PLAY_RECOGNIZED", "UNRECOGNIZED_VERSION"})
@@ -34,6 +41,10 @@ _ACCEPTABLE_DEVICE = frozenset(
     }
 )
 
+_session_lock = threading.Lock()
+_authorized_session: Any | None = None
+_authorized_session_fingerprint: str | None = None
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -43,39 +54,70 @@ def _normalize_digest(value: str) -> str:
     return (value or "").strip().lower().replace(":", "").replace(" ", "")
 
 
-def extract_integrity_token(request: Request, body: bytes = b"") -> str:
-    """Read integrity token from header or FE JSON body (``integrity_token`` / ``integrityToken``)."""
-    header_token = (request.headers.get(HEADER_PLAY_INTEGRITY_TOKEN) or "").strip()
-    if header_token:
-        return header_token
-    if not body:
-        return ""
-    try:
-        data = json.loads(body)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return ""
-    if not isinstance(data, dict):
-        return ""
-    for key in ("integrity_token", "integrityToken"):
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
+def _resolve_firebase_credentials_path() -> Path | None:
+    """Resolve file-path credentials using the same conventions as Firebase init."""
+    from core.auth.config import settings as auth_settings
+
+    credential_path = auth_settings.firebase_credential_path
+    if credential_path:
+        cred_file = Path(credential_path)
+        if not cred_file.is_absolute():
+            cred_file = _REPO_ROOT / cred_file
+        return cred_file
+    return _DEFAULT_FIREBASE_CREDENTIALS_FILE
+
+
+def firebase_play_integrity_credentials_configured() -> bool:
+    """True when Firebase service-account credentials are available for Play Integrity."""
+    raw = (os.getenv("FIREBASE_CREDENTIALS_JSON") or "").strip()
+    if raw:
+        return True
+    cred_file = _resolve_firebase_credentials_path()
+    return bool(cred_file and cred_file.is_file())
 
 
 def _load_service_account_info() -> dict[str, Any]:
-    # Existing architecture: Google decodeIntegrityToken requires a service account.
-    raw = (mobile_settings.play_integrity_service_account_json or "").strip()
-    if not raw:
+    """Load Firebase service-account JSON for Play Integrity OAuth.
+
+    Prefers ``FIREBASE_CREDENTIALS_JSON`` (inline JSON string), then the same
+    file-path fallbacks used by ``initialize_firebase_app``.
+    """
+    raw = (os.getenv("FIREBASE_CREDENTIALS_JSON") or "").strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            logger.warning("FIREBASE_CREDENTIALS_JSON is not valid JSON")
+            raise ApiError(GENERIC_AUTH_FAILURE) from exc
+        if not isinstance(data, dict):
+            raise ApiError(GENERIC_AUTH_FAILURE)
+        return data
+
+    cred_file = _resolve_firebase_credentials_path()
+    if cred_file is None or not cred_file.is_file():
+        logger.warning("Firebase credentials not available for Play Integrity")
         raise ApiError(GENERIC_AUTH_FAILURE)
-    if os.path.isfile(raw):
-        with open(raw, encoding="utf-8") as handle:
-            return json.load(handle)
-    return json.loads(raw)
+
+    try:
+        with open(cred_file, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to load Firebase credentials file for Play Integrity")
+        raise ApiError(GENERIC_AUTH_FAILURE) from exc
+    if not isinstance(data, dict):
+        raise ApiError(GENERIC_AUTH_FAILURE)
+    return data
 
 
-async def decode_integrity_token(token: str, package_name: str) -> dict[str, Any]:
-    """Call Google Play Integrity decodeIntegrityToken. Fail closed on errors."""
+def _credentials_fingerprint(info: dict[str, Any]) -> str:
+    """Stable non-secret fingerprint so credential rotation rebuilds the session."""
+    return f"{info.get('client_email', '')}|{info.get('project_id', '')}|{info.get('private_key_id', '')}"
+
+
+def _get_authorized_session():
+    """Return a cached AuthorizedSession; refresh credentials only when rotated."""
+    global _authorized_session, _authorized_session_fingerprint
+
     try:
         from google.auth.transport.requests import AuthorizedSession
         from google.oauth2 import service_account
@@ -83,18 +125,51 @@ async def decode_integrity_token(token: str, package_name: str) -> dict[str, Any
         logger.error("google-auth is required for Play Integrity verification")
         raise ApiError(GENERIC_AUTH_FAILURE) from exc
 
-    try:
-        info = _load_service_account_info()
+    info = _load_service_account_info()
+    fingerprint = _credentials_fingerprint(info)
+
+    with _session_lock:
+        if (
+            _authorized_session is not None
+            and _authorized_session_fingerprint == fingerprint
+        ):
+            return _authorized_session
+
         credentials = service_account.Credentials.from_service_account_info(
             info,
-            scopes=["https://www.googleapis.com/auth/playintegrity"],
+            scopes=[_PLAY_INTEGRITY_SCOPE],
         )
-        session = AuthorizedSession(credentials)
-        url = (
-            "https://playintegrity.googleapis.com/v1/"
-            f"{package_name}:decodeIntegrityToken"
+        _authorized_session = AuthorizedSession(credentials)
+        _authorized_session_fingerprint = fingerprint
+        return _authorized_session
+
+
+def reset_play_integrity_session_cache() -> None:
+    """Clear cached OAuth session (for tests)."""
+    global _authorized_session, _authorized_session_fingerprint
+    with _session_lock:
+        _authorized_session = None
+        _authorized_session_fingerprint = None
+
+
+def play_integrity_decode_url(package_name: str) -> str:
+    return (
+        "https://playintegrity.googleapis.com/v1/"
+        f"{package_name}:decodeIntegrityToken"
+    )
+
+
+async def decode_integrity_token(token: str, package_name: str) -> dict[str, Any]:
+    """Call Google Play Integrity decodeIntegrityToken. Fail closed on errors."""
+    try:
+        session = _get_authorized_session()
+        url = play_integrity_decode_url(package_name)
+        # Google REST API uses camelCase integrityToken (not snake_case).
+        response = session.post(
+            url,
+            json={"integrityToken": token},
+            timeout=_DECODE_TIMEOUT_SECONDS,
         )
-        response = session.post(url, json={"integrityToken": token}, timeout=15)
         if response.status_code != 200:
             logger.warning(
                 "Play Integrity decode failed status=%s",
@@ -122,12 +197,11 @@ def validate_integrity_payload(
     payload: dict[str, Any],
     *,
     expected_package: str,
-    expected_digests: list[str] | None = None,
+    expected_digests: list[str],
     expected_request_hash: str,
 ) -> str:
-    """Validate package name + required verdict fields (allow/reject).
+    """Validate package, cert digest, request hash, and integrity verdicts.
 
-    Certificate digests are enforced only when configured in existing settings.
     Returns a compact integrity level string for persistence.
     """
     request_details = payload.get("requestDetails") or {}
@@ -138,15 +212,13 @@ def validate_integrity_payload(
     if pkg != expected_package:
         raise ApiError(GENERIC_AUTH_FAILURE)
 
-    digests = [d for d in (expected_digests or []) if d]
-    if digests:
-        certs = app_integrity.get("certificateSha256Digest") or []
-        if isinstance(certs, str):
-            certs = [certs]
-        normalized_certs = {_normalize_digest(c) for c in certs}
-        expected = {_normalize_digest(d) for d in digests}
-        if not normalized_certs.intersection(expected):
-            raise ApiError(GENERIC_AUTH_FAILURE)
+    certs = app_integrity.get("certificateSha256Digest") or []
+    if isinstance(certs, str):
+        certs = [certs]
+    normalized_certs = {_normalize_digest(c) for c in certs}
+    expected = {_normalize_digest(d) for d in expected_digests}
+    if not expected or not normalized_certs.intersection(expected):
+        raise ApiError(GENERIC_AUTH_FAILURE)
 
     # requestHash may be hex or base64 depending on client encoding; accept hex match.
     token_hash = (
@@ -162,7 +234,10 @@ def validate_integrity_payload(
             raise ApiError(GENERIC_AUTH_FAILURE)
 
     app_recognition = (app_integrity.get("appRecognitionVerdict") or "").strip().upper()
-    if not app_recognition or app_recognition not in _ACCEPTABLE_APP_RECOGNITION:
+    if app_recognition and app_recognition not in _ACCEPTABLE_APP_RECOGNITION:
+        # Empty is treated as fail — require a recognized verdict when present.
+        raise ApiError(GENERIC_AUTH_FAILURE)
+    if not app_recognition:
         raise ApiError(GENERIC_AUTH_FAILURE)
 
     verdicts = device_integrity.get("deviceRecognitionVerdict") or []
@@ -184,17 +259,13 @@ async def verify_android_play_integrity(
     *,
     body: bytes,
 ) -> None:
-    """FE integrity_token → Google decode (package name) → verdict check → allow/reject."""
+    """Enforce Play Integrity when ``ANDROID_INTEGRITY_ENABLED``."""
     if not mobile_settings.android_integrity_enabled:
         return
 
     package = (mobile_settings.play_integrity_package_name or "").strip()
     digests = mobile_settings.play_integrity_certificate_digest_list
-    # Package name is required; service account already required by this architecture
-    # to call Google's decodeIntegrityToken. Certificate digests remain optional.
-    if not package or not (
-        mobile_settings.play_integrity_service_account_json or ""
-    ).strip():
+    if not package or not digests or not firebase_play_integrity_credentials_configured():
         await emit_mobile_security_event(
             db,
             user.id,
@@ -204,7 +275,7 @@ async def verify_android_play_integrity(
         )
         raise ApiError(GENERIC_AUTH_FAILURE)
 
-    token = extract_integrity_token(request, body)
+    token = (request.headers.get(HEADER_PLAY_INTEGRITY_TOKEN) or "").strip()
     if not token:
         await emit_mobile_security_event(
             db,
@@ -237,7 +308,7 @@ async def verify_android_play_integrity(
         level = validate_integrity_payload(
             payload,
             expected_package=package,
-            expected_digests=digests or None,
+            expected_digests=digests,
             expected_request_hash=request_hash,
         )
     except ApiError:
@@ -252,16 +323,8 @@ async def verify_android_play_integrity(
 
     installation = ctx.installation
     installation.android_package_name = package
-    if digests:
-        installation.android_certificate_digest = digests[0]
-    else:
-        app_integrity = (payload.get("appIntegrity") or {}) if isinstance(payload, dict) else {}
-        certs = app_integrity.get("certificateSha256Digest") or []
-        if isinstance(certs, str):
-            certs = [certs]
-        installation.android_certificate_digest = (
-            _normalize_digest(str(certs[0])) if certs else None
-        )
+    # Persist the matching digest from config (validated against token).
+    installation.android_certificate_digest = digests[0]
     installation.android_integrity_level = level
     installation.android_last_verified_at = _utc_now()
     ensure_installation_hmac_secret(installation)
