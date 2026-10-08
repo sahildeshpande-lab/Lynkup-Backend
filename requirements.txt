@@ -55,6 +55,7 @@ alembic
 bleach
 # Spreadsheet imports — not needed for admin RSA auth testing on small Render instances.
 pandas
+
 # openpyxl
 # Large / unused on admin-auth-only deploys
 # pysonar
