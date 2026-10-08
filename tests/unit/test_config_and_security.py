@@ -121,16 +121,26 @@ async def test_security_auth_role_dependencies(monkeypatch, mock_db, scalar_resu
     with pytest.raises(ApiError):
         await security_auth.get_current_superadmin(moderator)
 
-    # Dual-purpose: app user via local JWT without admin session
-    plain = User(id=uuid4(), email="u@example.com", status=UserStatus.active, password_hash="x")
+    # Dual-purpose: app user via Firebase ID token (not local JWT)
+    plain = User(
+        id=uuid4(),
+        email="u@example.com",
+        status=UserStatus.active,
+        password_hash="x",
+        firebase_uid="firebase-plain-uid",
+    )
     plain.role = "user"
     monkeypatch.setattr(
         security_auth.jwt,
         "decode",
-        lambda token, secret, algorithms: {"type": "access", "sub": str(plain.id)},
+        lambda token, secret, algorithms: (_ for _ in ()).throw(Exception("not local jwt")),
+    )
+    monkeypatch.setattr(
+        "core.auth.services.verify_firebase_token",
+        lambda token, check_revoked=True: {"uid": "firebase-plain-uid", "email": plain.email},
     )
     request = SimpleNamespace(state=SimpleNamespace())
-    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="tok")
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="firebase-id-token")
     db = mock_db(scalar_result(plain))
     assert await security_auth.get_current_user_or_superadmin(request, creds, db) is plain
     db = mock_db(scalar_result(plain))
@@ -270,16 +280,27 @@ async def test_authenticate_request_web_and_mobile(monkeypatch, mock_db, scalar_
     assert web.role == "superadmin"
     assert web.user is admin
 
-    plain = User(id=uuid4(), email="u@example.com", status=UserStatus.active, password_hash="x")
+    plain = User(
+        id=uuid4(),
+        email="u@example.com",
+        status=UserStatus.active,
+        password_hash="x",
+        firebase_uid="firebase-mobile-uid",
+    )
     plain.role = "user"
     monkeypatch.setattr(
         security_auth.jwt,
         "decode",
-        lambda token, secret, algorithms: {"type": "access", "sub": str(plain.id)},
+        lambda token, secret, algorithms: (_ for _ in ()).throw(Exception("not local jwt")),
+    )
+    monkeypatch.setattr(
+        "core.auth.services.verify_firebase_token",
+        lambda token, check_revoked=True: {"uid": "firebase-mobile-uid", "email": plain.email},
     )
     request2 = SimpleNamespace(state=SimpleNamespace(), headers={})
+    creds_mobile = HTTPAuthorizationCredentials(scheme="Bearer", credentials="firebase-id-token")
     db2 = mock_db(scalar_result(plain))
-    mobile = await security_auth.authenticate_request(request2, creds, db2)
+    mobile = await security_auth.authenticate_request(request2, creds_mobile, db2)
     assert mobile.client_type == "mobile"
     assert mobile.user is plain
     assert request2.state.client_type == "mobile"

@@ -565,7 +565,7 @@ async def list_feature_flags(
     db: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user_or_superadmin),
 ) -> ApiResponse:
-    """Return all platform feature flags for authenticated app users and superadmins."""
+    """Return feature flags: app users (mobile JWT) or superadmin (JWT + RSA)."""
     _ = current_user
     return ApiResponse(
         message="Feature flags fetched successfully",

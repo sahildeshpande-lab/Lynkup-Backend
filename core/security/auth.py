@@ -134,16 +134,40 @@ async def _verify_mobile_identity(
     credentials: HTTPAuthorizationCredentials,
     db: AsyncSession,
 ) -> User:
-    """Resolve mobile/app user from local user JWT or Firebase ID token."""
-    return await get_current_user(credentials, db)
+    """Resolve mobile/app user from Firebase ID token only."""
+    try:
+        from core.auth.services import verify_firebase_token
+
+        decoded = verify_firebase_token(credentials.credentials, check_revoked=True)
+    except Exception as exc:
+        raise ApiError("Invalid access token") from exc
+
+    firebase_uid = decoded.get("uid")
+    if not firebase_uid:
+        raise ApiError("Invalid Firebase credentials")
+
+    stmt = select(User).options(selectinload(User.roles)).where(User.firebase_uid == firebase_uid)
+    user = (await db.execute(stmt)).scalar_one_or_none()
+    if not user:
+        try:
+            user = await complete_firebase_registration(decoded, db)
+        except AccountExistsException as exc:
+            raise ApiError(f"User already registered via {exc.registration_type}")
+    elif not firebase_email_matches_user(decoded, user):
+        raise ApiError(SOCIAL_EMAIL_MISMATCH_MESSAGE)
+
+    _ensure_active_user(user)
+    return user
 
 
-async def _verify_mobile_request_proof(request: Request, user: User) -> None:
-    """Mobile request proof: timestamp + nonce + HMAC.
-
-    Not enforced yet — identity-only until mobile HMAC signing ships.
-    """
-    _ = (request, user)
+# ---------------------------------------------------------------------------
+# Mobile HMAC request signing — disabled. Mobile auth is Firebase idToken only.
+# Re-enable when mobile clients ship timestamp/nonce/HMAC headers.
+# ---------------------------------------------------------------------------
+# async def _verify_mobile_request_proof(request: Request, user: User) -> None:
+#     """Mobile request proof: timestamp + nonce + HMAC."""
+#     _ = (request, user)
+#     raise ApiError("Mobile request signing is not enabled")
 
 
 async def _authenticate_mobile(
@@ -151,12 +175,12 @@ async def _authenticate_mobile(
     credentials: HTTPAuthorizationCredentials,
     db: AsyncSession,
 ) -> AuthenticatedRequest:
-    """Mobile: Firebase/user JWT (+ future timestamp/nonce/HMAC)."""
+    """Mobile: Firebase ID token only (HMAC commented out)."""
     user = await _verify_mobile_identity(credentials, db)
     if user.role != "user":
         # Staff must use the web admin JWT + RSA path on shared routes.
         raise ApiError("Session expired. Please sign in again.")
-    await _verify_mobile_request_proof(request, user)
+    # await _verify_mobile_request_proof(request, user)  # HMAC disabled
     mark_client_type(request, CLIENT_TYPE_MOBILE)
     return AuthenticatedRequest(
         client_type=CLIENT_TYPE_MOBILE,
@@ -179,8 +203,7 @@ async def authenticate_request(
     ----
     1. If Bearer is an admin access JWT (staff + ``session_id``):
        verify JWT → session → timestamp/nonce/RSA → ``client_type=web``.
-    2. Else if Bearer is Firebase / app-user JWT:
-       verify identity → (future HMAC) → ``client_type=mobile``.
+    2. Else Firebase ID token → ``client_type=mobile`` (no HMAC).
     3. Otherwise reject.
     """
     if not credentials:
@@ -200,18 +223,8 @@ async def authenticate_request(
         if allowed_roles is not None and peeked_user.role not in allowed_roles:
             raise ApiError("Insufficient permissions")
         raise ApiError("Session expired. Please sign in again.")
-    elif peeked_user is not None and peeked_user.role == "user":
-        _ensure_active_user(peeked_user)
-        await _verify_mobile_request_proof(request, peeked_user)
-        mark_client_type(request, CLIENT_TYPE_MOBILE)
-        auth = AuthenticatedRequest(
-            client_type=CLIENT_TYPE_MOBILE,
-            user_id=peeked_user.id,
-            role=peeked_user.role,
-            user=peeked_user,
-        )
     else:
-        # Firebase / non-local Bearer → mobile identity path.
+        # Mobile / non-admin Bearer → Firebase ID token only (not local user JWT).
         auth = await _authenticate_mobile(request, credentials, db)
 
     if allowed_roles is not None and auth.role not in allowed_roles:
@@ -223,46 +236,10 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
     db: AsyncSession = Depends(get_session),
 ) -> User:
+    """App-user identity via Firebase ID token only (no local JWT, no HMAC)."""
     if not credentials:
         raise ApiError("Missing access token")
-
-    # Try local JWT decoding first
-    try:
-        decoded = jwt.decode(credentials.credentials, auth_settings.jwt_secret, algorithms=[auth_settings.jwt_algorithm])
-        if decoded.get("type") == "access":
-            stmt = select(User).options(selectinload(User.roles)).where(User.id == decoded.get("sub"))
-            user = (await db.execute(stmt)).scalar_one_or_none()
-            if user:
-                _ensure_active_user(user)
-                return user
-    except ApiError:
-        raise
-    except Exception:  # nosec B110 -- best-effort auth fallback
-        pass
-
-    # Fallback to Firebase
-    try:
-        from core.auth.services import verify_firebase_token
-        decoded = verify_firebase_token(credentials.credentials, check_revoked=True)
-    except Exception as exc:
-        raise ApiError("Invalid access token") from exc
-
-    firebase_uid = decoded.get("uid")
-    if not firebase_uid:
-        raise ApiError("Invalid Firebase credentials")
-
-    stmt = select(User).options(selectinload(User.roles)).where(User.firebase_uid == firebase_uid)
-    user = (await db.execute(stmt)).scalar_one_or_none()
-    if not user:
-        try:
-            user = await complete_firebase_registration(decoded, db)
-        except AccountExistsException as exc:
-            raise ApiError(f"User already registered via {exc.registration_type}")
-    elif not firebase_email_matches_user(decoded, user):
-        raise ApiError(SOCIAL_EMAIL_MISMATCH_MESSAGE)
-
-    _ensure_active_user(user)
-    return user
+    return await _verify_mobile_identity(credentials, db)
 
 
 async def get_current_admin(

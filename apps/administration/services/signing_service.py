@@ -229,6 +229,9 @@ async def revoke_signing_key(
 
 
 def validate_origin(request: Request) -> None:
+    """Enforce ADMIN_ALLOWED_ORIGINS in production/staging; skip in development."""
+    if not auth_settings.is_production_like:
+        return
     allowed = auth_settings.admin_allowed_origin_list
     if not allowed:
         raise ApiError(GENERIC_AUTH_FAILURE)

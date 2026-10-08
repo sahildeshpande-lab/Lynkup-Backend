@@ -34,21 +34,12 @@ async def lifespan(app: FastAPI):
         logger.info(f"Initialized database at {db_settings.db_host}")
 
     from core.email.config import settings as email_settings
+    from apps.recommendations.config import settings as recommendation_settings
+    from apps.recommendations.services.model_registry import get_registry
 
-    # Skip spaCy/KeyBERT/torch warm-up so low-memory Render instances can boot
-    # for admin RSA auth testing. Re-enable when ML deps are restored in requirements.
-    skip_recommendation_models = True
-    if skip_recommendation_models:
-        logger.warning(
-            "[%s] Skipping recommendation model initialization "
-            "(spaCy/KeyBERT disabled for lean deploy).",
-            _timestamp(),
-        )
-        app.state.recommendation_models = None
-    else:
+    if recommendation_settings.load_models_on_startup:
         logger.info("[%s] Importing recommendation model registry...", _timestamp())
         from apps.recommendations.services import algorithm as recommendation_algorithm
-        from apps.recommendations.services.model_registry import get_registry
 
         logger.info(
             "[%s] Recommendation model registry imported successfully.",
@@ -87,14 +78,20 @@ async def lifespan(app: FastAPI):
                 time.perf_counter() - models_init_started,
             )
             raise
-
-        app.state.recommendation_models = get_registry()
-
+    else:
         logger.info(
-            "[%s] Recommendation startup phase completed (Total: %.2f sec).",
+            "[%s] Skipping spaCy/KeyBERT startup load "
+            "(RECOMMENDATION_LOAD_MODELS_ON_STARTUP=false).",
             _timestamp(),
-            time.perf_counter() - startup_started,
         )
+
+    app.state.recommendation_models = get_registry()
+
+    logger.info(
+        "[%s] Recommendation startup phase completed (Total: %.2f sec).",
+        _timestamp(),
+        time.perf_counter() - startup_started,
+    )
 
     if email_settings.is_sendgrid_configured:
         logger.info("SendGrid email delivery is configured.")

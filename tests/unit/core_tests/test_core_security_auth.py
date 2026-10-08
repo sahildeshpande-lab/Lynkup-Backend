@@ -71,16 +71,17 @@ async def test_get_current_user_failures() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_current_user_db_states() -> None:
+async def test_get_current_user_db_states(monkeypatch) -> None:
     try:
         await init_db()
 
+        firebase_uid = f"uid-{uuid.uuid4()}"
         # Seed user
         async with async_session_factory() as session:
             user_uuid = uuid.uuid4()
             user = User(
                 id=user_uuid,
-                firebase_uid=f"uid-{uuid.uuid4()}",
+                firebase_uid=firebase_uid,
                 email="user_auth_sec_test@example.com",
                 role="user",
                 status="active",
@@ -88,16 +89,16 @@ async def test_get_current_user_db_states() -> None:
             session.add(user)
             await session.commit()
 
-        # Generate valid access token
-        payload_access = {
-            "sub": str(user_uuid),
-            "type": "access",
-            "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp())
-        }
-        token_access = jwt.encode(payload_access, auth_settings.jwt_secret, algorithm=auth_settings.jwt_algorithm)
-        creds_access = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token_access)
+        monkeypatch.setattr(
+            "core.auth.services.verify_firebase_token",
+            lambda token, check_revoked=True: {
+                "uid": firebase_uid,
+                "email": "user_auth_sec_test@example.com",
+            },
+        )
+        creds_access = HTTPAuthorizationCredentials(scheme="Bearer", credentials="firebase-id-token")
 
-        # 1. Success active user
+        # 1. Success active user (Firebase idToken)
         async with async_session_factory() as session:
             db_user = await get_current_user(creds_access, session)
             assert db_user.id == user_uuid

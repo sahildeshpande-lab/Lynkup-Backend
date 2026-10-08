@@ -23,7 +23,8 @@ class AdminSession(SQLModel, table=True):
     Distinct from user_id, access JWT, and refresh token values.
     Created at admin login; preserved across access-token refresh.
     ``expires_at`` tracks the access-token window and slides forward on refresh.
-    Ends on logout, password change/reset, refresh-token reuse, or missed refresh.
+    On logout / password change / refresh reuse the row (and signing keys) are
+    hard-deleted — not soft-revoked.
     """
 
     __tablename__ = "admin_sessions"

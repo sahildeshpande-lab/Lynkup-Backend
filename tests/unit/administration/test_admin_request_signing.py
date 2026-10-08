@@ -183,7 +183,8 @@ def _signing_store_isolation(monkeypatch):
         "apps.administration.services.signing_store.close_redis_client",
         AsyncMock(),
     )
-    # Isolate from local .env ADMIN_ALLOWED_ORIGINS / prior test mutations.
+    # Isolate from local .env; production so Origin allowlist is enforced in tests.
+    monkeypatch.setattr(auth_settings, "environment", "production")
     monkeypatch.setattr(auth_settings, "admin_allowed_origins", TEST_ALLOWED_ORIGIN)
     yield
 
@@ -420,7 +421,7 @@ async def test_revoked_admin_session_is_inactive():
 
 
 @pytest.mark.asyncio
-async def test_admin_logout_revokes_session_and_keys():
+async def test_admin_logout_hard_deletes_session_and_keys():
     from apps.administration.services.auth_service import admin_logout
 
     user = _admin_user()
@@ -432,9 +433,10 @@ async def test_admin_logout_revokes_session_and_keys():
     result = await admin_logout(user, db, request=request)
 
     assert result.status is True
+    assert result.data["sessionId"] == str(session.id)
     assert session.status == AdminSessionStatus.REVOKED.value
-    assert session.revoked_at is not None
-    assert db.execute.await_count >= 1
+    # Keys delete + session delete
+    assert db.execute.await_count >= 2
     db.commit.assert_awaited()
 
 
@@ -621,13 +623,14 @@ async def test_revoked_session_rejects_signed_request_via_loader():
 
 
 @pytest.mark.asyncio
-async def test_revoke_session_marks_keys_revoked():
+async def test_revoke_session_hard_deletes_keys_and_session():
     user = _admin_user()
     session = _session(user.id)
     db = _db_returning(None)
     await revoke_admin_session(db, session, revoke_keys=True, emit_event=True)
     assert session.status == AdminSessionStatus.REVOKED.value
-    assert db.execute.await_count >= 1
+    # signing-key DELETE + session DELETE (event logging may not hit execute)
+    assert db.execute.await_count >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -835,6 +838,7 @@ async def test_invalid_origin_and_rate_limit(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_empty_allowed_origins_rejects(monkeypatch):
+    monkeypatch.setattr(auth_settings, "environment", "production")
     monkeypatch.setattr(auth_settings, "admin_allowed_origins", "")
     private_key, public_pem = generate_rsa_key_pair_for_tests()
     user = _admin_user()
@@ -849,6 +853,24 @@ async def test_empty_allowed_origins_rejects(monkeypatch):
             db,
             session_id=session.id,
         )
+
+
+@pytest.mark.asyncio
+async def test_development_skips_origin_check(monkeypatch):
+    monkeypatch.setattr(auth_settings, "environment", "development")
+    monkeypatch.setattr(auth_settings, "admin_allowed_origins", "")
+    private_key, public_pem = generate_rsa_key_pair_for_tests()
+    user = _admin_user()
+    session = _session(user.id)
+    key = _signing_key(user.id, session.id, public_pem)
+    headers, _ = _sign_headers(private_key, session_id=session.id, key_id=key.key_id)
+    db = _db_returning(key)
+    await verify_signed_admin_request(
+        _mock_request(headers=headers, origin=None),
+        user,
+        db,
+        session_id=session.id,
+    )
 
 
 @pytest.mark.asyncio

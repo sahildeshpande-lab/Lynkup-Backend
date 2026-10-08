@@ -5,7 +5,6 @@ import unicodedata
 from collections import Counter
 from typing import Any, Iterable
 
-import pandas as pd
 from pydantic import ValidationError
 from rapidfuzz import fuzz, process
 
@@ -29,8 +28,12 @@ def is_blank(value: Any) -> bool:
     if value is None:
         return True
     try:
+        import pandas as pd
+
         if pd.isna(value):
             return True
+    except ImportError:
+        pass
     except (TypeError, ValueError):
         pass
     if isinstance(value, str) and not value.strip():

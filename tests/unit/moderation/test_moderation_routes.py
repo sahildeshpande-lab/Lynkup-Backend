@@ -5,9 +5,9 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from apps.administration.dependencies import require_signed_superadmin
 from apps.moderation import routes as moderation_routes
 from core.database.session import get_session
-from core.security.auth import get_current_superadmin
 from entrypoints.api import app
 
 client = TestClient(app)
@@ -27,12 +27,12 @@ async def _override_superadmin():
 
 def setup_module() -> None:
     app.dependency_overrides[get_session] = _override_session
-    app.dependency_overrides[get_current_superadmin] = _override_superadmin
+    app.dependency_overrides[require_signed_superadmin] = _override_superadmin
 
 
 def teardown_module() -> None:
     app.dependency_overrides.pop(get_session, None)
-    app.dependency_overrides.pop(get_current_superadmin, None)
+    app.dependency_overrides.pop(require_signed_superadmin, None)
 
 
 def test_get_moderation_words_route(monkeypatch) -> None:

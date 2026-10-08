@@ -206,12 +206,52 @@ def custom_openapi() -> dict:
         return app.openapi_schema
     schema = _original_openapi()
 
-    schema.setdefault("components", {}).setdefault("securitySchemes", {})["BearerAuth"] = {
+    schemes = schema.setdefault("components", {}).setdefault("securitySchemes", {})
+    schemes["BearerAuth"] = {
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "JWT",
-        "description": "Use Firebase ID token in the Authorization header (Format: Bearer <token>).",
+        "description": (
+            "Bearer token: Firebase ID token (mobile) or Web Admin access JWT. "
+            "Signed admin routes also need the Admin* header schemes below."
+        ),
     }
+    # Ensure Swagger Authorize shows Web Admin RSA signing headers
+    # (also registered via APIKeyHeader on require_admin_signed_request).
+    admin_signing_schemes = {
+        "AdminKeyId": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-Key-ID",
+            "description": "Signing key UUID from key-register / login.",
+        },
+        "AdminSessionId": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-Session-Id",
+            "description": "Admin session UUID from login (must match JWT session).",
+        },
+        "AdminTimestamp": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-Timestamp",
+            "description": "Unix epoch seconds (within signing timestamp tolerance).",
+        },
+        "AdminNonce": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-Nonce",
+            "description": "Unique base64url nonce per request.",
+        },
+        "AdminSignature": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-Signature",
+            "description": "Base64 RSA-PSS/SHA-256 signature of the canonical request.",
+        },
+    }
+    for name, definition in admin_signing_schemes.items():
+        schemes[name] = {**schemes.get(name, {}), **definition}
 
     _patch_multipart_file_schemas(schema)
 

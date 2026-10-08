@@ -37,6 +37,16 @@ class RecommendationSettings(BaseSettings):
             "of downloading on every startup."
         ),
     )
+    load_models_on_startup: bool = Field(
+        default=False,
+        alias="RECOMMENDATION_LOAD_MODELS_ON_STARTUP",
+        description=(
+            "When true, load spaCy and KeyBERT during API startup. "
+            "Default false for lean deploys (e.g. Render 512Mi) that only need "
+            "admin RSA auth; enable on larger instances when keyword extraction "
+            "is required."
+        ),
+    )
 
 
 settings = RecommendationSettings()

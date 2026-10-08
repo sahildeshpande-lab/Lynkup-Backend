@@ -11,11 +11,9 @@ from apps.moderation.services import (
     list_moderation_history_service,
     update_moderation_words,
 )
+from apps.administration.dependencies import require_signed_superadmin
 from core.database.session import get_session
-from core.security.auth import (
-    get_current_superadmin,
-    get_current_user_moderator_or_superadmin,
-)
+from core.security.auth import get_current_user_moderator_or_superadmin
 
 router = APIRouter(tags=["Moderation"])
 
@@ -32,7 +30,7 @@ async def get_moderation_words_route(
 async def update_moderation_words_route(
     payload: UpdateModerationWordsRequest,
     db: AsyncSession = Depends(get_session),
-    current_user=Depends(get_current_superadmin),
+    current_user=Depends(require_signed_superadmin),
 ) -> ApiResponse:
     data = await update_moderation_words(
         payload,

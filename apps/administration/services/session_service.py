@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.accounts.db_models import SecurityEventType, User
@@ -14,7 +14,6 @@ from apps.administration.db_models import (
     AdminSession,
     AdminSessionStatus,
     AdminSigningKey,
-    AdminSigningKeyStatus,
 )
 from common.exceptions import ApiError
 from core.auth.config import settings as auth_settings
@@ -199,36 +198,34 @@ async def revoke_admin_session(
     revoke_keys: bool = True,
     emit_event: bool = True,
 ) -> None:
-    now = utc_now()
-    if session.status != AdminSessionStatus.REVOKED.value:
-        session.status = AdminSessionStatus.REVOKED.value
-        session.revoked_at = now
-        session.updated_at = now
-        session.refresh_jti = None
-        session.expires_at = now
-        db.add(session)
+    """Hard-delete an admin session and its signing keys.
 
-    if revoke_keys:
-        await db.execute(
-            update(AdminSigningKey)
-            .where(
-                AdminSigningKey.session_id == session.id,
-                AdminSigningKey.status == AdminSigningKeyStatus.ACTIVE.value,
-            )
-            .values(
-                status=AdminSigningKeyStatus.REVOKED.value,
-                revoked_at=now,
-                updated_at=now,
-            )
-        )
+    Keys are removed first to satisfy the ``admin_signing_keys.session_id`` FK.
+    No revoked session row is retained.
+    """
+    session_id = session.id
+    user_id = session.user_id
+    now = utc_now()
 
     if emit_event:
         await log_security_event(
             db,
-            session.user_id,
+            user_id,
             SecurityEventType.SESSION_REVOKED,
-            event_metadata={"session_id": str(session.id)},
+            event_metadata={"session_id": str(session_id)},
         )
+
+    # Always delete keys before the session row (FK). ``revoke_keys`` kept for API compat.
+    _ = revoke_keys
+    await db.execute(delete(AdminSigningKey).where(AdminSigningKey.session_id == session_id))
+    await db.execute(delete(AdminSession).where(AdminSession.id == session_id))
+
+    # Mark the in-memory object so callers (e.g. logout response) still see revoked state.
+    session.status = AdminSessionStatus.REVOKED.value
+    session.revoked_at = now
+    session.updated_at = now
+    session.refresh_jti = None
+    session.expires_at = now
 
 
 async def revoke_all_admin_sessions_for_user(db: AsyncSession, user_id: UUID) -> None:

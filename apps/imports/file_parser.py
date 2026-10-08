@@ -2,14 +2,27 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
-
-import pandas as pd
+from typing import TYPE_CHECKING, Any
 
 from common.exceptions import ApiError
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 MAX_IMPORT_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_ROWS = 10_000
 ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
+
+
+def _pandas():
+    """Lazy import so lean deploys without pandas can still boot the API."""
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ApiError(
+            "Import feature is unavailable because pandas is not installed"
+        ) from exc
+    return pd
 
 
 def _unsupported_file_message() -> str:
@@ -17,6 +30,7 @@ def _unsupported_file_message() -> str:
 
 
 def read_import_dataframe(filename: str | None, content: bytes) -> pd.DataFrame:
+    pd = _pandas()
     if not content:
         raise ApiError("File is empty")
     if len(content) > MAX_IMPORT_BYTES:
@@ -77,8 +91,14 @@ def iter_records(dataframe: pd.DataFrame) -> list[tuple[int, dict]]:
     return records
 
 
-def _is_empty_cell(value) -> bool:
+def _is_empty_cell(value: Any) -> bool:
     try:
-        return value is None or (not isinstance(value, (str, bytes)) and pd.isna(value))
+        if value is None:
+            return True
+        if isinstance(value, (str, bytes)):
+            return False
+        return bool(_pandas().isna(value))
     except (TypeError, ValueError):
+        return False
+    except ApiError:
         return False
