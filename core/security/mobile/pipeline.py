@@ -15,7 +15,7 @@ from core.security.mobile.request_proof import verify_mobile_request_proof
 from common.exceptions import ApiError
 from apps.accounts.db_models import SecurityEventType
 from core.security.mobile.audit import emit_mobile_security_event
-from core.security.mobile.store import GENERIC_AUTH_FAILURE
+from core.security.mobile.store import auth_failure
 
 
 async def run_mobile_security_pipeline(
@@ -111,7 +111,7 @@ async def run_mobile_security_pipeline(
             request=request,
             metadata={"reason": "unknown_platform", "device_id": ctx.device_id},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("unknown_platform")
 
     # 9–11. Timestamp / nonce / request proof (unless already applied by authenticate_request)
     if include_proof and not proof_already_applied:

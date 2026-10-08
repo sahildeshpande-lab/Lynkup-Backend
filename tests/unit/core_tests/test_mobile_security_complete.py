@@ -209,7 +209,7 @@ def test_play_integrity_wrong_package():
         },
         "deviceIntegrity": {"deviceRecognitionVerdict": ["MEETS_DEVICE_INTEGRITY"]},
     }
-    with pytest.raises(ApiError):
+    with pytest.raises(ApiError, match="package_mismatch"):
         validate_integrity_payload(
             payload,
             expected_package="com.app",
@@ -229,7 +229,7 @@ def test_play_integrity_wrong_cert():
         },
         "deviceIntegrity": {"deviceRecognitionVerdict": ["MEETS_DEVICE_INTEGRITY"]},
     }
-    with pytest.raises(ApiError):
+    with pytest.raises(ApiError, match="certificate_digest_mismatch"):
         validate_integrity_payload(
             payload,
             expected_package="com.app",
@@ -249,7 +249,7 @@ def test_play_integrity_insufficient_verdict():
         },
         "deviceIntegrity": {"deviceRecognitionVerdict": ["MEETS_VIRTUAL_INTEGRITY"]},
     }
-    with pytest.raises(ApiError):
+    with pytest.raises(ApiError, match="app_recognition_rejected"):
         validate_integrity_payload(
             payload,
             expected_package="com.app",
@@ -268,7 +268,7 @@ def test_play_integrity_request_hash_mismatch():
         },
         "deviceIntegrity": {"deviceRecognitionVerdict": ["MEETS_DEVICE_INTEGRITY"]},
     }
-    with pytest.raises(ApiError):
+    with pytest.raises(ApiError, match="request_hash_mismatch"):
         validate_integrity_payload(
             payload,
             expected_package="com.app",
@@ -308,7 +308,7 @@ async def test_play_integrity_misconfigured_fails_closed(monkeypatch, mock_db):
         user=user,
     )
     with patch("core.security.mobile.play_integrity.emit_mobile_security_event", AsyncMock()):
-        with pytest.raises(ApiError):
+        with pytest.raises(ApiError, match="misconfigured"):
             await pi.verify_android_play_integrity(
                 mock_db(),
                 _request(headers={"X-Play-Integrity-Token": "tok"}),
@@ -400,7 +400,8 @@ async def test_pipeline_enabled_requires_device(monkeypatch, mock_db):
     with patch("core.security.mobile.device.emit_mobile_security_event", AsyncMock()):
         with pytest.raises(ApiError) as exc:
             await run_mobile_security_pipeline(_request(), _user(), mock_db())
-    assert exc.value.message == GENERIC_AUTH_FAILURE
+    assert exc.value.message.startswith(GENERIC_AUTH_FAILURE)
+    assert "missing_device_id" in exc.value.message
 
 
 # ---- Audit redaction ----

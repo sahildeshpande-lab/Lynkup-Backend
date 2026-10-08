@@ -9,10 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from apps.accounts.db_models import SecurityEventType, User, UserInstallation
-from common.exceptions import ApiError
 from core.security.mobile.audit import emit_mobile_security_event
 from core.security.mobile.request_proof import HEADER_DEVICE_ID
-from core.security.mobile.store import GENERIC_AUTH_FAILURE
+from core.security.mobile.store import auth_failure
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +42,7 @@ async def load_active_installation(
             request=request,
             metadata={"reason": "missing_device_id"},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("missing_device_id")
 
     stmt = select(UserInstallation).where(
         UserInstallation.user_id == user.id,
@@ -72,7 +71,7 @@ async def load_active_installation(
                 "device_id": device_id,
             },
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("unknown_or_foreign_device")
 
     if installation.user_id != user.id or installation.device_id != device_id:
         await emit_mobile_security_event(
@@ -82,7 +81,7 @@ async def load_active_installation(
             request=request,
             metadata={"reason": "user_device_mismatch", "device_id": device_id},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("user_device_mismatch")
 
     if not installation.is_active:
         await emit_mobile_security_event(
@@ -92,7 +91,7 @@ async def load_active_installation(
             request=request,
             metadata={"reason": "inactive_installation", "device_id": device_id},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("inactive_installation")
 
     await emit_mobile_security_event(
         db,

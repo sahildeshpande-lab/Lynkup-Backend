@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 from common.exceptions import ApiError
 from core.cache.redis_client import close_redis_client, get_redis_client
 from core.security.mobile.config import settings as mobile_settings
-from core.security.mobile.store import GENERIC_AUTH_FAILURE
+from core.security.mobile.store import auth_failure
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def _rate_key(*, user_id: UUID | str, device_id: str) -> str:
 async def _require_redis():
     client = await get_redis_client()
     if client is None:
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("redis_unavailable")
     return client
 
 
@@ -59,6 +59,6 @@ async def consume_mobile_rate_limit(*, user_id: UUID, device_id: str) -> bool:
         raise
     except Exception:
         logger.warning("Failed mobile rate-limit check in Redis", exc_info=True)
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("rate_limit_redis_failed")
     finally:
         await close_redis_client(client)

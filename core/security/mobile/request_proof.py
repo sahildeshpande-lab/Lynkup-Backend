@@ -43,7 +43,7 @@ from core.security.mobile.audit import emit_mobile_security_event
 from core.security.mobile.config import settings as mobile_settings
 from core.security.mobile.hmac_keys import hmac_key_from_installation
 from core.security.mobile.rate_limit import RATE_LIMIT_MESSAGE, consume_mobile_rate_limit
-from core.security.mobile.store import GENERIC_AUTH_FAILURE, claim_nonce
+from core.security.mobile.store import auth_failure, claim_nonce
 
 logger = logging.getLogger(__name__)
 
@@ -128,18 +128,18 @@ def _header(request: Request, name: str) -> str:
 
 def _parse_timestamp(raw: str) -> int:
     if not raw or not raw.isdigit():
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("timestamp_invalid")
     try:
         return int(raw)
     except ValueError as exc:
-        raise ApiError(GENERIC_AUTH_FAILURE) from exc
+        raise auth_failure("timestamp_invalid") from exc
 
 
 def _validate_timestamp(request_ts: int) -> None:
     now_ts = int(datetime.now(timezone.utc).timestamp())
     tolerance = max(0, int(mobile_settings.mobile_hmac_timestamp_tolerance_seconds))
     if abs(now_ts - request_ts) > tolerance:
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("timestamp_invalid")
 
 
 async def verify_mobile_request_proof(
@@ -172,7 +172,7 @@ async def verify_mobile_request_proof(
                 request=request,
                 metadata={"reason": "missing_proof_headers", "device_id": device_id or None},
             )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("missing_proof_headers")
 
     try:
         request_ts = _parse_timestamp(timestamp_raw)
@@ -209,7 +209,7 @@ async def verify_mobile_request_proof(
                 request=request,
                 metadata={"reason": "nonce_replay", "device_id": device_id},
             )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("nonce_replay")
 
     request_bound = bool(getattr(request.state, "mobile_request_bound", False))
     key = await resolve_device_hmac_key(user, device_id, installation=installation)
@@ -237,7 +237,7 @@ async def verify_mobile_request_proof(
                     request=request,
                     metadata={"reason": "invalid_hmac", "device_id": device_id},
                 )
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("invalid_hmac")
     elif request_bound:
         # Attestation already bound this request; HMAC optional until key issued.
         pass
@@ -255,7 +255,7 @@ async def verify_mobile_request_proof(
                 request=request,
                 metadata={"reason": "missing_hmac_key", "device_id": device_id},
             )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("missing_hmac_key")
 
     if not skip_rate_limit:
         try:

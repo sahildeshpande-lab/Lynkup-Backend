@@ -26,6 +26,20 @@ _INTEGRITY_NONCE_PREFIX = "mobile-security:integrity-nonce:"
 GENERIC_AUTH_FAILURE = "Request authentication failed"
 
 
+def auth_failure(reason: str) -> ApiError:
+    """Fail-closed auth error that still exposes a stable reason code to clients."""
+    reason_clean = (reason or "unknown").strip() or "unknown"
+    return ApiError(f"{GENERIC_AUTH_FAILURE}: {reason_clean}")
+
+
+def auth_failure_reason(message: str) -> str | None:
+    """Extract reason code from an ``auth_failure`` message, if present."""
+    prefix = f"{GENERIC_AUTH_FAILURE}: "
+    if message.startswith(prefix):
+        return message[len(prefix) :].strip() or None
+    return None
+
+
 def _nonce_key(*, user_id: UUID | str, device_id: str, nonce: str) -> str:
     return f"{_NONCE_PREFIX}{user_id}:{device_id}:{nonce}"
 
@@ -41,7 +55,7 @@ def _integrity_nonce_key(*, user_id: UUID | str, device_id: str, nonce: str) -> 
 async def require_redis():
     client = await get_redis_client()
     if client is None:
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("redis_unavailable")
     return client
 
 
@@ -65,7 +79,7 @@ async def claim_nonce(
         raise
     except Exception:
         logger.warning("Failed to claim mobile security nonce in Redis", exc_info=True)
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("nonce_claim_failed")
     finally:
         await close_redis_client(client)
 
@@ -81,7 +95,7 @@ async def store_attest_challenge(*, user_id: UUID, device_id: str, challenge: st
         raise
     except Exception:
         logger.warning("Failed to store App Attest challenge in Redis", exc_info=True)
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("attest_challenge_store_failed")
     finally:
         await close_redis_client(client)
 
@@ -102,7 +116,7 @@ async def pop_attest_challenge(*, user_id: UUID, device_id: str) -> str | None:
         raise
     except Exception:
         logger.warning("Failed to pop App Attest challenge from Redis", exc_info=True)
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("attest_challenge_pop_failed")
     finally:
         await close_redis_client(client)
 
@@ -117,7 +131,7 @@ async def peek_attest_challenge(*, user_id: UUID, device_id: str) -> str | None:
         raise
     except Exception:
         logger.warning("Failed to read App Attest challenge from Redis", exc_info=True)
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("attest_challenge_peek_failed")
     finally:
         await close_redis_client(client)
 
@@ -139,7 +153,7 @@ async def claim_integrity_request_nonce(
         raise
     except Exception:
         logger.warning("Failed to claim Play Integrity nonce in Redis", exc_info=True)
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("integrity_nonce_claim_failed")
     finally:
         await close_redis_client(client)
 

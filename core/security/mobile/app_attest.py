@@ -26,7 +26,8 @@ from core.security.mobile.device import MobileSecurityContext, bind_mobile_devic
 from core.security.mobile.hmac_keys import ensure_installation_hmac_secret
 from core.security.mobile.request_proof import hash_request_body
 from core.security.mobile.store import (
-    GENERIC_AUTH_FAILURE,
+    auth_failure,
+    auth_failure_reason,
     generate_challenge_bytes,
     pop_attest_challenge,
     store_attest_challenge,
@@ -62,7 +63,7 @@ def _rp_id_hash(bundle_id: str) -> bytes:
 
 def _parse_auth_data(auth_data: bytes) -> dict[str, Any]:
     if len(auth_data) < 37:
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("invalid_auth_data")
     rp_id_hash = auth_data[0:32]
     flags = auth_data[32]
     counter = struct.unpack(">I", auth_data[33:37])[0]
@@ -80,9 +81,9 @@ def _cose_ec_public_key_to_uncompressed(cose_key: dict) -> bytes:
     x = cose_key.get(-2)
     y = cose_key.get(-3)
     if not isinstance(x, (bytes, bytearray)) or not isinstance(y, (bytes, bytearray)):
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("invalid_cose_key")
     if len(x) != 32 or len(y) != 32:
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("invalid_cose_key")
     return b"\x04" + bytes(x) + bytes(y)
 
 
@@ -124,28 +125,28 @@ def extract_public_key_from_attestation(attestation_b64: str, *, bundle_id: str)
         import cbor2
     except ImportError as exc:
         logger.error("cbor2 is required for App Attest")
-        raise ApiError(GENERIC_AUTH_FAILURE) from exc
+        raise auth_failure("cbor2_import_missing") from exc
 
     try:
         attestation = cbor2.loads(_b64url_decode(attestation_b64))
         if not isinstance(attestation, dict):
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("invalid_attestation_format")
         auth_data = attestation.get("authData")
         if not isinstance(auth_data, (bytes, bytearray)):
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("invalid_attestation_auth_data")
         parsed = _parse_auth_data(bytes(auth_data))
         if parsed["rp_id_hash"] != _rp_id_hash(bundle_id):
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("rp_id_hash_mismatch")
 
         rest = parsed["rest"]
         # Credential data: aaguid(16) + cred_len(2) + cred_id + cose_key
         if len(rest) < 18:
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("invalid_credential_data")
         cred_len = struct.unpack(">H", rest[16:18])[0]
         cose_bytes = rest[18 + cred_len :]
         cose_key = cbor2.loads(cose_bytes)
         if not isinstance(cose_key, dict):
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("invalid_cose_key")
         point = _cose_ec_public_key_to_uncompressed(cose_key)
         pem = _public_key_pem_from_uncompressed(point)
         return pem, int(parsed["counter"])
@@ -153,7 +154,7 @@ def extract_public_key_from_attestation(attestation_b64: str, *, bundle_id: str)
         raise
     except Exception:
         logger.warning("App Attest attestation parse failed", exc_info=True)
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("attestation_parse_failed")
 
 
 def verify_assertion_signature(
@@ -168,34 +169,34 @@ def verify_assertion_signature(
     try:
         import cbor2
     except ImportError as exc:
-        raise ApiError(GENERIC_AUTH_FAILURE) from exc
+        raise auth_failure("cbor2_import_missing") from exc
 
     try:
         assertion = cbor2.loads(_b64url_decode(assertion_b64))
         if not isinstance(assertion, dict):
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("invalid_assertion_format")
         auth_data = assertion.get("authenticatorData") or assertion.get("authData")
         signature = assertion.get("signature")
         if not isinstance(auth_data, (bytes, bytearray)) or not isinstance(
             signature, (bytes, bytearray)
         ):
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("invalid_assertion_fields")
         auth_data_b = bytes(auth_data)
         parsed = _parse_auth_data(auth_data_b)
         if parsed["rp_id_hash"] != expected_rp_id_hash:
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("rp_id_hash_mismatch")
         new_counter = int(parsed["counter"])
         if new_counter <= int(previous_counter):
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("stale_counter")
         message = auth_data_b + client_data_hash
         if not _verify_ecdsa_p256(public_key_pem, message, bytes(signature)):
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("invalid_assertion_signature")
         return new_counter
     except ApiError:
         raise
     except Exception:
         logger.warning("App Attest assertion verification failed", exc_info=True)
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("assertion_verification_failed")
 
 
 async def create_app_attest_challenge(
@@ -206,7 +207,7 @@ async def create_app_attest_challenge(
     if not mobile_settings.ios_attest_enabled:
         raise ApiError("iOS App Attest is not enabled")
     if not _bundle_id():
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("misconfigured")
 
     device_id = extract_device_id(request)
     if not device_id:
@@ -217,7 +218,7 @@ async def create_app_attest_challenge(
             request=request,
             metadata={"reason": "missing_device_id"},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("missing_device_id")
 
     # Installation must already exist (created at login/signup).
     ctx = await bind_mobile_device(db, request, user)
@@ -251,7 +252,7 @@ async def register_app_attest_key(
         raise ApiError("iOS App Attest is not enabled")
     bundle_id = _bundle_id()
     if not bundle_id:
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("misconfigured")
 
     ctx = await bind_mobile_device(db, request, user)
     challenge = await pop_attest_challenge(user_id=user.id, device_id=ctx.device_id)
@@ -263,7 +264,7 @@ async def register_app_attest_key(
             request=request,
             metadata={"reason": "missing_or_expired_challenge", "device_id": ctx.device_id},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("missing_or_expired_challenge")
 
     key_id_clean = (key_id or "").strip()
     if not key_id_clean or not (attestation_object or "").strip():
@@ -274,20 +275,21 @@ async def register_app_attest_key(
             request=request,
             metadata={"reason": "missing_attestation", "device_id": ctx.device_id},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("missing_attestation")
 
     try:
         pem, counter = extract_public_key_from_attestation(
             attestation_object,
             bundle_id=bundle_id,
         )
-    except ApiError:
+    except ApiError as exc:
+        reason = auth_failure_reason(exc.message) or "invalid_attestation"
         await emit_mobile_security_event(
             db,
             user.id,
             SecurityEventType.IOS_ATTEST_FAILED,
             request=request,
-            metadata={"reason": "invalid_attestation", "device_id": ctx.device_id},
+            metadata={"reason": reason, "device_id": ctx.device_id},
         )
         raise
 
@@ -347,7 +349,7 @@ async def verify_ios_app_attest_assertion(
             request=request,
             metadata={"reason": "misconfigured", "device_id": ctx.device_id},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("misconfigured")
 
     installation = ctx.installation
     key_id_header = (request.headers.get(HEADER_APP_ATTEST_KEY_ID) or "").strip()
@@ -364,7 +366,7 @@ async def verify_ios_app_attest_assertion(
             request=request,
             metadata={"reason": "not_registered", "device_id": ctx.device_id},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("not_registered")
 
     if key_id_header and key_id_header != stored_key_id:
         await emit_mobile_security_event(
@@ -374,7 +376,7 @@ async def verify_ios_app_attest_assertion(
             request=request,
             metadata={"reason": "key_id_mismatch", "device_id": ctx.device_id},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("key_id_mismatch")
 
     # Bind assertion to this request's body hash (request integrity).
     client_data_hash = hashlib.sha256(hash_request_body(body).encode("ascii")).digest()
@@ -387,7 +389,8 @@ async def verify_ios_app_attest_assertion(
             expected_rp_id_hash=_rp_id_hash(bundle_id),
             previous_counter=previous_counter,
         )
-    except ApiError:
+    except ApiError as exc:
+        reason = auth_failure_reason(exc.message) or "assertion_failed"
         # Distinguish likely replay for auditing.
         event = SecurityEventType.IOS_ASSERTION_REPLAY
         await emit_mobile_security_event(
@@ -395,15 +398,14 @@ async def verify_ios_app_attest_assertion(
             user.id,
             event,
             request=request,
-            metadata={"reason": "assertion_failed", "device_id": ctx.device_id},
+            metadata={"reason": reason, "device_id": ctx.device_id},
         )
-        # Also emit generic fail
         await emit_mobile_security_event(
             db,
             user.id,
             SecurityEventType.IOS_ATTEST_FAILED,
             request=request,
-            metadata={"reason": "assertion_failed", "device_id": ctx.device_id},
+            metadata={"reason": reason, "device_id": ctx.device_id},
         )
         raise
 
@@ -435,7 +437,7 @@ async def verify_ios_app_attest_assertion(
             request=request,
             metadata={"reason": "counter_race", "device_id": ctx.device_id},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("counter_race")
 
     installation.app_attest_counter = new_counter
     installation.app_attest_last_verified_at = _utc_now()

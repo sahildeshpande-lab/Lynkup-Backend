@@ -20,7 +20,11 @@ from core.security.mobile.config import settings as mobile_settings
 from core.security.mobile.device import MobileSecurityContext
 from core.security.mobile.hmac_keys import ensure_installation_hmac_secret
 from core.security.mobile.request_proof import hash_request_body
-from core.security.mobile.store import GENERIC_AUTH_FAILURE, claim_integrity_request_nonce
+from core.security.mobile.store import (
+    auth_failure,
+    auth_failure_reason,
+    claim_integrity_request_nonce,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,24 +92,24 @@ def _load_service_account_info() -> dict[str, Any]:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
             logger.warning("FIREBASE_CREDENTIALS_JSON is not valid JSON")
-            raise ApiError(GENERIC_AUTH_FAILURE) from exc
+            raise auth_failure("invalid_credentials_json") from exc
         if not isinstance(data, dict):
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("invalid_credentials_json")
         return data
 
     cred_file = _resolve_firebase_credentials_path()
     if cred_file is None or not cred_file.is_file():
         logger.warning("Firebase credentials not available for Play Integrity")
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("missing_credentials")
 
     try:
         with open(cred_file, encoding="utf-8") as handle:
             data = json.load(handle)
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("Failed to load Firebase credentials file for Play Integrity")
-        raise ApiError(GENERIC_AUTH_FAILURE) from exc
+        raise auth_failure("credentials_load_failed") from exc
     if not isinstance(data, dict):
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("invalid_credentials_json")
     return data
 
 
@@ -123,7 +127,7 @@ def _get_authorized_session():
         from google.oauth2 import service_account
     except ImportError as exc:
         logger.error("google-auth is required for Play Integrity verification")
-        raise ApiError(GENERIC_AUTH_FAILURE) from exc
+        raise auth_failure("google_auth_import_missing") from exc
 
     info = _load_service_account_info()
     fingerprint = _credentials_fingerprint(info)
@@ -159,6 +163,31 @@ def play_integrity_decode_url(package_name: str) -> str:
     )
 
 
+def extract_integrity_token(request: Request, body: bytes) -> str:
+    """Read token from ``X-Play-Integrity-Token`` or JSON body fields."""
+    token = (request.headers.get(HEADER_PLAY_INTEGRITY_TOKEN) or "").strip()
+    if token:
+        return token
+    if not body:
+        return ""
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    for key in (
+        "integrityToken",
+        "integrity_token",
+        "playIntegrityToken",
+        "play_integrity_token",
+    ):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 async def decode_integrity_token(token: str, package_name: str) -> dict[str, Any]:
     """Call Google Play Integrity decodeIntegrityToken. Fail closed on errors."""
     try:
@@ -175,17 +204,17 @@ async def decode_integrity_token(token: str, package_name: str) -> dict[str, Any
                 "Play Integrity decode failed status=%s",
                 response.status_code,
             )
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure(f"decode_http_{response.status_code}")
         payload = response.json()
         token_payload = payload.get("tokenPayloadExternal") or payload
         if not isinstance(token_payload, dict):
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("invalid_decode_payload")
         return token_payload
     except ApiError:
         raise
     except Exception:
         logger.warning("Play Integrity Google verification unavailable", exc_info=True)
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("google_verification_unavailable")
 
 
 def _request_hash_hex(request: Request, body: bytes) -> str:
@@ -197,7 +226,7 @@ def validate_integrity_payload(
     payload: dict[str, Any],
     *,
     expected_package: str,
-    expected_digests: list[str],
+    expected_digests: list[str] | None,
     expected_request_hash: str,
 ) -> str:
     """Validate package, cert digest, request hash, and integrity verdicts.
@@ -210,15 +239,15 @@ def validate_integrity_payload(
 
     pkg = (app_integrity.get("packageName") or request_details.get("requestPackageName") or "").strip()
     if pkg != expected_package:
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("package_mismatch")
 
     certs = app_integrity.get("certificateSha256Digest") or []
     if isinstance(certs, str):
         certs = [certs]
     normalized_certs = {_normalize_digest(c) for c in certs}
-    expected = {_normalize_digest(d) for d in expected_digests}
-    if not expected or not normalized_certs.intersection(expected):
-        raise ApiError(GENERIC_AUTH_FAILURE)
+    expected = {_normalize_digest(d) for d in (expected_digests or [])}
+    if expected and not normalized_certs.intersection(expected):
+        raise auth_failure("certificate_digest_mismatch")
 
     # requestHash may be hex or base64 depending on client encoding; accept hex match.
     token_hash = (
@@ -231,21 +260,21 @@ def validate_integrity_payload(
     if not token_hash_norm or token_hash_norm != expected_norm:
         # Also accept raw equality for base64url hashes clients may send.
         if str(token_hash).strip() != expected_request_hash.strip():
-            raise ApiError(GENERIC_AUTH_FAILURE)
+            raise auth_failure("request_hash_mismatch")
 
     app_recognition = (app_integrity.get("appRecognitionVerdict") or "").strip().upper()
-    if app_recognition and app_recognition not in _ACCEPTABLE_APP_RECOGNITION:
-        # Empty is treated as fail — require a recognized verdict when present.
-        raise ApiError(GENERIC_AUTH_FAILURE)
     if not app_recognition:
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("missing_app_recognition")
+    if app_recognition not in _ACCEPTABLE_APP_RECOGNITION:
+        raise auth_failure(f"app_recognition_rejected:{app_recognition}")
 
     verdicts = device_integrity.get("deviceRecognitionVerdict") or []
     if isinstance(verdicts, str):
         verdicts = [verdicts]
     verdict_set = {str(v).strip().upper() for v in verdicts}
     if not verdict_set.intersection(_ACCEPTABLE_DEVICE):
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        joined = ",".join(sorted(verdict_set)) or "none"
+        raise auth_failure(f"device_integrity_rejected:{joined}")
 
     level = sorted(verdict_set.intersection(_ACCEPTABLE_DEVICE))[0]
     return f"{app_recognition}:{level}"
@@ -273,9 +302,9 @@ async def verify_android_play_integrity(
             request=request,
             metadata={"reason": "misconfigured", "device_id": ctx.device_id},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("misconfigured")
 
-    token = (request.headers.get(HEADER_PLAY_INTEGRITY_TOKEN) or "").strip()
+    token = extract_integrity_token(request, body)
     if not token:
         await emit_mobile_security_event(
             db,
@@ -284,7 +313,7 @@ async def verify_android_play_integrity(
             request=request,
             metadata={"reason": "missing_token", "device_id": ctx.device_id},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("missing_token")
 
     request_hash = _request_hash_hex(request, body)
     # One-time use of this request hash / token binding for the device.
@@ -301,7 +330,7 @@ async def verify_android_play_integrity(
             request=request,
             metadata={"reason": "request_hash_reuse", "device_id": ctx.device_id},
         )
-        raise ApiError(GENERIC_AUTH_FAILURE)
+        raise auth_failure("request_hash_reuse")
 
     try:
         payload = await decode_integrity_token(token, package)
@@ -311,13 +340,14 @@ async def verify_android_play_integrity(
             expected_digests=digests,
             expected_request_hash=request_hash,
         )
-    except ApiError:
+    except ApiError as exc:
+        reason = auth_failure_reason(exc.message) or "verification_failed"
         await emit_mobile_security_event(
             db,
             user.id,
             SecurityEventType.ANDROID_INTEGRITY_FAILED,
             request=request,
-            metadata={"reason": "verification_failed", "device_id": ctx.device_id},
+            metadata={"reason": reason, "device_id": ctx.device_id},
         )
         raise
 

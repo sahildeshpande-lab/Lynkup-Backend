@@ -286,7 +286,7 @@ async def test_missing_proof_headers_rejected(monkeypatch, fake_redis):
     _enabled(monkeypatch)
     with pytest.raises(ApiError) as exc:
         await verify_mobile_request_proof(_mock_request(headers={}), _user())
-    assert exc.value.message == GENERIC_AUTH_FAILURE
+    assert exc.value.message.startswith(GENERIC_AUTH_FAILURE)
 
 
 @pytest.mark.asyncio
@@ -340,7 +340,7 @@ async def test_expired_timestamp_rejected(monkeypatch, fake_redis):
             ),
             user,
         )
-    assert exc.value.message == GENERIC_AUTH_FAILURE
+    assert exc.value.message.startswith(GENERIC_AUTH_FAILURE)
 
 
 @pytest.mark.asyncio
@@ -366,7 +366,7 @@ async def test_future_timestamp_rejected(monkeypatch, fake_redis):
             ),
             user,
         )
-    assert exc.value.message == GENERIC_AUTH_FAILURE
+    assert exc.value.message.startswith(GENERIC_AUTH_FAILURE)
 
 
 @pytest.mark.asyncio
@@ -384,7 +384,7 @@ async def test_malformed_timestamp_rejected(monkeypatch, fake_redis):
             ),
             _user(),
         )
-    assert exc.value.message == GENERIC_AUTH_FAILURE
+    assert exc.value.message.startswith(GENERIC_AUTH_FAILURE)
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +419,7 @@ async def test_nonce_replay_rejected(monkeypatch, fake_redis):
     await verify_mobile_request_proof(_mock_request(headers=headers), user)
     with pytest.raises(ApiError) as exc:
         await verify_mobile_request_proof(_mock_request(headers=headers), user)
-    assert exc.value.message == GENERIC_AUTH_FAILURE
+    assert exc.value.message.startswith(GENERIC_AUTH_FAILURE)
 
 
 @pytest.mark.asyncio
@@ -443,7 +443,7 @@ async def test_redis_unavailable_during_nonce_enforcement(monkeypatch):
             ),
             user,
         )
-    assert exc.value.message == GENERIC_AUTH_FAILURE
+    assert exc.value.message.startswith(GENERIC_AUTH_FAILURE)
 
 
 # ---------------------------------------------------------------------------
@@ -470,7 +470,7 @@ async def test_no_per_device_key_fails_closed(monkeypatch, fake_redis):
             ),
             _user(),
         )
-    assert exc.value.message == GENERIC_AUTH_FAILURE
+    assert exc.value.message.startswith(GENERIC_AUTH_FAILURE)
 
 
 @pytest.mark.asyncio
@@ -526,7 +526,7 @@ async def test_invalid_hmac_rejected(monkeypatch, fake_redis):
             ),
             _user(),
         )
-    assert exc.value.message == GENERIC_AUTH_FAILURE
+    assert exc.value.message.startswith(GENERIC_AUTH_FAILURE)
 
 
 @pytest.mark.asyncio
@@ -550,7 +550,7 @@ async def test_wrong_device_id_fails_hmac(monkeypatch, fake_redis):
             ),
             _user(),
         )
-    assert exc.value.message == GENERIC_AUTH_FAILURE
+    assert exc.value.message.startswith(GENERIC_AUTH_FAILURE)
 
 
 # ---------------------------------------------------------------------------
@@ -626,7 +626,7 @@ async def test_redis_unavailable_during_rate_limiting(monkeypatch, fake_redis):
             ),
             user,
         )
-    assert exc.value.message == GENERIC_AUTH_FAILURE
+    assert exc.value.message.startswith(GENERIC_AUTH_FAILURE)
 
 
 # ---------------------------------------------------------------------------
