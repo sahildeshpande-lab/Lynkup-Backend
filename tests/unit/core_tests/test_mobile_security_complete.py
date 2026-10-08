@@ -171,14 +171,13 @@ def test_play_integrity_valid_payload():
     level = validate_integrity_payload(
         payload,
         expected_package="com.app",
-        expected_digests=["aa:bb:cc"],
         expected_request_hash=body_hash,
     )
     assert "PLAY_RECOGNIZED" in level
 
 
-def test_play_integrity_valid_without_configured_digests():
-    """Package + verdicts alone are enough when certificate digests are not configured."""
+def test_play_integrity_ignores_certificate_digests():
+    """Certificate digests in the token are ignored; package + verdicts are enough."""
     body_hash = hashlib.sha256(b"{}").hexdigest()
     payload = {
         "requestDetails": {"requestHash": body_hash, "requestPackageName": "com.app"},
@@ -192,7 +191,6 @@ def test_play_integrity_valid_without_configured_digests():
     level = validate_integrity_payload(
         payload,
         expected_package="com.app",
-        expected_digests=None,
         expected_request_hash=body_hash,
     )
     assert level.startswith("PLAY_RECOGNIZED:")
@@ -213,27 +211,6 @@ def test_play_integrity_wrong_package():
         validate_integrity_payload(
             payload,
             expected_package="com.app",
-            expected_digests=["aabbcc"],
-            expected_request_hash=body_hash,
-        )
-
-
-def test_play_integrity_wrong_cert():
-    body_hash = hashlib.sha256(b"").hexdigest()
-    payload = {
-        "requestDetails": {"requestHash": body_hash},
-        "appIntegrity": {
-            "packageName": "com.app",
-            "certificateSha256Digest": ["deadbeef"],
-            "appRecognitionVerdict": "PLAY_RECOGNIZED",
-        },
-        "deviceIntegrity": {"deviceRecognitionVerdict": ["MEETS_DEVICE_INTEGRITY"]},
-    }
-    with pytest.raises(ApiError, match="certificate_digest_mismatch"):
-        validate_integrity_payload(
-            payload,
-            expected_package="com.app",
-            expected_digests=["aabbcc"],
             expected_request_hash=body_hash,
         )
 
@@ -253,7 +230,6 @@ def test_play_integrity_insufficient_verdict():
         validate_integrity_payload(
             payload,
             expected_package="com.app",
-            expected_digests=["aabbcc"],
             expected_request_hash=body_hash,
         )
 
@@ -272,7 +248,6 @@ def test_play_integrity_request_hash_mismatch():
         validate_integrity_payload(
             payload,
             expected_package="com.app",
-            expected_digests=["aabbcc"],
             expected_request_hash="11" * 32,
         )
 
@@ -308,7 +283,7 @@ async def test_play_integrity_misconfigured_fails_closed(monkeypatch, mock_db):
         user=user,
     )
     with patch("core.security.mobile.play_integrity.emit_mobile_security_event", AsyncMock()):
-        with pytest.raises(ApiError, match="misconfigured"):
+        with pytest.raises(ApiError, match="missing_package_name"):
             await pi.verify_android_play_integrity(
                 mock_db(),
                 _request(headers={"X-Play-Integrity-Token": "tok"}),

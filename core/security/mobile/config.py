@@ -41,8 +41,10 @@ class MobileSecuritySettings(BaseSettings):
     # Android Play Integrity (required only when ANDROID_INTEGRITY_ENABLED=true).
     # OAuth uses FIREBASE_CREDENTIALS_JSON (or Firebase file-path fallbacks) — do not
     # introduce a separate Play Integrity service-account env var.
+    # Certificate digests are not enforced; package name + Google verdicts only.
     android_integrity_enabled: bool = Field(default=False, alias="ANDROID_INTEGRITY_ENABLED")
     play_integrity_package_name: str = Field(default="", alias="PLAY_INTEGRITY_PACKAGE_NAME")
+    # Kept for backward-compatible .env files; ignored by verification.
     play_integrity_certificate_digests: str = Field(
         default="",
         alias="PLAY_INTEGRITY_CERTIFICATE_DIGESTS",

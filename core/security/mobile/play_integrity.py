@@ -226,11 +226,11 @@ def validate_integrity_payload(
     payload: dict[str, Any],
     *,
     expected_package: str,
-    expected_digests: list[str] | None,
     expected_request_hash: str,
 ) -> str:
-    """Validate package, cert digest, request hash, and integrity verdicts.
+    """Validate package, request hash, and integrity verdicts from Google decode.
 
+    Certificate digests are not enforced (package + Play verdicts only).
     Returns a compact integrity level string for persistence.
     """
     request_details = payload.get("requestDetails") or {}
@@ -240,14 +240,6 @@ def validate_integrity_payload(
     pkg = (app_integrity.get("packageName") or request_details.get("requestPackageName") or "").strip()
     if pkg != expected_package:
         raise auth_failure("package_mismatch")
-
-    certs = app_integrity.get("certificateSha256Digest") or []
-    if isinstance(certs, str):
-        certs = [certs]
-    normalized_certs = {_normalize_digest(c) for c in certs}
-    expected = {_normalize_digest(d) for d in (expected_digests or [])}
-    if expected and not normalized_certs.intersection(expected):
-        raise auth_failure("certificate_digest_mismatch")
 
     # requestHash may be hex or base64 depending on client encoding; accept hex match.
     token_hash = (
@@ -293,16 +285,25 @@ async def verify_android_play_integrity(
         return
 
     package = (mobile_settings.play_integrity_package_name or "").strip()
-    digests = mobile_settings.play_integrity_certificate_digest_list
-    if not package or not digests or not firebase_play_integrity_credentials_configured():
+    # Package + Google credentials are required to decode; cert digests are skipped.
+    if not package:
         await emit_mobile_security_event(
             db,
             user.id,
             SecurityEventType.ANDROID_INTEGRITY_FAILED,
             request=request,
-            metadata={"reason": "misconfigured", "device_id": ctx.device_id},
+            metadata={"reason": "missing_package_name", "device_id": ctx.device_id},
         )
-        raise auth_failure("misconfigured")
+        raise auth_failure("missing_package_name")
+    if not firebase_play_integrity_credentials_configured():
+        await emit_mobile_security_event(
+            db,
+            user.id,
+            SecurityEventType.ANDROID_INTEGRITY_FAILED,
+            request=request,
+            metadata={"reason": "missing_credentials", "device_id": ctx.device_id},
+        )
+        raise auth_failure("missing_credentials")
 
     token = extract_integrity_token(request, body)
     if not token:
@@ -337,7 +338,6 @@ async def verify_android_play_integrity(
         level = validate_integrity_payload(
             payload,
             expected_package=package,
-            expected_digests=digests,
             expected_request_hash=request_hash,
         )
     except ApiError as exc:
@@ -353,8 +353,8 @@ async def verify_android_play_integrity(
 
     installation = ctx.installation
     installation.android_package_name = package
-    # Persist the matching digest from config (validated against token).
-    installation.android_certificate_digest = digests[0]
+    # Cert digests are not enforced; clear any stale digest from older enrollments.
+    installation.android_certificate_digest = None
     installation.android_integrity_level = level
     installation.android_last_verified_at = _utc_now()
     ensure_installation_hmac_secret(installation)
