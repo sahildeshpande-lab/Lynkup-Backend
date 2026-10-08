@@ -13,7 +13,11 @@ class AuthSettings(BaseSettings):
         extra="ignore",
     )
 
-    access_token_expire_minutes: int = Field(default=5, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
+    # development → skip Admin Origin checks (Postman/Swagger).
+    # production / staging → enforce ADMIN_ALLOWED_ORIGINS.
+    environment: str = Field(default="development", alias="ENVIRONMENT")
+
+    access_token_expire_minutes: int = Field(default=1440, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
     login_event_throttle_seconds: int = Field(default=300, alias="LOGIN_EVENT_THROTTLE_SECONDS")
     jwt_secret: str = Field(alias="JWT_SECRET")
     jwt_algorithm: str = Field(alias="JWT_ALGORITHM")
@@ -38,7 +42,7 @@ class AuthSettings(BaseSettings):
 
     # Web Admin JWT lifetimes (independent of mobile ACCESS_TOKEN_EXPIRE_MINUTES).
     admin_access_token_expire_minutes: int = Field(
-        default=5,
+        default=15,
         alias="ADMIN_ACCESS_TOKEN_EXPIRE_MINUTES",
     )
     admin_refresh_token_expire_minutes: int = Field(
@@ -73,7 +77,7 @@ class AuthSettings(BaseSettings):
         alias="ADMIN_SIGNING_RATE_LIMIT_WINDOW_SECONDS",
     )
     # Comma-separated browser Origins allowed for signed Web Admin requests.
-    # Empty list rejects all signed requests.
+    # Enforced when ENVIRONMENT is production/staging; skipped in development.
     admin_allowed_origins: str = Field(default="", alias="ADMIN_ALLOWED_ORIGINS")
 
     @property
@@ -83,6 +87,16 @@ class AuthSettings(BaseSettings):
             for origin in self.admin_allowed_origins.split(",")
             if origin.strip()
         ]
+
+    @property
+    def is_production_like(self) -> bool:
+        """True for production and staging — Origin allowlist is required."""
+        return self.environment.strip().lower() in {
+            "production",
+            "prod",
+            "staging",
+            "stage",
+        }
 
     @field_validator("jwt_algorithm", mode="before")
     @classmethod
