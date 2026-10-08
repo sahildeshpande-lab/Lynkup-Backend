@@ -13,7 +13,7 @@ class AuthSettings(BaseSettings):
         extra="ignore",
     )
 
-    access_token_expire_minutes: int = Field(default=1440, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
+    access_token_expire_minutes: int = Field(default=3, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
     login_event_throttle_seconds: int = Field(default=300, alias="LOGIN_EVENT_THROTTLE_SECONDS")
     jwt_secret: str = Field(alias="JWT_SECRET")
     jwt_algorithm: str = Field(alias="JWT_ALGORITHM")
@@ -38,7 +38,7 @@ class AuthSettings(BaseSettings):
 
     # Web Admin JWT lifetimes (independent of mobile ACCESS_TOKEN_EXPIRE_MINUTES).
     admin_access_token_expire_minutes: int = Field(
-        default=15,
+        default=3,
         alias="ADMIN_ACCESS_TOKEN_EXPIRE_MINUTES",
     )
     admin_refresh_token_expire_minutes: int = Field(
