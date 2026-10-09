@@ -44,7 +44,10 @@ from apps.engagement.services import (
 )
 from common.enums import ReactionType
 from core.database.session import get_session
-from core.security.auth import get_current_app_user, get_current_user
+from core.security.auth import (
+    get_current_app_user,
+    get_current_user_moderator_or_superadmin,
+)
 
 router = APIRouter(tags=["7] Post Engagement"])
 
@@ -161,15 +164,15 @@ async def update_post_bookmark(
     summary="List post reactions",
     description=(
         "Return reactors grouped by reaction type with summary counts. "
-        "Accessible to app users, moderators, viewers, and superadmins. "
-        "Optionally filter by reaction_type. "
+        "Auth: app users via Firebase idToken; staff via admin JWT "
+        "(+ RSA in production/staging). Optionally filter by reaction_type. "
         "Supports optional page and pageSize pagination; omit both to return all."
     ),
     include_in_schema=True,
 )
 async def list_post_reactions(
     post_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_user_moderator_or_superadmin)],
     db: Annotated[AsyncSession, Depends(get_session)],
     reaction_type: ReactionType | None = Query(
         default=None,
@@ -239,12 +242,13 @@ async def edit_comment_route(
     description=(
         "Return top-level comments with nested replies up to the configured max depth. "
         "Supports optional page and pageSize pagination; omit both to return all. "
-        "Accessible to app users, moderators, viewers, and superadmins."
+        "Auth: app users via Firebase idToken; staff (moderator/viewer/superadmin) via "
+        "admin JWT (+ RSA request signing in production/staging)."
     ),
 )
 async def list_post_comments(
     post_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_user_moderator_or_superadmin)],
     db: Annotated[AsyncSession, Depends(get_session)],
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     pageSize: Optional[int] = Query(None, ge=1, le=200, description="Page size for pagination"),
