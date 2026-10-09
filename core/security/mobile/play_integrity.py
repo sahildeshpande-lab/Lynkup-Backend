@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -19,7 +20,12 @@ from core.security.mobile.audit import emit_mobile_security_event
 from core.security.mobile.config import settings as mobile_settings
 from core.security.mobile.device import MobileSecurityContext
 from core.security.mobile.hmac_keys import ensure_installation_hmac_secret
-from core.security.mobile.request_proof import hash_request_body
+from core.security.mobile.request_proof import (
+    HEADER_DEVICE_ID,
+    HEADER_NONCE,
+    HEADER_TIMESTAMP,
+    canonical_request_bytes,
+)
 from core.security.mobile.store import (
     auth_failure,
     auth_failure_reason,
@@ -29,6 +35,8 @@ from core.security.mobile.store import (
 logger = logging.getLogger(__name__)
 
 HEADER_PLAY_INTEGRITY_TOKEN = "X-Play-Integrity-Token"
+# FE alias still seen in clients; prefer HEADER_PLAY_INTEGRITY_TOKEN.
+HEADER_PLAY_INTEGRITY_TOKEN_ALIAS = "X-Play-Integrity"
 _PLAY_INTEGRITY_SCOPE = "https://www.googleapis.com/auth/playintegrity"
 _DECODE_TIMEOUT_SECONDS = 15
 
@@ -164,10 +172,11 @@ def play_integrity_decode_url(package_name: str) -> str:
 
 
 def extract_integrity_token(request: Request, body: bytes) -> str:
-    """Read token from ``X-Play-Integrity-Token`` or JSON body fields."""
-    token = (request.headers.get(HEADER_PLAY_INTEGRITY_TOKEN) or "").strip()
-    if token:
-        return token
+    """Read token from ``X-Play-Integrity-Token`` (or alias) or JSON body fields."""
+    for header_name in (HEADER_PLAY_INTEGRITY_TOKEN, HEADER_PLAY_INTEGRITY_TOKEN_ALIAS):
+        token = (request.headers.get(header_name) or "").strip()
+        if token:
+            return token
     if not body:
         return ""
     try:
@@ -217,9 +226,52 @@ async def decode_integrity_token(token: str, package_name: str) -> dict[str, Any
         raise auth_failure("google_verification_unavailable")
 
 
+def compute_integrity_request_hash(
+    *,
+    method: str,
+    path: str,
+    query_string: str | None,
+    body: bytes | None,
+    timestamp: str | int,
+    nonce: str,
+    device_id: str,
+) -> str:
+    """Return SHA-256 hex of the mobile canonical request bytes.
+
+    Uses the same canonical fields as HMAC request proof
+    (method, path, query, body hash, timestamp, nonce, device id) so each
+    API call — including empty-body GETs — has a unique Play Integrity
+    ``requestHash``. FE must pass this hex (as bytes to ``setRequestHash``)
+    when minting the Integrity token.
+    """
+    canonical = canonical_request_bytes(
+        method=method,
+        path=path,
+        query_string=query_string,
+        body=body,
+        timestamp=timestamp,
+        nonce=nonce,
+        device_id=device_id,
+    )
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _request_hash_hex(request: Request, body: bytes) -> str:
-    # Bind Integrity requestHash to raw body SHA-256 (same as canonical BODY_HASH).
-    return hash_request_body(body)
+    """Bind Integrity requestHash to the per-request canonical digest."""
+    device_id = (request.headers.get(HEADER_DEVICE_ID) or "").strip()
+    timestamp = (request.headers.get(HEADER_TIMESTAMP) or "").strip()
+    nonce = (request.headers.get(HEADER_NONCE) or "").strip()
+    if not device_id or not timestamp or not nonce:
+        raise auth_failure("missing_proof_headers")
+    return compute_integrity_request_hash(
+        method=request.method,
+        path=request.url.path,
+        query_string=request.url.query,
+        body=body,
+        timestamp=timestamp,
+        nonce=nonce,
+        device_id=device_id,
+    )
 
 
 def validate_integrity_payload(
@@ -316,7 +368,20 @@ async def verify_android_play_integrity(
         )
         raise auth_failure("missing_token")
 
-    request_hash = _request_hash_hex(request, body)
+    try:
+        # Per-request digest (includes timestamp + nonce) — not body hash alone.
+        request_hash = _request_hash_hex(request, body)
+    except ApiError as exc:
+        reason = auth_failure_reason(exc.message) or "missing_proof_headers"
+        await emit_mobile_security_event(
+            db,
+            user.id,
+            SecurityEventType.ANDROID_INTEGRITY_FAILED,
+            request=request,
+            metadata={"reason": reason, "device_id": ctx.device_id},
+        )
+        raise
+
     # One-time use of this request hash / token binding for the device.
     claimed = await claim_integrity_request_nonce(
         user_id=user.id,

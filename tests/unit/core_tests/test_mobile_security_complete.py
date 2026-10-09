@@ -252,6 +252,57 @@ def test_play_integrity_request_hash_mismatch():
         )
 
 
+def test_integrity_request_hash_unique_per_nonce_for_empty_body():
+    """Empty-body GETs must not collide when timestamp/nonce differ."""
+    common = dict(
+        method="GET",
+        path="/api/v1/myprofile",
+        query_string="",
+        body=b"",
+        timestamp=1728400000,
+        device_id="device-1",
+    )
+    a = pi.compute_integrity_request_hash(**common, nonce="nonce-a")
+    b = pi.compute_integrity_request_hash(**common, nonce="nonce-b")
+    assert a != b
+    assert len(a) == 64
+
+
+def test_integrity_request_hash_from_request_requires_proof_headers():
+    with pytest.raises(ApiError, match="missing_proof_headers"):
+        pi._request_hash_hex(_request(headers={"X-Device-Id": "d1"}), b"")
+
+    digest = pi._request_hash_hex(
+        _request(
+            headers={
+                "X-Device-Id": "d1",
+                "X-Timestamp": "1728400000",
+                "X-Nonce": "n1",
+            },
+            method="GET",
+            path="/api/v1/feed",
+        ),
+        b"",
+    )
+    expected = pi.compute_integrity_request_hash(
+        method="GET",
+        path="/api/v1/feed",
+        query_string="",
+        body=b"",
+        timestamp="1728400000",
+        nonce="n1",
+        device_id="d1",
+    )
+    assert digest == expected
+
+
+def test_extract_integrity_token_accepts_alias_header():
+    req = _request(headers={"X-Play-Integrity": "tok-alias"})
+    assert pi.extract_integrity_token(req, b"") == "tok-alias"
+    req2 = _request(headers={"X-Play-Integrity-Token": "tok-primary"})
+    assert pi.extract_integrity_token(req2, b"") == "tok-primary"
+
+
 @pytest.mark.asyncio
 async def test_play_integrity_disabled_is_noop(monkeypatch, mock_db):
     monkeypatch.setattr(mobile_settings, "android_integrity_enabled", False)

@@ -60,7 +60,13 @@ async def android_integrity_enroll(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """Validate FE integrity_token (header or JSON body) and persist Android security state."""
+    """Validate FE integrity_token (header or JSON body) and persist Android security state.
+
+    Requires ``X-Device-Id``, ``X-Timestamp``, ``X-Nonce``, and a Play Integrity
+    token whose ``requestHash`` is SHA-256 of the mobile canonical request
+    (same fields as HMAC). Token header: ``X-Play-Integrity-Token`` (or
+    ``X-Play-Integrity`` / JSON body fields).
+    """
     if current_user.role != "user":
         raise ApiError("Insufficient permissions")
     if not mobile_settings.android_integrity_enabled:

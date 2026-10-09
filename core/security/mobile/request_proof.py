@@ -14,6 +14,10 @@ Canonical form (LF newlines, no trailing newline after DEVICE_ID)::
 
 HMAC-SHA256 over UTF-8 canonical bytes; signature is standard base64.
 
+Play Integrity ``requestHash`` (when enabled on every API) is
+``SHA-256(canonical_utf8_bytes).hexdigest()`` — same canonical fields —
+so empty-body GETs remain unique per timestamp/nonce.
+
 **No global/static app-wide HMAC secret.** Keys come from per-device
 ``user_installations.mobile_hmac_secret`` (issued at enrollment).
 
