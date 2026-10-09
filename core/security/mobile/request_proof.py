@@ -120,9 +120,25 @@ async def resolve_device_hmac_key(
     device_id: str,
     *,
     installation: UserInstallation | None = None,
+    db: AsyncSession | None = None,
 ) -> bytes | None:
-    """Return per-device HMAC key from the installation when available."""
-    _ = (user, device_id)
+    """Return per-device HMAC key from the installation when available.
+
+    When ``installation`` is omitted (e.g. shared ``*_secured`` routes that
+    call proof from ``authenticate_request``), load
+    ``user_installations`` by ``(user_id, device_id)`` if ``db`` is provided.
+    """
+    if installation is None and db is not None and device_id:
+        from sqlmodel import select
+
+        installation = (
+            await db.execute(
+                select(UserInstallation).where(
+                    UserInstallation.user_id == user.id,
+                    UserInstallation.device_id == device_id,
+                )
+            )
+        ).scalar_one_or_none()
     return hmac_key_from_installation(installation)
 
 
@@ -216,7 +232,12 @@ async def verify_mobile_request_proof(
         raise auth_failure("nonce_replay")
 
     request_bound = bool(getattr(request.state, "mobile_request_bound", False))
-    key = await resolve_device_hmac_key(user, device_id, installation=installation)
+    key = await resolve_device_hmac_key(
+        user,
+        device_id,
+        installation=installation,
+        db=db,
+    )
 
     body = await request.body()
     message = canonical_request_bytes(

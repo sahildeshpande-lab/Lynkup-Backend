@@ -12,11 +12,12 @@ from uuid import uuid4
 import pytest
 from fastapi.security import HTTPAuthorizationCredentials
 
-from apps.accounts.db_models import User
+from apps.accounts.db_models import User, UserInstallation
 from common.enums import UserStatus
 from common.exceptions import ApiError
 from core.security.mobile import request_proof as proof
 from core.security.mobile.config import settings as mobile_settings
+from core.security.mobile.hmac_keys import decode_mobile_hmac_secret, generate_mobile_hmac_secret
 from core.security.mobile.rate_limit import (
     RATE_LIMIT_MESSAGE,
     consume_mobile_rate_limit,
@@ -471,6 +472,74 @@ async def test_no_per_device_key_fails_closed(monkeypatch, fake_redis):
             _user(),
         )
     assert exc.value.message.startswith(GENERIC_AUTH_FAILURE)
+
+
+@pytest.mark.asyncio
+async def test_resolve_device_hmac_key_loads_installation_from_db():
+    """Shared *_secured routes pass db without installation; load secret from DB."""
+    user = _user()
+    secret = generate_mobile_hmac_secret()
+    installation = UserInstallation(
+        id=uuid4(),
+        user_id=user.id,
+        device_id="device-1",
+        platform="android",
+        is_active=True,
+        mobile_hmac_secret=secret,
+    )
+
+    class _Result:
+        def scalar_one_or_none(self):
+            return installation
+
+    db = SimpleNamespace(execute=AsyncMock(return_value=_Result()))
+
+    key = await resolve_device_hmac_key(user, "device-1", db=db)
+    assert key == decode_mobile_hmac_secret(secret)
+    db.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_verify_proof_uses_db_installation_secret(monkeypatch, fake_redis):
+    """Catalog-style proof (no installation kwarg) succeeds when DB has hmacSecret."""
+    _enabled(monkeypatch)
+    user = _user()
+    device_id = "device-1"
+    secret = generate_mobile_hmac_secret()
+    key = decode_mobile_hmac_secret(secret)
+    assert key is not None
+    installation = UserInstallation(
+        id=uuid4(),
+        user_id=user.id,
+        device_id=device_id,
+        platform="android",
+        is_active=True,
+        mobile_hmac_secret=secret,
+    )
+
+    class _Result:
+        def scalar_one_or_none(self):
+            return installation
+
+    db = SimpleNamespace(execute=AsyncMock(return_value=_Result()))
+    ts = int(time.time())
+    nonce = "n-db-hmac"
+    body = b""
+    sig = _sign(key=key, body=body, timestamp=ts, nonce=nonce, device_id=device_id)
+
+    await verify_mobile_request_proof(
+        _mock_request(
+            body=body,
+            headers={
+                HEADER_DEVICE_ID: device_id,
+                HEADER_TIMESTAMP: str(ts),
+                HEADER_NONCE: nonce,
+                HEADER_SIGNATURE: sig,
+            },
+        ),
+        user,
+        db=db,
+    )
 
 
 @pytest.mark.asyncio

@@ -138,15 +138,22 @@ async def _verify_mobile_identity(
     return await get_current_user(credentials, db)
 
 
-async def _verify_mobile_request_proof(request: Request, user: User) -> None:
+async def _verify_mobile_request_proof(
+    request: Request,
+    user: User,
+    db: AsyncSession | None = None,
+) -> None:
     """Mobile request proof: timestamp + nonce + HMAC.
 
     Delegates to ``core.security.mobile`` when ``MOBILE_SECURITY_ENABLED``.
     No-op when the feature flag is off (backward compatible).
+
+    Pass ``db`` so HMAC can load ``user_installations.mobile_hmac_secret``
+    when proof runs outside the mobile pipeline (shared ``*_secured`` routes).
     """
     from core.security.mobile.request_proof import verify_mobile_request_proof
 
-    await verify_mobile_request_proof(request, user)
+    await verify_mobile_request_proof(request, user, db=db)
 
 
 async def _authenticate_mobile(
@@ -159,7 +166,7 @@ async def _authenticate_mobile(
     if user.role != "user":
         # Staff must use the web admin JWT + RSA path on shared routes.
         raise ApiError("Session expired. Please sign in again.")
-    await _verify_mobile_request_proof(request, user)
+    await _verify_mobile_request_proof(request, user, db=db)
     mark_client_type(request, CLIENT_TYPE_MOBILE)
     return AuthenticatedRequest(
         client_type=CLIENT_TYPE_MOBILE,
@@ -205,7 +212,7 @@ async def authenticate_request(
         raise ApiError("Session expired. Please sign in again.")
     elif peeked_user is not None and peeked_user.role == "user":
         _ensure_active_user(peeked_user)
-        await _verify_mobile_request_proof(request, peeked_user)
+        await _verify_mobile_request_proof(request, peeked_user, db=db)
         mark_client_type(request, CLIENT_TYPE_MOBILE)
         auth = AuthenticatedRequest(
             client_type=CLIENT_TYPE_MOBILE,
