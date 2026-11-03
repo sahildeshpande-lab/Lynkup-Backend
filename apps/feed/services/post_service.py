@@ -42,6 +42,8 @@ from apps.moderation.services.moderator_assignment_service import (
     _fetch_active_moderator_ids,
     _fetch_superadmin_user_ids,
 )
+from apps.recommendations.services.post_keyword_service import log_post_keywords_best_effort
+from apps.recommendations.tasks import _enqueue_keyword_extraction_safely
 
 logger = logging.getLogger(__name__)
 
@@ -580,14 +582,18 @@ async def _assign_moderator_for_review(
     A moderator is assigned whenever a post transitions into ``processing`` or
     ``published`` and does not already have one. Assignment is skipped if a
     moderator is already set so an existing assignment is never overwritten.
+
+    Uses a savepoint so assignment failures never roll back the outer post
+    create/update transaction (and never expire sibling ORM objects mid-repair).
     """
     if post.state not in _MODERATION_STATES:
         return
     if post.moderator_id is not None:
         return
     try:
-        post.moderator_id = await assign_next_moderator_round_robin(db)
-        await db.flush()
+        async with db.begin_nested():
+            post.moderator_id = await assign_next_moderator_round_robin(db)
+            await db.flush()
     except ApiError as exc:
         logger.error(
             "Round-robin unavailable for post %s (state=%s): %s",
@@ -595,20 +601,24 @@ async def _assign_moderator_for_review(
             post.state,
             exc,
         )
-        await _assign_fallback_moderator(post, db)
+        post.moderator_id = None
+        try:
+            async with db.begin_nested():
+                await _assign_fallback_moderator(post, db)
+        except Exception:
+            logger.exception(
+                "Fallback moderator assignment failed for post %s (state=%s)",
+                post.id,
+                post.state,
+            )
+            post.moderator_id = None
     except Exception:
         logger.exception(
             "Unexpected error assigning moderator to post %s (state=%s)",
             post.id,
             post.state,
         )
-        await db.rollback()
-        refreshed = (
-            await db.execute(select(Post).where(Post.id == post.id))
-        ).scalar_one_or_none()
-        if refreshed is not None and refreshed.moderator_id is None:
-            await _assign_fallback_moderator(refreshed, db)
-            post.moderator_id = refreshed.moderator_id
+        post.moderator_id = None
 
     if post.moderator_id is not None:
         try:
@@ -654,11 +664,12 @@ async def _repair_unassigned_moderators(
     Repair broken moderator assignments for posts awaiting review.
 
     - ``moderator_id IS NULL`` → round-robin to an active moderator.
-    - ``moderator_id`` points to a deleted/inactive/non-holder user → Super Admin.
-    - Valid active moderator or Super Admin assignments are left unchanged.
+    - ``moderator_id`` points to a deleted/inactive/non-holder staff row → Super Admin.
+    - Valid active ``admin_users`` moderator or Super Admin assignments are left unchanged.
     """
     from sqlalchemy import and_, exists, or_
-    from apps.accounts.db_models import UserRole, Role
+    from apps.accounts.db_models import Role
+    from apps.administration.db_models import AdminUser
     from common.enums import UserStatus
 
     superadmin_ids = await _fetch_superadmin_user_ids(db)
@@ -666,13 +677,12 @@ async def _repair_unassigned_moderators(
 
     valid_holder = exists(
         select(1)
-        .select_from(User)
-        .join(UserRole, UserRole.user_id == User.id)
-        .join(Role, Role.id == UserRole.role_id)
+        .select_from(AdminUser)
+        .join(Role, Role.id == AdminUser.role_id)
         .where(
-            User.id == Post.moderator_id,
-            User.is_deleted.is_(False),
-            User.status == UserStatus.active,
+            AdminUser.id == Post.moderator_id,
+            AdminUser.is_deleted.is_(False),
+            AdminUser.status == UserStatus.active,
             Role.name.in_(["moderator", "superadmin"]),
         )
     )
@@ -832,7 +842,14 @@ async def save_post_service(
                 user_id,
                 post.state.value if hasattr(post.state, "value") else post.state,
             )
-            await log_post_keywords_best_effort(post.id, content_dict, user_id=user_id, db=db)
+            # await log_post_keywords_best_effort(post.id, content_dict, user_id=user_id, db=db)
+            task_id = _enqueue_keyword_extraction_safely(post_id=post.id,user_id=user_id,revision_number=post.revision_number,)
+            if not task_id:
+                logger.error(
+                    "Failed to enqueue keyword extraction for post_id=%s revision=%s",
+                    post.id,
+                    post.revision_number,
+                )
             if _should_sync_topics_for_post_state(post_state):
                 await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
         except ApiError:
@@ -915,7 +932,14 @@ async def save_post_service(
             user_id,
             post.state.value if hasattr(post.state, "value") else post.state,
         )
-        await log_post_keywords_best_effort(post.id, content_dict, user_id=user_id, db=db)
+        # await log_post_keywords_best_effort(post.id, content_dict, user_id=user_id, db=db)
+        task_id = _enqueue_keyword_extraction_safely(post_id=post.id,user_id=user_id,revision_number=post.revision_number,)
+        if not task_id:
+            logger.error(
+                "Failed to enqueue keyword extraction for post_id=%s revision=%s",
+                post.id,
+                post.revision_number,
+            )
         if _should_sync_topics_for_post_state(post_state, previous_state=previous_state):
             await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
         if previous_state == PostState.flagged or post.state == PostState.processing:
@@ -1059,7 +1083,14 @@ async def edit_post_service(
             user_id,
             post.state.value if hasattr(post.state, "value") else post.state,
         )
-        await log_post_keywords_best_effort(post.id, merged_content, user_id=user_id, db=db)
+        # await log_post_keywords_best_effort(post.id, merged_content, user_id=user_id, db=db)
+        task_id = _enqueue_keyword_extraction_safely(post_id=post.id,user_id=user_id,revision_number=post.revision_number,)
+        if not task_id:
+            logger.error(
+                "Failed to enqueue keyword extraction for post_id=%s revision=%s",
+                post.id,
+                post.revision_number,
+            )
         if should_sync_topics:
             await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
         if previous_state == PostState.flagged or post.state == PostState.processing:
@@ -1146,12 +1177,24 @@ async def publish_post_service(
             user_id,
             post.state.value if hasattr(post.state, "value") else post.state,
         )
-        await log_post_keywords_best_effort(
-            post.id,
-            post.content,
-            user_id=user_id,
-            db=db,
-        )
+        # await log_post_keywords_best_effort(
+        #     post.id,
+        #     post.content,
+        #     user_id=user_id,
+        #     db=db,
+        # )
+        # _enqueue_keyword_extraction_safely(
+        #     post_id=post.id,
+        #     user_id=user_id,
+        #     revision_number=post.revision_number,
+        # )
+        task_id = _enqueue_keyword_extraction_safely(post_id=post.id,user_id=user_id,revision_number=post.revision_number,)
+        if not task_id:
+            logger.error(
+                "Failed to enqueue keyword extraction for post_id=%s revision=%s",
+                    post.id,
+                    post.revision_number,
+                )
         if _should_sync_topics_for_post_state(post.state, previous_state=previous_state):
             await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
     except Exception as e:
@@ -1196,11 +1239,19 @@ async def admin_publish_post_service(
     """
     from apps.profiles.db_models import Profile
 
-    result = await db.execute(select(Post).where(Post.id == post_id))
+    result = await db.execute(select(Post).where(Post.id == post_id).with_for_update())
     post = result.scalar_one_or_none()
 
     if not post:
         raise ApiError("Post not found")
+
+    # Reject duplicate actions if the post is already in the requested state
+    if status == "flagged" and post.state == PostState.flagged:
+        raise ApiError("Post is already flagged")
+    if status == "reinstate" and post.state in (PostState.reinstate, PostState.published):
+        raise ApiError("Post is already reinstated")
+    if status == "published" and post.state == PostState.published:
+        raise ApiError("Post is already published")
 
     if status == "rejected":
         previous_state = post.state
@@ -1398,13 +1449,18 @@ async def admin_publish_post_service(
             },
         )
 
-        from apps.report.repositories.report_repository import clear_entity_report_queue_counts
+        # Reset in-queue report counts only when a post leaves processing via
+        # reinstate (author edits must not wipe prior reports toward threshold).
+        if status == "reinstate" and previous_state == PostState.processing:
+            from apps.report.repositories.report_repository import (
+                clear_entity_report_queue_counts,
+            )
 
-        await clear_entity_report_queue_counts(
-            db,
-            entity_type=ReportEntityType.post,
-            entity_id=post.id,
-        )
+            await clear_entity_report_queue_counts(
+                db,
+                entity_type=ReportEntityType.post,
+                entity_id=post.id,
+            )
 
         await db.commit()
         await db.refresh(post)
@@ -2339,14 +2395,16 @@ async def list_processing_posts_service(
 
     total_items = int((await db.execute(select(func.count(Post.id)).where(*filters))).scalar_one())
 
-    mod_user_alias = aliased(User)
+    from apps.administration.db_models import AdminUser
+
+    mod_admin_alias = aliased(AdminUser)
     mod_profile_alias = aliased(Profile)
 
     stmt = (
-        select(Post, Profile, mod_user_alias, mod_profile_alias)
+        select(Post, Profile, mod_admin_alias, mod_profile_alias)
         .outerjoin(Profile, Profile.user_id == Post.author_user_id)
-        .outerjoin(mod_user_alias, mod_user_alias.id == Post.moderator_id)
-        .outerjoin(mod_profile_alias, mod_profile_alias.user_id == Post.moderator_id)
+        .outerjoin(mod_admin_alias, mod_admin_alias.id == Post.moderator_id)
+        .outerjoin(mod_profile_alias, mod_profile_alias.admin_user_id == Post.moderator_id)
         .where(*filters)
         .options(selectinload(Post.attachments).selectinload(PostAttachment.media_asset))
         .order_by(Post.created_at.desc())
