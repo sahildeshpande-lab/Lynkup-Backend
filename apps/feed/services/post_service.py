@@ -43,7 +43,7 @@ from apps.moderation.services.moderator_assignment_service import (
     _fetch_superadmin_user_ids,
 )
 from apps.recommendations.services.post_keyword_service import log_post_keywords_best_effort
-from apps.recommendations.tasks import _enqueue_keyword_extraction_safely
+# from apps.recommendations.tasks import _enqueue_keyword_extraction_safely
 
 logger = logging.getLogger(__name__)
 
@@ -843,13 +843,13 @@ async def save_post_service(
                 post.state.value if hasattr(post.state, "value") else post.state,
             )
             # await log_post_keywords_best_effort(post.id, content_dict, user_id=user_id, db=db)
-            task_id = _enqueue_keyword_extraction_safely(post_id=post.id,user_id=user_id,revision_number=post.revision_number,)
-            if not task_id:
-                logger.error(
-                    "Failed to enqueue keyword extraction for post_id=%s revision=%s",
-                    post.id,
-                    post.revision_number,
-                )
+            # task_id = _enqueue_keyword_extraction_safely(post_id=post.id,user_id=user_id,revision_number=post.revision_number,)
+            # if not task_id:
+            #     logger.error(
+            #         "Failed to enqueue keyword extraction for post_id=%s revision=%s",
+            #         post.id,
+            #         post.revision_number,
+            #     )
             if _should_sync_topics_for_post_state(post_state):
                 await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
         except ApiError:
@@ -933,13 +933,13 @@ async def save_post_service(
             post.state.value if hasattr(post.state, "value") else post.state,
         )
         # await log_post_keywords_best_effort(post.id, content_dict, user_id=user_id, db=db)
-        task_id = _enqueue_keyword_extraction_safely(post_id=post.id,user_id=user_id,revision_number=post.revision_number,)
-        if not task_id:
-            logger.error(
-                "Failed to enqueue keyword extraction for post_id=%s revision=%s",
-                post.id,
-                post.revision_number,
-            )
+        # task_id = _enqueue_keyword_extraction_safely(post_id=post.id,user_id=user_id,revision_number=post.revision_number,)
+        # if not task_id:
+        #     logger.error(
+        #         "Failed to enqueue keyword extraction for post_id=%s revision=%s",
+        #         post.id,
+        #         post.revision_number,
+        #     )
         if _should_sync_topics_for_post_state(post_state, previous_state=previous_state):
             await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
         if previous_state == PostState.flagged or post.state == PostState.processing:
@@ -1084,13 +1084,13 @@ async def edit_post_service(
             post.state.value if hasattr(post.state, "value") else post.state,
         )
         # await log_post_keywords_best_effort(post.id, merged_content, user_id=user_id, db=db)
-        task_id = _enqueue_keyword_extraction_safely(post_id=post.id,user_id=user_id,revision_number=post.revision_number,)
-        if not task_id:
-            logger.error(
-                "Failed to enqueue keyword extraction for post_id=%s revision=%s",
-                post.id,
-                post.revision_number,
-            )
+        # task_id = _enqueue_keyword_extraction_safely(post_id=post.id,user_id=user_id,revision_number=post.revision_number,)
+        # if not task_id:
+        #     logger.error(
+        #         "Failed to enqueue keyword extraction for post_id=%s revision=%s",
+        #         post.id,
+        #         post.revision_number,
+        #     )
         if should_sync_topics:
             await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
         if previous_state == PostState.flagged or post.state == PostState.processing:
@@ -1188,13 +1188,13 @@ async def publish_post_service(
         #     user_id=user_id,
         #     revision_number=post.revision_number,
         # )
-        task_id = _enqueue_keyword_extraction_safely(post_id=post.id,user_id=user_id,revision_number=post.revision_number,)
-        if not task_id:
-            logger.error(
-                "Failed to enqueue keyword extraction for post_id=%s revision=%s",
-                    post.id,
-                    post.revision_number,
-                )
+        # task_id = _enqueue_keyword_extraction_safely(post_id=post.id,user_id=user_id,revision_number=post.revision_number,)
+        # if not task_id:
+        #     logger.error(
+        #         "Failed to enqueue keyword extraction for post_id=%s revision=%s",
+        #             post.id,
+        #             post.revision_number,
+        #         )
         if _should_sync_topics_for_post_state(post.state, previous_state=previous_state):
             await _sync_user_topics_best_effort(db, user_id, old_topics=old_topics)
     except Exception as e:
