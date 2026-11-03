@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Literal
 from uuid import UUID
 
 from core.database.session import get_session
@@ -174,7 +175,7 @@ async def delete_post(
 @router.get("/posts", response_model=ApiResponse)
 async def list_user_posts(
     user_id: UUID | None = Query(default=None, description="Filter posts by user id"),
-    state: str | None = Query(
+    state: Literal["all", "published", "flagged", "processing", "draft", "rejected"] | None = Query(
         default=None,
         description=(
             "Omit or 'all': for the authenticated user's own posts, returns "
@@ -188,7 +189,6 @@ async def list_user_posts(
             "Owner or staff (moderator/viewer/superadmin) may request flagged/processing "
             "for a user_id; regular visitors are limited to published."
         ),
-        enum=["all", "published", "flagged", "processing", "draft", "rejected"],
     ),
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
